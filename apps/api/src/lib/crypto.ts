@@ -1,4 +1,4 @@
-// WebCrypto helpers: tokens, hashing, password hashing, AES-GCM for stored secrets, TOTP.
+// WebCrypto helpers: tokens, hashing, AES-GCM for stored secrets, TOTP. (Password hashing lives in password.ts and runs in Postgres.)
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -33,29 +33,6 @@ export function safeEqual(a: string, b: string): boolean {
   let r = 0;
   for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return r === 0;
-}
-
-// ---- passwords: PBKDF2-SHA256, salted. Format: pbkdf2$<iterations>$<salt>$<hash>
-const ITERATIONS = 100_000;
-
-async function pbkdf2(password: string, salt: Uint8Array, iterations: number): Promise<string> {
-  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, key, 256);
-  return b64(bits);
-}
-export async function hashPassword(password: string): Promise<string> {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  return `pbkdf2$${ITERATIONS}$${b64(salt)}$${await pbkdf2(password, salt, ITERATIONS)}`;
-}
-export async function verifyPassword(password: string, stored: string | null): Promise<boolean> {
-  if (!stored) {
-    // Spend comparable time so a missing account is not distinguishable by timing.
-    await pbkdf2(password, new Uint8Array(16), ITERATIONS);
-    return false;
-  }
-  const [scheme, iter, salt, hash] = stored.split('$');
-  if (scheme !== 'pbkdf2' || !iter || !salt || !hash) return false;
-  return safeEqual(await pbkdf2(password, unb64(salt), Number(iter)), hash);
 }
 
 // ---- AES-GCM for connection credentials and TOTP secrets

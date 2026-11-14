@@ -4,7 +4,8 @@ import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthe
 import { appSettings, invites, passkeys, passwordResets, sessions, users, webauthnChallenges } from '@niko/db';
 import { isEmail, passwordProblem } from '@niko/shared';
 import type { AppEnv } from '../env';
-import { b64url, hashPassword, randomToken, safeEqual, sha256, unb64, verifyPassword } from '../lib/crypto';
+import { b64url, randomToken, safeEqual, sha256, unb64 } from '../lib/crypto';
+import { hashPassword, verifyPassword } from '../lib/password';
 import { esc, sendEmail } from '../lib/email';
 import { audit, clientIp, endSession, requireUser, startSession, tooMany } from '../lib/session';
 
@@ -35,7 +36,7 @@ auth.post('/setup', async (c) => {
   const bad = passwordProblem(b.password);
   if (bad) return c.json({ error: bad }, 400);
   const [u] = await c.get('db').insert(users).values({
-    email: b.email, name: (b.name ?? '').slice(0, 80), passwordHash: await hashPassword(b.password!), role: 'admin', isOwner: true,
+    email: b.email, name: (b.name ?? '').slice(0, 80), passwordHash: await hashPassword(c.get('db'), b.password!), role: 'admin', isOwner: true,
   }).returning();
   await audit(c, 'setup.owner_created', { email: b.email }, u!.id);
   await startSession(c, u!.id, 'app');
@@ -49,7 +50,7 @@ auth.post('/sign-in', async (c) => {
     return c.json({ error: 'Too many attempts. Try again in 15 minutes.' }, 429);
   }
   const u = await findUser(c.get('db'), b.email);
-  const ok = await verifyPassword(b.password, u?.passwordHash ?? null);
+  const ok = await verifyPassword(c.get('db'), b.password, u?.passwordHash ?? null);
   if (!u || !ok) {
     await audit(c, 'signin.failed', { email: b.email });
     return c.json({ error: 'Email or password is not correct.' }, 401);
@@ -75,7 +76,7 @@ auth.post('/sign-up', async (c) => {
   if (!(await findUser(c.get('db'), b.email))) {
     // New accounts stay switched off until an admin enables them.
     const [u] = await c.get('db').insert(users).values({
-      email: b.email, name: (b.name ?? '').slice(0, 80), passwordHash: await hashPassword(b.password!), status: 'off',
+      email: b.email, name: (b.name ?? '').slice(0, 80), passwordHash: await hashPassword(c.get('db'), b.password!), status: 'off',
     }).returning();
     await audit(c, 'signup.requested', { email: b.email }, u!.id);
   }
@@ -106,7 +107,7 @@ auth.post('/invite/:token', async (c) => {
   if (bad) return c.json({ error: bad }, 400);
   if (await findUser(db, inv.email)) return c.json({ error: 'An account with this email already exists. Sign in instead.' }, 409);
   const [u] = await db.insert(users).values({
-    email: inv.email, name: (b.name ?? '').slice(0, 80), passwordHash: await hashPassword(b.password!), role: inv.role === 'admin' ? 'admin' : 'member',
+    email: inv.email, name: (b.name ?? '').slice(0, 80), passwordHash: await hashPassword(c.get('db'), b.password!), role: inv.role === 'admin' ? 'admin' : 'member',
   }).returning();
   await db.update(invites).set({ usedAt: new Date() }).where(eq(invites.id, inv.id));
   await audit(c, 'invite.accepted', { email: inv.email }, u!.id);
@@ -137,7 +138,7 @@ auth.post('/reset', async (c) => {
     .where(and(eq(passwordResets.tokenHash, await sha256(b.token)), isNull(passwordResets.usedAt), gt(passwordResets.expiresAt, new Date()))).limit(1);
   const r = rows[0];
   if (!r) return c.json({ error: 'This reset link has expired or was already used.' }, 400);
-  await db.update(users).set({ passwordHash: await hashPassword(b.password!) }).where(eq(users.id, r.userId));
+  await db.update(users).set({ passwordHash: await hashPassword(c.get('db'), b.password!) }).where(eq(users.id, r.userId));
   await db.update(passwordResets).set({ usedAt: new Date() }).where(eq(passwordResets.id, r.id));
   // Signing out everywhere after a reset.
   await db.delete(sessions).where(eq(sessions.userId, r.userId));

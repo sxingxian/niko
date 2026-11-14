@@ -76,6 +76,7 @@ export function isEmail(v: unknown): v is string {
 export function passwordProblem(v: unknown): string | null {
   if (typeof v !== 'string') return 'Enter a password.';
   if (v.length < 12) return 'Use 12 or more characters.';
-  if (v.length > 200) return 'That password is too long.';
+  // bcrypt reads at most 72 bytes; refuse anything longer so no part of a password is silently ignored.
+  if (new TextEncoder().encode(v).length > 72) return 'Use 72 characters or fewer.';
   return null;
 }

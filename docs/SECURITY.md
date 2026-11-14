@@ -2,7 +2,7 @@
 
 ## What the code does
 
-- **Passwords**: PBKDF2-SHA256, 100,000 rounds, per-user salt. Minimum 12 characters.
+- **Passwords**: bcrypt (cost 12), computed inside Postgres by the `pgcrypto` extension, not in the Worker. 12 to 72 characters. The password travels from the Worker to Neon over TLS as a bound query parameter and is never stored in plain form.
 - **Sessions**: random 256-bit token in an `HttpOnly`, `Secure`, `SameSite=Lax`, `__Host-` cookie; only its SHA-256 hash is stored. App sessions last 30 days, admin sessions 8 hours.
 - **Cross-site requests**: every state-changing API call must carry an `Origin` that matches the host. Webhooks and the OAuth return leg are exempt and authenticate by signature, secret or state instead.
 - **Admin**: separate session cookie; password then a time-based code from an authenticator app. Admin routes refuse sessions that have not passed the second factor.
@@ -25,4 +25,4 @@
 - **Attempt limits are stored in Postgres** and are approximate under bursts. Add a Cloudflare rate-limiting rule on `/api/auth/*` and `/api/admin/*` for a firmer limit.
 - **Telegram bots** see only messages people send to the bot. The Telegram file link is fetched with the bot token on demand; the token never reaches the browser.
 - **Audit log and chat history** grow without pruning. Add retention if this runs for long.
-- **PBKDF2 cost** is set by what a Worker can afford. If you move to a paid plan, raising the rounds is worthwhile.
+- **Password hashing in the database** means the plain password is briefly visible to Postgres while it is hashed. Do not enable statement logging that records query parameters on the Neon project.

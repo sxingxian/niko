@@ -3,7 +3,8 @@ import { Hono } from 'hono';
 import { appSettings, auditLog, invites, sessions, users } from '@niko/db';
 import { isEmail } from '@niko/shared';
 import type { AppEnv } from '../env';
-import { newTotpSecret, randomToken, seal, sha256, totpUri, unseal, verifyPassword, verifyTotp } from '../lib/crypto';
+import { newTotpSecret, randomToken, seal, sha256, totpUri, unseal, verifyTotp } from '../lib/crypto';
+import { verifyPassword } from '../lib/password';
 import { sendEmail } from '../lib/email';
 import { audit, clientIp, endSession, requireAdmin, requireAdminPassword, startSession, tooMany } from '../lib/session';
 import { findUser, registrationMode } from './auth';
@@ -18,7 +19,7 @@ admin.post('/sign-in', async (c) => {
     return c.json({ error: 'Too many attempts. Try again in 15 minutes.' }, 429);
   }
   const u = await findUser(c.get('db'), b.email);
-  const ok = await verifyPassword(b.password, u?.passwordHash ?? null);
+  const ok = await verifyPassword(c.get('db'), b.password, u?.passwordHash ?? null);
   if (!u || !ok || u.role !== 'admin' || u.status !== 'active') {
     await audit(c, 'admin.signin.failed', { email: b.email });
     return c.json({ error: 'Email or password is not correct.' }, 401);

@@ -74,5 +74,5 @@ npm run dev -w @niko/app # app with hot reload, proxying /api
 ## Free-tier limits to know
 
 - **Workers AI** has a daily free allowance; once it is used up, requests fail until the next day. Change the model with the `AI_MODEL` variable.
-- **Workers Free** allows very little CPU time per request. Password hashing (PBKDF2, 100,000 rounds) is the heaviest thing Niko does; if sign-ins fail with a CPU-limit error, move to the Workers Paid plan.
+- **Password hashing** runs in Neon (bcrypt via `pgcrypto`), not in the Worker, so it does not count against the Worker's CPU limit. Each sign-in costs a fraction of a second of database compute.
 - **Wake word** works only while Niko is open in a browser that supports speech recognition (Chrome, Edge, Safari) and the microphone is allowed.
