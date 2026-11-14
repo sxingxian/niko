@@ -21,7 +21,6 @@
     "AI_MODEL": "@cf/meta/llama-3.1-8b-instruct"
   }
   // Secrets (set with `wrangler secret put NAME`, never committed):
-  // DATABASE_URL, ENCRYPTION_KEY, BOOTSTRAP_TOKEN, RESEND_API_KEY,
-  // GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET,
-  // NOTION_CLIENT_ID, NOTION_CLIENT_SECRET, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET
+  // DATABASE_URL, ENCRYPTION_KEY, BOOTSTRAP_TOKEN, RESEND_API_KEY
+  // Google, Microsoft, Notion and Slack keys are NOT set here: each account saves its own on the Connections screen.
 }

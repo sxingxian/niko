@@ -156,9 +156,19 @@ export const recoveryCodes = pgTable('recovery_codes', {
   createdAt: ts('created_at').notNull().defaultNow(),
 });
 
+export const providerApps = pgTable('provider_apps', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull(),
+  app: text('app').notNull(),
+  secretEnc: text('secret_enc').notNull(),
+  clientIdHint: text('client_id_hint').notNull().default(''),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
 export const schema = {
   users, sessions, invites, passwordResets, passkeys, webauthnChallenges, appSettings,
-  connections, oauthStates, messages, pendingSends, chatTurns, auditLog, authAttempts, recoveryCodes,
+  connections, oauthStates, messages, pendingSends, chatTurns, auditLog, authAttempts, recoveryCodes, providerApps,
 };
 
 export function createDb(databaseUrl: string) {

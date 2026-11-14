@@ -2,7 +2,7 @@
 import { startRegistration } from '@simplewebauthn/browser';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { COLOURS, GROUPS, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef } from '@niko/shared';
+import { COLOURS, GROUPS, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef } from '@niko/shared';
 import { api, Field, Icon, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
 
@@ -22,6 +22,7 @@ function Page({ title, right, children }: { title: string; right?: ReactNode; ch
 }
 
 type Prov = ProviderDef & { linked: boolean; configured: boolean; label: string | null };
+type MyApp = AppDef & { configured: boolean; hint: string | null; uses: string[]; eventsUrl: string | null };
 
 export function Connections() {
   const { me, refreshMe } = useNiko();
@@ -32,8 +33,14 @@ export function Connections() {
   const [shown, setShown] = useState<{ inboundUrl: string; signingSecret: string } | null>(null);
   const dlg = useRef<HTMLDialogElement>(null);
   const [params, setParams] = useSearchParams();
+  // Each account brings its own Google, Microsoft, Notion and Slack app keys.
+  const [apps, setApps] = useState<MyApp[]>([]);
+  const [redirects, setRedirects] = useState<string[]>([]);
+  const [appForm, setAppForm] = useState<{ app: MyApp; then: Prov | null } | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const appDlg = useRef<HTMLDialogElement>(null);
 
-  const load = useCallback(() => api<{ providers: Prov[] }>('/connections').then((r) => setList(r.providers)).catch((e) => setNote({ ok: false, text: e.message })), []);
+  const load = useCallback(() => api<{ providers: Prov[]; apps: MyApp[]; redirectUrls: string[] }>('/connections').then((r) => { setList(r.providers); setApps(r.apps); setRedirects(r.redirectUrls); }).catch((e) => setNote({ ok: false, text: e.message })), []);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
     const ok = params.get('linked'), bad = params.get('failed');
@@ -51,10 +58,34 @@ export function Connections() {
     }
     if (p.kind === 'planned') return setNote({ ok: false, text: `${p.name} is not built yet.` });
     if (p.kind === 'oauth') {
-      try { const r = await api<{ url: string }>(`/connections/${p.id}/oauth`); location.href = r.url; } catch (e: any) { setNote({ ok: false, text: e.message }); }
-      return;
+      const mine = apps.find((a) => a.id === p.app);
+      if (mine && !mine.configured) return openApp(mine, p);
+      return signIn(p);
     }
     setValues({}); setShown(null); setForm(p); dlg.current?.showModal();
+  };
+  const signIn = async (p: Prov) => {
+    try { const r = await api<{ url: string }>(`/connections/${p.id}/oauth`); location.href = r.url; } catch (e: any) { setNote({ ok: false, text: e.message }); }
+  };
+  const openApp = (app: MyApp, then: Prov | null) => { setNote(null); setValues({}); setConfirmRemove(null); setAppForm({ app, then }); appDlg.current?.showModal(); };
+  const saveApp = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!appForm) return;
+    const { app, then } = appForm;
+    try {
+      await api(`/apps/${app.id}`, { method: 'PUT', body: values });
+      setValues({});
+      appDlg.current?.close();
+      if (then) return signIn(then);
+      await load();
+      setNote({ ok: true, text: `Your ${app.name} keys are saved. Connect ${app.uses.join(', ')} when you are ready.` });
+    } catch (x: any) { setNote({ ok: false, text: x.message }); appDlg.current?.close(); }
+  };
+  const removeApp = async (app: MyApp) => {
+    if (confirmRemove !== app.id) return setConfirmRemove(app.id);
+    setConfirmRemove(null);
+    await api(`/apps/${app.id}`, { method: 'DELETE' }).catch((e) => setNote({ ok: false, text: e.message }));
+    await load();
   };
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -78,7 +109,7 @@ export function Connections() {
         {list.filter((p) => p.group === id).map((p) => (
           <div key={p.id} className="row">
             <span className={'dot' + (p.linked ? ' on' : '')} />
-            <span className="txt"><b>{p.name}</b><span className="sub">{p.label ?? p.how}{p.kind === 'oauth' && !p.configured ? ' · needs server setup' : ''}{p.linked && !p.can.read && !p.can.send && p.kind !== 'token' ? ' · saved, not used yet' : ''}</span></span>
+            <span className="txt"><b>{p.name}</b><span className="sub">{p.label ?? p.how}{p.kind === 'oauth' && !p.configured ? ' · needs your app keys first' : ''}{p.linked && !p.can.read && !p.can.send && p.kind !== 'token' ? ' · saved, not used yet' : ''}</span></span>
             {p.kind === 'builtin' ? <span className="k">Built in</span> : p.kind === 'planned' ? <span className="k">Later</span>
               : <button className={'bt' + (p.linked ? '' : ' fill')} onClick={() => act(p)}>{p.linked ? 'Remove' : 'Connect'}</button>}
           </div>
@@ -103,11 +134,42 @@ export function Connections() {
             <div className="row"><span className="txt"><b>Send and receive images and files</b><span className="sub">Passed straight through, never stored. Only name, size and time are logged.</span></span><Switch on={perm.files} onChange={(v) => setPerm({ files: v })} label="Send and receive images and files" /></div>
             <div className="row"><span className="txt"><b>Send only after I approve</b><span className="sub">Replies: voice with a 10-second countdown. The rest: a tap.</span></span><span className="k" style={{ border: '1px solid rgba(255,255,255,.3)', borderRadius: 999, padding: '6px 12px' }}>Locked</span></div>
           </section>
-          <p className="g sub" style={{ padding: '16px 24px', boxShadow: 'none' }}>Removing a link deletes its stored credentials straight away.</p>
+          <section className="g panel" aria-label="Your app keys">
+            <header><h2>Your app keys</h2><span className="sub">Yours only · not shared with other accounts</span></header>
+            {apps.map((a) => (
+              <div key={a.id} className="row">
+                <span className={'dot' + (a.configured ? ' on' : '')} />
+                <span className="txt"><b>{a.name}</b><span className="sub">{a.configured ? `Client ID ${a.hint}` : `For ${a.uses.join(', ')}`}</span></span>
+                <span style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                  {a.configured && <button className="bt" onClick={() => removeApp(a)}>{confirmRemove === a.id ? 'Confirm remove' : 'Remove'}</button>}
+                  <button className={'bt' + (a.configured ? '' : ' fill')} onClick={() => openApp(a, null)}>{a.configured ? 'Change' : 'Add keys'}</button>
+                </span>
+              </div>
+            ))}
+          </section>
+          <p className="g sub" style={{ padding: '16px 24px', boxShadow: 'none' }}>Removing a link or your app keys deletes the stored credentials straight away. Changing or removing keys also removes the links made with them.</p>
         </div>
         <div className="stack">{panel('calendar')}{panel('notes')}{panel('ai')}</div>
         <div className="stack">{panel('automation')}{panel('messaging')}</div>
       </div>
+
+      <dialog ref={appDlg} className="sheet" onClose={() => setAppForm(null)}>
+        {appForm && (
+          <form onSubmit={saveApp}>
+            <h2 style={{ fontWeight: 500, fontSize: 24 }}>Your {appForm.app.name} app keys</h2>
+            <p className="sub">Niko signs in to {appForm.app.uses.join(', ')} through an app you register yourself, so your data never passes through anyone else’s app. Create it at: {appForm.app.where}</p>
+            {redirects.map((r, i) => (
+              <Field key={r} label={i === 0 ? 'Redirect address to register (add each one)' : 'Redirect address'}><input className="in mono" readOnly value={r} onFocus={(e) => e.currentTarget.select()} /></Field>
+            ))}
+            {appForm.app.eventsUrl && <Field label="Event request address (to receive messages)"><input className="in mono" readOnly value={appForm.app.eventsUrl} onFocus={(e) => e.currentTarget.select()} /></Field>}
+            {appForm.app.fields.map((f) => (
+              <Field key={f.key} label={f.label + (f.optional ? ' · optional' : '')}><input className="in" type={f.type === 'password' ? 'password' : 'text'} autoComplete="off" spellCheck={false} placeholder={f.placeholder} required={!f.optional} value={values[f.key] ?? ''} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} /></Field>
+            ))}
+            <p className="sub">Stored encrypted and never shown again.{appForm.app.configured ? ' Saving new keys removes the links made with the old ones.' : ''}</p>
+            <div style={{ display: 'flex', gap: 10 }}><button type="button" className="sec" style={{ flex: 1 }} onClick={() => appDlg.current?.close()}>Cancel</button><button className="pri" style={{ flex: 1 }}>{appForm.then ? 'Save and sign in' : 'Save'}</button></div>
+          </form>
+        )}
+      </dialog>
 
       <dialog ref={dlg} className="sheet" onClose={() => setForm(null)}>
         {form && !shown && (

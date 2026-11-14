@@ -23,6 +23,7 @@ That is all you do in Neon. The tables are created and updated for you on every 
 | --- | --- |
 | `0001_init.sql` | Accounts, sessions, invites, passkeys, connections, messages, sends, audit log, and the `pgcrypto` extension used for password hashing |
 | `0002_signin_protections.sql` | Sign-in lockout, single-use second-factor codes, recovery codes |
+| `0003_provider_apps.sql` | Each account's own Google, Microsoft, Notion and Slack app keys |
 
 How it behaves:
 
@@ -67,14 +68,12 @@ npx wrangler secret put RESEND_API_KEY
 | `ENCRYPTION_KEY` | Yes | Encrypts saved connection tokens and admin second-factor keys before they reach the database |
 | `BOOTSTRAP_TOKEN` | Once | Lets you create the owner account on first run (section 4). Useless after one user exists; delete it then |
 | `RESEND_API_KEY` | For email | Sends invitations and reset links |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional | Gmail, Google Calendar (section 5) |
-| `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` | Optional | Outlook, Outlook Calendar, OneNote |
-| `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET` | Optional | Notion |
-| `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_SIGNING_SECRET` | Optional | Slack |
 
-**Keep a copy of `ENCRYPTION_KEY` in your password manager.** If it is lost or changed, every saved connection and every admin second factor becomes unreadable: people reconnect their accounts and admins run `reset-2fa` (see "Account recovery").
+There are no Google, Microsoft, Notion or Slack keys here. Each account adds its own on the Connections screen (section 5).
 
-**Without a computer:** let GitHub do the first deploy (section 3), then add the same names in Cloudflare → Workers & Pages → `niko` → Settings → **Variables and secrets** → Add → type **Secret**. Secrets set there are kept across deploys. Make the two random values with a password manager's generator (44+ characters for `BOOTSTRAP_TOKEN`; `ENCRYPTION_KEY` must be exactly 32 random bytes in base64, so use the `openssl` line when you can).
+**Keep a copy of `ENCRYPTION_KEY` in your password manager.** If it is lost or changed, every saved connection, every account's app keys and every admin second factor become unreadable: people add their keys and reconnect and admins run `reset-2fa` (see "Account recovery").
+
+**Without a computer:** let the first deploy run (section 3), then add the same names in Cloudflare → Workers & Pages → `niko` → Settings → **Variables and secrets** → Add → type **Secret**. Secrets set there are kept across deploys. Make the two random values with a password manager's generator (44+ characters for `BOOTSTRAP_TOKEN`; `ENCRYPTION_KEY` must be exactly 32 random bytes in base64, so use the `openssl` line when you can).
 
 **Never put any of these in `wrangler.jsonc`, a committed `.env` or `.dev.vars` file, or a GitHub variable.** Only `EMAIL_FROM` and `AI_MODEL` are plain variables.
 
@@ -84,21 +83,37 @@ The Worker (`apps/api/src/index.ts`) answers `/api/*`, sets the security headers
 
 Both `sxingxian.com` and `midnightpoetry.studio` must be zones in the **same Cloudflare account** as the Worker.
 
-### Deploy from GitHub (recommended)
+### Deploy automatically when `main` changes (recommended)
 
-`.github/workflows/deploy.yml` type-checks, builds the three front ends, **updates the Neon database**, then deploys the Worker, on every push to `main`. It skips the database and deploy steps until the Cloudflare token below exists; once it does, `DATABASE_URL` is required too.
+Connect the repository to Cloudflare once. After that, every new commit on `main` is built and deployed by Cloudflare by itself; there is nothing to run and no Cloudflare token to keep in GitHub.
+
+1. Cloudflare → **Workers & Pages** → **Create** → **Import a repository** → choose `sxingxian/niko` (allow the Cloudflare GitHub app access to this one repository only).
+2. Set:
+   - **Project name:** `niko` (it must match `name` in `apps/api/wrangler.jsonc`)
+   - **Production branch:** `main`
+   - **Root directory:** `/` (repository root)
+   - **Build command:** `npm ci && npm run build:web`
+   - **Deploy command:** `npm run release`
+   - **Builds for non-production branches:** off
+   - **Build variables:** `NODE_VERSION=22`, and `DATABASE_URL` added as a **Secret**
+3. Save and deploy. Later, the same settings are under the Worker → Settings → **Build**.
+
+> **Don't keep the default deploy command `npx wrangler deploy`.** The Worker's settings live in `apps/api`, not the repository root, so the default fails. `npm run release` updates the Neon database (`npm run migrate`) and then deploys from the right folder. If the database update fails, the deploy stops and the live site is left as it was.
+
+The build's `DATABASE_URL` secret is separate from the Worker's own `DATABASE_URL` secret (section 2); both hold the same value. Other branches are never built, so a branch or pull request can't reach the database.
+
+GitHub still runs `.github/workflows/deploy.yml` on every push as a check (type check and build). Its own database and deploy steps stay switched off unless you add a Cloudflare token there (next heading), so nothing deploys twice.
+
+### Alternative: deploy from GitHub Actions
+
+Use this instead of the Cloudflare connection, not as well as it. The same workflow then also updates the database and deploys.
 
 One-time setup (in a browser at github.com; the GitHub app can't edit secrets):
 
 1. Cloudflare → My Profile → **API Tokens** → Create Token → template **Edit Cloudflare Workers**. Limit it to your account and to the two zones.
-2. Repository → Settings → Secrets and variables → Actions → **Secrets**:
-   - `CLOUDFLARE_API_TOKEN` (the token)
-   - `CLOUDFLARE_ACCOUNT_ID` (Cloudflare dashboard → Workers & Pages → the Account ID in the sidebar)
-   - `DATABASE_URL` (the Neon connection string, the same value as the Worker secret)
+2. Repository → Settings → Secrets and variables → Actions → **Secrets**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and `DATABASE_URL`.
 
-**Each time:** push to `main`, or GitHub app → the repository → **Actions** → **Deploy Niko** → **Run workflow**. Tick *dry run* to only list the database changes that would run; nothing is changed and nothing is deployed.
-
-The database secret is given to the one step that needs it, the workflow runs only for `main` of this repository (never for pull requests or forks), and it can only read the repository. For an extra lock, put the three secrets in a GitHub **Environment** with yourself as required reviewer.
+Every push to `main` then deploys. Actions → **Deploy Niko** → **Run workflow** has a *dry run* tick box that only lists the database changes that would run. The database secret is given to the one step that needs it, and the workflow never runs for pull requests or forks.
 
 ### Deploy from your computer
 
@@ -107,22 +122,9 @@ From the repository root:
 ```bash
 npm ci
 export DATABASE_URL='…'   # only in this terminal; never in a file in the repository
-npm run migrate    # updates the database (add -- --dry-run to only list changes)
-npm run deploy     # builds landing, app and admin, then runs wrangler deploy
+npm run build:web
+npm run release    # updates the database, then deploys (npm run migrate -- --dry-run only lists changes)
 ```
-
-### Alternative: Cloudflare's own Git build
-
-If you connect the repository in Workers & Pages → Create → Import a repository instead of using GitHub Actions:
-
-- **Root directory:** `/` (repository root)
-- **Build command:** `npm ci && npm run build:web`
-- **Deploy command:** `npm run migrate && npm run deploy -w @niko/api`
-- **Build variables:** `NODE_VERSION=22`, and `DATABASE_URL` added as a **Secret** (Settings → Build → Variables and secrets). This is separate from the Worker's own `DATABASE_URL` secret; both hold the same value.
-
-The database is updated during Cloudflare's build, just before the Worker goes live. If the update fails, the deploy stops.
-
-The Worker's name must stay `niko` (it matches `name` in `wrangler.jsonc`). Use one way of deploying, not both, or each push deploys twice.
 
 ### Custom domains
 
@@ -142,37 +144,51 @@ Nobody can sign up until an owner exists. Create it once:
 
 From then on, invite people from the admin portal's **Users** screen. Registration is invite-only until you switch it on the same screen. Invited people get an email, choose a password, and can add a passkey afterwards in **Account**. A passkey works on one domain only, so add one on each address you use (`sxingxian.com` and `midnightpoetry.studio`).
 
-## 5. Connections that need a provider app (optional)
+## 5. Connections: every account brings its own keys
 
-The Connect button for these stays unavailable until you register an app with the provider and add its keys as Worker secrets. For each one, register **both** redirect addresses:
+Nothing about Google, Microsoft, Notion or Slack is configured on the server. Each account registers its own app with the provider and saves the keys on **Connections → Your app keys**. Two accounts never share a client ID, a secret or a quota, and the admin can't see anyone's keys (they are encrypted with `ENCRYPTION_KEY` and never shown again).
 
-```
-https://niko.sxingxian.com/api/oauth/callback
-https://nikoapp.midnightpoetry.studio/api/oauth/callback
-```
+What each person does, once per provider:
 
-| Connections | Where to register | Secrets |
-| --- | --- | --- |
-| Gmail, Google Calendar | Google Cloud Console → OAuth client (Web). Enable the Gmail API and Calendar API | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` |
-| Outlook, Outlook Calendar, OneNote | Microsoft Entra → App registration | `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` |
-| Notion | notion.so/my-integrations → public integration | `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET` |
-| Slack | api.slack.com/apps. Event request URL `https://niko.sxingxian.com/api/hooks/slack`; subscribe to `message.channels` and `message.im` | `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_SIGNING_SECRET` |
+1. Open **Connections**, press **Connect** on, say, Gmail (or **Add keys** under *Your app keys*). The dialog shows the redirect addresses to register:
 
-Google keeps an app in "Testing" until it is verified: only test users you list can connect, and Google expires their access after a short period. Gmail scopes are restricted and need Google's review before general use.
+   ```
+   https://niko.sxingxian.com/api/oauth/callback
+   https://nikoapp.midnightpoetry.studio/api/oauth/callback
+   ```
 
-These need no server setup. Each person pastes their own key on the Connections screen: Telegram bot (token from @BotFather; Niko points the bot at its own webhook), Discord (bot token and channel ID), ElevenLabs (API key and voice ID), other AI systems (base URL, key, model), Make.com / n8n / Power Automate (webhook URL).
+2. Register an app with the provider, add **both** redirect addresses, and paste the keys back into the dialog:
+
+   | Provider | For | Where to register | What to paste |
+   | --- | --- | --- | --- |
+   | Google | Gmail, Google Calendar | Google Cloud Console → APIs & Services → Credentials → OAuth client ID (Web application). Enable the Gmail API and the Calendar API | Client ID, client secret |
+   | Microsoft | Outlook, Outlook Calendar, OneNote | Microsoft Entra admin centre → App registrations → New registration (platform: Web) | Application (client) ID, client secret value, and the Directory (tenant) ID if the app is for one organisation only (leave empty for "any account") |
+   | Notion | Notion | notion.so/my-integrations → New integration → type Public | OAuth client ID, OAuth client secret |
+   | Slack | Slack | api.slack.com/apps → Create New App → OAuth & Permissions. To receive messages, also set the *Event request address* shown in the dialog and subscribe to `message.channels` and `message.im` | Client ID, client secret, signing secret (optional; needed to receive) |
+
+3. Press **Save and sign in**. Niko sends them to the provider to approve access.
+
+Changing or removing keys removes the links made with them, because sign-ins made through one app can't be renewed through another.
+
+Things to know before promising this to people:
+
+- Registering an app is a developer task (about 10 minutes each). Less technical people will need a walkthrough.
+- Google keeps a new app in "Testing": only the test users listed in that app can connect, and Google expires their access after about a week, so they sign in again. Leaving Testing with Gmail access needs Google's review.
+
+These need no app registration. Each person pastes their own key on the Connections screen: Telegram bot (token from @BotFather; Niko points the bot at its own webhook), Discord (bot token and channel ID), ElevenLabs (API key and voice ID), other AI systems (base URL, key, model), Make.com / n8n / Power Automate (webhook URL).
 
 Incoming addresses the Worker listens on:
 
 | Address | Called by | Checked with |
 | --- | --- | --- |
 | `/api/hooks/telegram/<connection>` | Telegram | The secret Niko gave Telegram when the bot was connected |
-| `/api/hooks/slack` | Slack | Slack's request signature (`SLACK_SIGNING_SECRET`) |
+| `/api/hooks/slack/<account>` | Slack | Slack's request signature, checked with that account's own signing secret |
 | `/api/hooks/in/<connection>` | Make.com, n8n, Power Automate | A per-connection signing secret (HMAC-SHA256 of the body in an `x-niko-signature` header), shown once on the Connections screen |
 
 ## 6. After the first deploy
 
-- [ ] The deploy log shows `Applied 2 migrations.` (or `Database is up to date`).
+- [ ] The deploy log shows `Applied 3 migrations.` (or `Database is up to date`).
+- [ ] Push a small commit to `main` and check Cloudflare starts a new build by itself (Worker → Deployments).
 - [ ] `https://niko.sxingxian.com/api/auth/config` answers with JSON. An error here means the Worker's `DATABASE_URL` secret is missing or wrong.
 - [ ] All three hosts load: the landing page on both `niko.` addresses, the app on `/app` and on `nikoapp.midnightpoetry.studio`, the admin portal on both `/admin` addresses.
 - [ ] Create the owner (section 4), set up the authenticator and save the recovery codes.
@@ -182,6 +198,7 @@ Incoming addresses the Worker listens on:
 - [ ] Type a wrong password 5 times: the fifth answer should say to wait 1 minute, and the right password is refused until then. Clear it with `npm run user -- unlock <email>`.
 - [ ] Add a passkey in **Account** on each domain, sign out, and sign in with it.
 - [ ] Ask Niko something with the built-in brain (Workers AI) and by voice; say "Niko" to wake it.
+- [ ] On **Connections → Your app keys**, add your own Google keys and connect Gmail. Sign in as a second account and check it has no keys and can't see yours.
 - [ ] Connect a Telegram bot, send it a message, reply by voice with "Niko, send it" and check the 10-second countdown and the audit log entry.
 - [ ] Install the app on an iPhone (Share → Add to Home Screen) and on an Android phone.
 - [ ] Run `https://securityheaders.com` against all three hosts. You should get an A.
@@ -230,9 +247,9 @@ Use a separate Neon branch or project for development, not the live database.
 
 - GitHub Actions are pinned to exact commits (with the version in a comment). To update one, look up the new release's commit and change both.
 - The deploy workflow installs only the versions in `package-lock.json` (`npm ci`) and will not deploy a commit that fails the type check or the build.
-- The workflow has read-only access to the repository; the Cloudflare token is the only secret it sees.
+- The GitHub workflow has read-only access to the repository. Cloudflare builds only `main`.
 - The Worker serves only its three custom domains (`workers_dev` and `preview_urls` are off).
 - The database is updated before the Worker on every deploy, in one transaction; a failed update stops the deploy. Migrations only add things, so the old code keeps working in between. To undo a change, add a new migration; Neon's point-in-time restore is the fallback.
 - Deploys run one at a time, in order.
-- Rotating secrets: `RESEND_API_KEY`, provider secrets and `DATABASE_URL` (Neon → reset password) can be replaced at any time with `wrangler secret put`. `ENCRYPTION_KEY` cannot be rotated without losing saved connections and second factors.
+- Rotating secrets: `RESEND_API_KEY` and `DATABASE_URL` (Neon → reset password) can be replaced at any time with `wrangler secret put` (people replace their own provider keys on the Connections screen). `ENCRYPTION_KEY` cannot be rotated without losing saved connections and second factors.
 - There are no automated tests in CI yet beyond the type check; the security notes are in [SECURITY.md](SECURITY.md).

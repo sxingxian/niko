@@ -1,13 +1,13 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { chatTurns, connections, messages, oauthStates, pendingSends, users } from '@niko/db';
-import { MAX_RELAY_BYTES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type EnginePrefs, type Permissions } from '@niko/shared';
-import type { AppEnv, Env } from '../env';
+import { chatTurns, connections, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
+import { APPS, MAX_RELAY_BYTES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type EnginePrefs, type Permissions } from '@niko/shared';
+import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal } from '../lib/crypto';
 import { audit, requireUser } from '../lib/session';
 import {
-  authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, oauthConfig, publicHttpsUrl, relayFile, sendText,
-  telegramSetWebhook, type EventItem, type MailItem, type NoteItem,
+  appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
+  telegramSetWebhook, type AppKeys, type EventItem, type MailItem, type NoteItem,
 } from '../providers';
 
 export const app = new Hono<AppEnv>();
@@ -66,14 +66,71 @@ app.patch('/me', async (c) => {
 app.get('/connections', async (c) => {
   const rows = await c.get('db').select({ provider: connections.provider, meta: connections.meta }).from(connections).where(eq(connections.userId, c.get('user').id));
   const linked = new Map(rows.map((r) => [r.provider, r.meta]));
+  const mine = await c.get('db').select({ app: providerApps.app, hint: providerApps.clientIdHint }).from(providerApps).where(eq(providerApps.userId, c.get('user').id));
+  const apps = new Map(mine.map((r) => [r.app, r.hint]));
+  const url = new URL(c.req.url);
   return c.json({
     providers: PROVIDERS.map((p) => ({
       ...p,
       linked: p.kind === 'builtin' ? true : linked.has(p.id),
-      configured: p.kind !== 'oauth' || !!oauthConfig(c.env, p.id)?.clientId,
+      // Sign-in connections need this account's own provider app keys first.
+      configured: p.kind !== 'oauth' || (!!p.app && apps.has(p.app)),
       label: (linked.get(p.id) as any)?.label ?? null,
     })),
+    apps: APPS.map((a) => ({
+      ...a,
+      configured: apps.has(a.id),
+      hint: apps.get(a.id) ?? null,
+      uses: PROVIDERS.filter((p) => p.app === a.id).map((p) => p.name),
+      // Slack posts new messages here; it is this account's own address.
+      eventsUrl: a.id === 'slack' ? `${url.origin}/api/hooks/slack/${c.get('user').id}` : null,
+    })),
+    redirectUrls: oauthRedirects(url),
   });
+});
+
+// ---------------------------------------------------------------- this account's own provider apps
+// Client IDs and secrets are per account, never server-wide. They are stored encrypted and never sent back.
+const cleanKey = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+const KEY_OK = /^[\x21-\x7e]{1,512}$/; // printable, no spaces
+
+app.put('/apps/:app', async (c) => {
+  const def = APPS.find((a) => a.id === c.req.param('app'));
+  if (!def) return c.json({ error: 'Unknown provider.' }, 404);
+  const b = await c.req.json<Record<string, unknown>>();
+  const keys: Record<string, string> = {};
+  for (const f of def.fields) {
+    const v = cleanKey(b[f.key]);
+    if (!v) { if (f.optional) continue; return c.json({ error: `${f.label} is needed.` }, 400); }
+    if (!KEY_OK.test(v)) return c.json({ error: `${f.label} does not look right. Paste it without spaces.` }, 400);
+    keys[f.key] = v;
+  }
+  if (keys.tenant && !/^(common|organizations|consumers|[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.test(keys.tenant)) {
+    return c.json({ error: 'Directory (tenant) ID should be the ID from the app registration, or left empty.' }, 400);
+  }
+  const u = c.get('user');
+  const db = c.get('db');
+  const secretEnc = await seal(c.env.ENCRYPTION_KEY, keys as unknown as AppKeys);
+  const hint = '…' + keys.clientId!.slice(-4);
+  // Sign-ins made with the old keys cannot be refreshed with new ones, so those links are removed.
+  const uses = PROVIDERS.filter((p) => p.app === def.id).map((p) => p.id);
+  await db.delete(connections).where(and(eq(connections.userId, u.id), inArray(connections.provider, uses)));
+  await db.delete(providerApps).where(and(eq(providerApps.userId, u.id), eq(providerApps.app, def.id)));
+  await db.insert(providerApps).values({ userId: u.id, app: def.id, secretEnc, clientIdHint: hint });
+  await audit(c, 'provider_app.saved', { app: def.id }, u.id);
+  return c.json({ ok: true });
+});
+
+app.delete('/apps/:app', async (c) => {
+  const def = APPS.find((a) => a.id === c.req.param('app'));
+  if (!def) return c.json({ error: 'Unknown provider.' }, 404);
+  const u = c.get('user');
+  const db = c.get('db');
+  const uses = PROVIDERS.filter((p) => p.app === def.id).map((p) => p.id);
+  await db.delete(connections).where(and(eq(connections.userId, u.id), inArray(connections.provider, uses)));
+  await db.delete(providerApps).where(and(eq(providerApps.userId, u.id), eq(providerApps.app, def.id)));
+  await audit(c, 'provider_app.removed', { app: def.id }, u.id);
+  return c.json({ ok: true });
 });
 
 app.post('/connections/:provider', async (c) => {
@@ -118,9 +175,11 @@ app.delete('/connections/:provider', async (c) => {
 
 app.get('/connections/:provider/oauth', async (c) => {
   const provider = c.req.param('provider');
-  const cfg = oauthConfig(c.env, provider);
-  if (!cfg) return c.json({ error: 'This connection does not use sign-in.' }, 400);
-  if (!cfg.clientId || !cfg.clientSecret) return c.json({ error: 'This connection is not set up on the server yet. See docs/DEPLOYMENT.md.' }, 503);
+  const appId = appFor(provider);
+  if (!appId) return c.json({ error: 'This connection does not use sign-in.' }, 400);
+  const keys = await loadAppKeys(c.env, c.get('db'), c.get('user').id, appId);
+  const cfg = keys && oauthConfig(provider, keys);
+  if (!cfg) return c.json({ error: 'Add your own app keys for this provider first.', needsApp: appId }, 409);
   const state = randomToken();
   const url = new URL(c.req.url);
   await c.get('db').insert(oauthStates).values({ state, userId: c.get('user').id, provider, host: url.host });
@@ -137,7 +196,9 @@ export async function oauthCallback(c: import('hono').Context<AppEnv>) {
   const back = (ok: boolean) => c.redirect(`${c.get('site').kind === 'app' ? '' : '/app'}/connections?${ok ? 'linked' : 'failed'}=${encodeURIComponent(row?.provider ?? '')}`);
   if (!row || row.host !== url.host || Date.now() - row.createdAt.getTime() > 10 * 60_000 || !code) return back(false);
   await db.delete(oauthStates).where(eq(oauthStates.state, state));
-  const cfg = oauthConfig(c.env, row.provider);
+  const appId = appFor(row.provider);
+  const keys = appId && (await loadAppKeys(c.env, db, row.userId, appId));
+  const cfg = keys && oauthConfig(row.provider, keys);
   if (!cfg) return back(false);
   try {
     const { secret, meta } = await exchangeCode(cfg, code, `${url.origin}/api/oauth/callback`);

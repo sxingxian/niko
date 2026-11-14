@@ -98,3 +98,5 @@
 dialog.sheet { border: 1px solid var(--line); border-radius: 28px; background: #0c1018; color: #fff; padding: 28px; width: min(460px, calc(100% - 24px)); }
 dialog.sheet::backdrop { background: rgba(0,0,0,.6); }
 dialog.sheet form { display: flex; flex-direction: column; gap: 16px; }
+
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; }

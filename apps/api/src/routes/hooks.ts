@@ -1,7 +1,8 @@
 // Inbound webhooks from chat apps and automation tools. No session: each is authenticated by its own secret or signature.
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { auditLog, connections, messages } from '@niko/db';
+import { loadAppKeys } from '../providers';
 import type { AppEnv } from '../env';
 import { hmacSha256Hex, safeEqual, unseal } from '../lib/crypto';
 
@@ -29,19 +30,24 @@ hooks.post('/telegram/:connId', async (c) => {
   return c.json({ ok: true });
 });
 
-hooks.post('/slack', async (c) => {
+// Each account has its own Slack app, so each has its own address and its own signing secret.
+hooks.post('/slack/:userId', async (c) => {
+  const userId = c.req.param('userId');
+  if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(userId)) return c.json({ ok: false }, 403);
   const raw = await c.req.text();
   const ts = c.req.header('x-slack-request-timestamp') ?? '';
   const sig = c.req.header('x-slack-signature') ?? '';
-  if (!c.env.SLACK_SIGNING_SECRET || Math.abs(Date.now() / 1000 - Number(ts)) > 300) return c.json({ ok: false }, 403);
-  const expect = 'v0=' + (await hmacSha256Hex(c.env.SLACK_SIGNING_SECRET, `v0:${ts}:${raw}`));
+  if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return c.json({ ok: false }, 403);
+  const signingSecret = (await loadAppKeys(c.env, c.get('db'), userId, 'slack'))?.signingSecret;
+  if (!signingSecret) return c.json({ ok: false }, 403);
+  const expect = 'v0=' + (await hmacSha256Hex(signingSecret, `v0:${ts}:${raw}`));
   if (!safeEqual(expect, sig)) return c.json({ ok: false }, 403);
   const body = JSON.parse(raw);
   if (body.type === 'url_verification') return c.json({ challenge: body.challenge });
   const ev = body.event;
   if (ev?.type === 'message' && !ev.bot_id && !ev.subtype && body.team_id) {
     const db = c.get('db');
-    const conn = (await db.select().from(connections).where(sql`${connections.provider} = 'slack' and ${connections.meta}->>'teamId' = ${String(body.team_id)}`).limit(1))[0];
+    const conn = (await db.select().from(connections).where(and(eq(connections.userId, userId), sql`${connections.provider} = 'slack' and ${connections.meta}->>'teamId' = ${String(body.team_id)}`)).limit(1))[0];
     if (conn) {
       await db.insert(messages).values({ userId: conn.userId, provider: 'slack', chatId: String(ev.channel), chatTitle: 'Slack ' + ev.channel, sender: String(ev.user ?? 'Someone'), body: String(ev.text ?? '').slice(0, 4000), direction: 'in' });
     }

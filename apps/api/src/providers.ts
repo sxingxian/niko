@@ -1,7 +1,8 @@
 // Provider adapters. Every call here goes to a third-party API with the user's own credentials.
 // None of this has been exercised against live accounts yet: treat each adapter as untested until you link one.
 import { and, eq } from 'drizzle-orm';
-import { connections, type Db } from '@niko/db';
+import { connections, providerApps, type Db } from '@niko/db';
+import { PROVIDERS, type AppId } from '@niko/shared';
 import type { Env } from './env';
 import { seal, unseal } from './lib/crypto';
 
@@ -11,19 +12,31 @@ export type Secret = OAuthSecret & Record<string, any>;
 interface OAuthCfg { authUrl: string; tokenUrl: string; scopes: string; clientId?: string; clientSecret?: string; extraAuth?: Record<string, string>; basicAuth?: boolean; scopeParam?: string }
 
 const GOOGLE = { authUrl: 'https://accounts.google.com/o/oauth2/v2/auth', tokenUrl: 'https://oauth2.googleapis.com/token', extraAuth: { access_type: 'offline', prompt: 'consent' } };
-const MS = { authUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize', tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token' };
 
-export function oauthConfig(env: Env, provider: string): OAuthCfg | null {
-  const g = { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET };
-  const m = { clientId: env.MICROSOFT_CLIENT_ID, clientSecret: env.MICROSOFT_CLIENT_SECRET };
+/** One account's own keys for a provider app. Never sent back to the browser. */
+export interface AppKeys { clientId: string; clientSecret: string; tenant?: string; signingSecret?: string }
+
+export const appFor = (provider: string): AppId | null => PROVIDERS.find((p) => p.id === provider && p.kind === 'oauth')?.app ?? null;
+
+export async function loadAppKeys(env: Env, db: Db, userId: string, app: AppId): Promise<AppKeys | null> {
+  const row = (await db.select().from(providerApps).where(and(eq(providerApps.userId, userId), eq(providerApps.app, app))).limit(1))[0];
+  return row ? await unseal<AppKeys>(env.ENCRYPTION_KEY, row.secretEnc) : null;
+}
+
+/** Sign-in settings for a connection, using the account's own app keys. The addresses are fixed here, never user-supplied. */
+export function oauthConfig(provider: string, keys: AppKeys): OAuthCfg | null {
+  const g = { clientId: keys.clientId, clientSecret: keys.clientSecret };
+  const m = g;
+  const tenant = /^(common|organizations|consumers|[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.test(keys.tenant ?? '') ? keys.tenant! : 'common';
+  const MS = { authUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`, tokenUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token` };
   switch (provider) {
     case 'gmail': return { ...GOOGLE, ...g, scopes: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send' };
     case 'google-calendar': return { ...GOOGLE, ...g, scopes: 'https://www.googleapis.com/auth/calendar.readonly' };
     case 'outlook-mail': return { ...MS, ...m, scopes: 'offline_access Mail.Read Mail.Send' };
     case 'outlook-calendar': return { ...MS, ...m, scopes: 'offline_access Calendars.Read' };
     case 'onenote': return { ...MS, ...m, scopes: 'offline_access Notes.Read' };
-    case 'notion': return { authUrl: 'https://api.notion.com/v1/oauth/authorize', tokenUrl: 'https://api.notion.com/v1/oauth/token', scopes: '', clientId: env.NOTION_CLIENT_ID, clientSecret: env.NOTION_CLIENT_SECRET, extraAuth: { owner: 'user' }, basicAuth: true };
-    case 'slack': return { authUrl: 'https://slack.com/oauth/v2/authorize', tokenUrl: 'https://slack.com/api/oauth.v2.access', scopes: 'chat:write,channels:history,im:history,channels:read', clientId: env.SLACK_CLIENT_ID, clientSecret: env.SLACK_CLIENT_SECRET };
+    case 'notion': return { authUrl: 'https://api.notion.com/v1/oauth/authorize', tokenUrl: 'https://api.notion.com/v1/oauth/token', scopes: '', ...g, extraAuth: { owner: 'user' }, basicAuth: true };
+    case 'slack': return { authUrl: 'https://slack.com/oauth/v2/authorize', tokenUrl: 'https://slack.com/api/oauth.v2.access', scopes: 'chat:write,channels:history,im:history,channels:read', ...g };
     default: return null;
   }
 }
@@ -74,7 +87,9 @@ export async function credentials(env: Env, db: Db, userId: string, provider: st
   if (!conn) return null;
   const secret = await unseal<Secret>(env.ENCRYPTION_KEY, conn.secretEnc);
   if (!secret) return null;
-  const cfg = oauthConfig(env, provider);
+  const app = appFor(provider);
+  const keys = app && secret.refreshToken && secret.expiresAt && secret.expiresAt < Date.now() + 60_000 ? await loadAppKeys(env, db, userId, app) : null;
+  const cfg = keys ? oauthConfig(provider, keys) : null;
   if (cfg && secret.refreshToken && secret.expiresAt && secret.expiresAt < Date.now() + 60_000) {
     const j = await tokenRequest(cfg, { grant_type: 'refresh_token', refresh_token: secret.refreshToken });
     secret.accessToken = j.access_token;

@@ -9,15 +9,6 @@ export interface Env {
   RESEND_API_KEY?: string;
   EMAIL_FROM: string;
   AI_MODEL: string;
-  GOOGLE_CLIENT_ID?: string;
-  GOOGLE_CLIENT_SECRET?: string;
-  MICROSOFT_CLIENT_ID?: string;
-  MICROSOFT_CLIENT_SECRET?: string;
-  NOTION_CLIENT_ID?: string;
-  NOTION_CLIENT_SECRET?: string;
-  SLACK_CLIENT_ID?: string;
-  SLACK_CLIENT_SECRET?: string;
-  SLACK_SIGNING_SECRET?: string;
 }
 
 export interface Vars {
@@ -66,3 +57,9 @@ export function siteFor(url: URL): Site {
 }
 
 export const ALLOWED_HOSTS = Object.keys(SITES);
+
+/** The return addresses an account registers with Google, Microsoft, Notion and Slack: one for each address the app is served on. */
+export function oauthRedirects(url: URL): string[] {
+  if (!SITES[url.hostname]) return [`${url.origin}/api/oauth/callback`];
+  return [...new Set(Object.values(SITES).map((s) => new URL(s.appUrl).origin + '/api/oauth/callback'))];
+}
