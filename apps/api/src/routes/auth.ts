@@ -6,6 +6,7 @@ import { isEmail, passwordProblem } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { b64url, randomToken, safeEqual, sha256, unb64 } from '../lib/crypto';
 import { hashPassword, verifyPassword } from '../lib/password';
+import { clearThrottle, lockedMessage, recordFailure, throttleMinutes } from '../lib/throttle';
 import { esc, sendEmail } from '../lib/email';
 import { audit, clientIp, endSession, requireUser, startSession, tooMany } from '../lib/session';
 
@@ -46,15 +47,20 @@ auth.post('/setup', async (c) => {
 auth.post('/sign-in', async (c) => {
   const b = await c.req.json<{ email?: string; password?: string }>();
   if (!isEmail(b.email) || typeof b.password !== 'string') return c.json({ error: 'Enter your email and password.' }, 400);
-  if (await tooMany(c, 'signin:' + b.email.toLowerCase(), 8, 15) || await tooMany(c, 'signin-ip:' + clientIp(c), 40, 15)) {
-    return c.json({ error: 'Too many attempts. Try again in 15 minutes.' }, 429);
-  }
-  const u = await findUser(c.get('db'), b.email);
-  const ok = await verifyPassword(c.get('db'), b.password, u?.passwordHash ?? null);
+  const db = c.get('db');
+  const ip = clientIp(c);
+  if (await tooMany(c, 'signin-ip:' + ip, 40, 15)) return c.json({ error: 'Too many attempts. Try again in 15 minutes.' }, 429);
+  const locked = await throttleMinutes(db, b.email, ip);
+  if (locked > 0) return c.json({ error: lockedMessage(locked) }, 429);
+  const u = await findUser(db, b.email);
+  const ok = await verifyPassword(db, b.password, u?.passwordHash ?? null);
   if (!u || !ok) {
+    // Unknown emails are throttled exactly like real ones, so a lock says nothing about which accounts exist.
+    const m = await recordFailure(db, b.email, ip);
     await audit(c, 'signin.failed', { email: b.email });
-    return c.json({ error: 'Email or password is not correct.' }, 401);
+    return m > 0 ? c.json({ error: lockedMessage(m) }, 429) : c.json({ error: 'Email or password is not correct.' }, 401);
   }
+  await clearThrottle(db, b.email, ip);
   if (u.status !== 'active') return c.json({ error: 'This account is not switched on yet. Ask your admin.' }, 403);
   await startSession(c, u.id, 'app');
   await audit(c, 'signin.ok', {}, u.id);

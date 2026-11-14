@@ -5,7 +5,7 @@ You do these steps yourself; none of the keys below should ever be committed or 
 ## 1. Neon (database)
 
 1. Create a project at neon.tech and copy its **pooled** connection string.
-2. Open the SQL editor and run the whole of `packages/db/migrations/0001_init.sql` once.
+2. Open the SQL editor and run the whole of `packages/db/migrations/0001_init.sql` once, then `packages/db/migrations/0002_signin_protections.sql` once.
 
 ## 2. Cloudflare (hosting)
 
@@ -76,3 +76,19 @@ npm run dev -w @niko/app # app with hot reload, proxying /api
 - **Workers AI** has a daily free allowance; once it is used up, requests fail until the next day. Change the model with the `AI_MODEL` variable.
 - **Password hashing** runs in Neon (bcrypt via `pgcrypto`, over a SHA-256 pre-hash made in the Worker), the same as sxingxian.com. It does not count against the Worker's CPU limit.
 - **Wake word** works only while Niko is open in a browser that supports speech recognition (Chrome, Edge, Safari) and the microphone is allowed.
+
+## Account recovery from your computer
+
+If you are locked out, lose your authenticator app, or forget the owner password, use the command-line tool. It talks to Neon directly, so it works even when you cannot sign in.
+
+```sh
+export DATABASE_URL='…'   # the Neon connection string; do not put it in a file in this repo
+npm run user -- list
+npm run user -- reset-password you@example.com   # asks for the new password at a hidden prompt
+npm run user -- reset-2fa      you@example.com   # removes the admin second factor and recovery codes
+npm run user -- unlock         you@example.com   # clears sign-in locks
+npm run user -- disable        someone@example.com
+npm run user -- enable         someone@example.com
+```
+
+Anyone who has `DATABASE_URL` can do all of this, so treat it like the master key. Every change is written to the audit log as "via command line".

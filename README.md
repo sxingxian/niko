@@ -37,6 +37,7 @@ Nothing here has run against live services yet. The code typechecks, all three f
 | Landing, sign-in, invite, sign-up, forgot/reset password | Built |
 | Passkeys (sign-in only; added from Account) | Built |
 | Admin: second factor (authenticator app), users on/off, invites, registration switch, audit log | Built |
+| Sign-in lockout (doubling), single-use second-factor codes, recovery codes, command-line account recovery | Built; database logic tested on an in-process Postgres, not yet on Neon |
 | Home core, voice loop (wake word "Niko", commands, speech), text input | Built |
 | Voice navigation ("Niko, open my inbox") | Built |
 | "Niko, send it" with the 10-second countdown, enforced on the server, replies only | Built |

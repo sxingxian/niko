@@ -6,6 +6,10 @@
 - **Sessions**: random 256-bit token in an `HttpOnly`, `Secure`, `SameSite=Lax`, `__Host-` cookie; only its SHA-256 hash is stored. App sessions last 30 days, admin sessions 8 hours.
 - **Cross-site requests**: every state-changing API call must carry an `Origin` that matches the host. Webhooks and the OAuth return leg are exempt and authenticate by signature, secret or state instead.
 - **Admin**: separate session cookie; password then a time-based code from an authenticator app. Admin routes refuse sessions that have not passed the second factor.
+- **Sign-in lockout**: counted per email and network address together. After 5 wrong attempts in a row that pair is locked for 1 minute, then 2, 4, 8, 16, 32, up to 60. While locked, even the right password is refused. Unknown emails are counted the same way, so a lock does not reveal which accounts exist. Wrong second-factor and recovery codes count too. A separate per-address cap limits guessing across many emails.
+- **Single-use codes**: each authenticator time step is accepted once per admin (an atomic database update), so a code that was seen or intercepted cannot be used again.
+- **Recovery codes**: ten codes shown once when the second factor is first set up; only their hashes are stored; each works once; an admin can replace the set, which cancels the old ones.
+- **Command-line recovery**: `npm run user` (see SETUP) resets a password or second factor and clears locks using the database connection string. There is no recovery path over the web that skips the second factor.
 - **Invite only by default**: invites and reset links are single-use, stored hashed, and expire (7 days / 30 minutes). With open registration, new accounts stay switched off until an admin enables them.
 - **Passkeys**: sign-in only, one per registrable domain (`sxingxian.com`, `midnightpoetry.studio`).
 - **Attempt limits**: sign-in, admin sign-in, second-factor, invite, reset and setup attempts are limited per email and per IP.
@@ -25,4 +29,3 @@
 - **Attempt limits are stored in Postgres** and are approximate under bursts. Add a Cloudflare rate-limiting rule on `/api/auth/*` and `/api/admin/*` for a firmer limit.
 - **Telegram bots** see only messages people send to the bot. The Telegram file link is fetched with the bot token on demand; the token never reaches the browser.
 - **Audit log and chat history** grow without pruning. Add retention if this runs for long.
-- **Sign-in protections that sxingxian.com has and Niko does not yet**: the per-email-and-IP lockout that doubles, single-use time codes for the admin second factor, recovery codes, and the command-line account recovery tool.

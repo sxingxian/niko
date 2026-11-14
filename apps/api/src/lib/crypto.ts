@@ -83,12 +83,32 @@ async function totpAt(secret: string, counter: number): Promise<string> {
   const code = (((h[o]! & 0x7f) << 24) | (h[o + 1]! << 16) | (h[o + 2]! << 8) | h[o + 3]!) % 1_000_000;
   return code.toString().padStart(6, '0');
 }
-export async function verifyTotp(secret: string, code: string): Promise<boolean> {
-  if (!/^\d{6}$/.test(code)) return false;
+/** Returns the time step the code matches (current, previous or next), or null. The caller must refuse a step it has already accepted. */
+export async function totpStep(secret: string, code: string): Promise<number | null> {
+  if (!/^\d{6}$/.test(code)) return null;
   const step = Math.floor(Date.now() / 30_000);
-  for (const d of [0, -1, 1]) if (safeEqual(await totpAt(secret, step + d), code)) return true;
-  return false;
+  let hit: number | null = null;
+  for (const d of [0, -1, 1]) if (safeEqual(await totpAt(secret, step + d), code)) hit = step + d;
+  return hit;
 }
+
+// ---- recovery codes: 10 single-use codes, xxxxx-xxxxx, stored only as SHA-256
+const HUMAN = 'abcdefghjkmnpqrstuvwxyz23456789'; // no 0/o, 1/l/i
+function humanChars(n: number): string {
+  let out = '';
+  while (out.length < n) {
+    // Rejection sampling: no modulo bias.
+    for (const b of crypto.getRandomValues(new Uint8Array(n * 2))) if (b < 248 && out.length < n) out += HUMAN[b % HUMAN.length];
+  }
+  return out;
+}
+export function makeRecoveryCodes(count = 10): string[] {
+  return Array.from({ length: count }, () => `${humanChars(5)}-${humanChars(5)}`);
+}
+export async function hashRecoveryCode(code: string): Promise<string> {
+  return sha256(`niko/recovery/v1\u0000${code.toLowerCase().replace(/[^a-z0-9]/g, '')}`);
+}
+
 export function totpUri(secret: string, email: string): string {
   return `otpauth://totp/Niko%20Admin:${encodeURIComponent(email)}?secret=${secret}&issuer=Niko%20Admin&digits=6&period=30`;
 }

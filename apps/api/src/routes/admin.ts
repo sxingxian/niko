@@ -1,10 +1,11 @@
-import { and, desc, eq, gt, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull, lt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { appSettings, auditLog, invites, sessions, users } from '@niko/db';
+import { appSettings, auditLog, invites, recoveryCodes, sessions, users } from '@niko/db';
 import { isEmail } from '@niko/shared';
 import type { AppEnv } from '../env';
-import { newTotpSecret, randomToken, seal, sha256, totpUri, unseal, verifyTotp } from '../lib/crypto';
+import { hashRecoveryCode, makeRecoveryCodes, newTotpSecret, randomToken, seal, sha256, totpStep, totpUri, unseal } from '../lib/crypto';
 import { verifyPassword } from '../lib/password';
+import { clearThrottle, lockedMessage, recordFailure, throttleMinutes } from '../lib/throttle';
 import { sendEmail } from '../lib/email';
 import { audit, clientIp, endSession, requireAdmin, requireAdminPassword, startSession, tooMany } from '../lib/session';
 import { findUser, registrationMode } from './auth';
@@ -15,14 +16,17 @@ export const admin = new Hono<AppEnv>();
 admin.post('/sign-in', async (c) => {
   const b = await c.req.json<{ email?: string; password?: string }>();
   if (!isEmail(b.email) || typeof b.password !== 'string') return c.json({ error: 'Enter your email and password.' }, 400);
-  if (await tooMany(c, 'admin-signin:' + b.email.toLowerCase(), 5, 15) || await tooMany(c, 'admin-ip:' + clientIp(c), 20, 15)) {
-    return c.json({ error: 'Too many attempts. Try again in 15 minutes.' }, 429);
-  }
-  const u = await findUser(c.get('db'), b.email);
-  const ok = await verifyPassword(c.get('db'), b.password, u?.passwordHash ?? null);
+  const db = c.get('db');
+  const ip = clientIp(c);
+  if (await tooMany(c, 'admin-ip:' + ip, 20, 15)) return c.json({ error: 'Too many attempts. Try again in 15 minutes.' }, 429);
+  const locked = await throttleMinutes(db, b.email, ip);
+  if (locked > 0) return c.json({ error: lockedMessage(locked) }, 429);
+  const u = await findUser(db, b.email);
+  const ok = await verifyPassword(db, b.password, u?.passwordHash ?? null);
   if (!u || !ok || u.role !== 'admin' || u.status !== 'active') {
+    const m = await recordFailure(db, b.email, ip);
     await audit(c, 'admin.signin.failed', { email: b.email });
-    return c.json({ error: 'Email or password is not correct.' }, 401);
+    return m > 0 ? c.json({ error: lockedMessage(m) }, 429) : c.json({ error: 'Email or password is not correct.' }, 401);
   }
   await startSession(c, u.id, 'admin', false);
   return c.json({ ok: true, step: u.totpEnabled ? 'verify' : 'setup' });
@@ -42,18 +46,71 @@ admin.post('/totp/setup', requireAdminPassword, async (c) => {
   return c.json({ secret, uri: totpUri(secret, u.email) });
 });
 
+async function replaceRecoveryCodes(db: AppEnv['Variables']['db'], userId: string): Promise<string[]> {
+  const codes = makeRecoveryCodes();
+  await db.delete(recoveryCodes).where(eq(recoveryCodes.userId, userId));
+  await db.insert(recoveryCodes).values(await Promise.all(codes.map(async (code) => ({ userId, codeHash: await hashRecoveryCode(code) }))));
+  return codes;
+}
+
 // Step 2b: check a 6-digit code; marks the admin session as fully signed in.
 admin.post('/totp/verify', requireAdminPassword, async (c) => {
   const b = await c.req.json<{ code?: string }>();
   const u = c.get('user');
-  if (await tooMany(c, 'totp:' + u.id, 6, 10)) return c.json({ error: 'Too many attempts. Try again in 10 minutes.' }, 429);
-  const secret = await unseal<string>(c.env.ENCRYPTION_KEY, u.totpSecretEnc);
-  if (!secret || !(await verifyTotp(secret, String(b.code ?? '')))) return c.json({ error: 'That code is not correct.' }, 401);
   const db = c.get('db');
-  if (!u.totpEnabled) await db.update(users).set({ totpEnabled: true }).where(eq(users.id, u.id));
+  const ip = clientIp(c);
+  const locked = await throttleMinutes(db, u.email, ip);
+  if (locked > 0) return c.json({ error: lockedMessage(locked) }, 429);
+  const wrong = async () => {
+    const m = await recordFailure(db, u.email, ip);
+    return m > 0 ? c.json({ error: lockedMessage(m) }, 429) : c.json({ error: 'That code is not correct. Check your authenticator app and try again.' }, 401);
+  };
+  const secret = await unseal<string>(c.env.ENCRYPTION_KEY, u.totpSecretEnc);
+  const step = secret ? await totpStep(secret, String(b.code ?? '')) : null;
+  if (step === null) return wrong();
+  // Each time step is accepted once, so a code that was seen or intercepted cannot be replayed.
+  const fresh = await db.update(users).set({ totpLastStep: step }).where(and(eq(users.id, u.id), lt(users.totpLastStep, step))).returning({ id: users.id });
+  if (fresh.length === 0) return wrong();
+  let codes: string[] | undefined;
+  if (!u.totpEnabled) {
+    await db.update(users).set({ totpEnabled: true }).where(eq(users.id, u.id));
+    codes = await replaceRecoveryCodes(db, u.id); // shown once, right now
+  }
   await db.update(sessions).set({ mfaOk: true }).where(eq(sessions.id, c.get('sessionId')));
+  await clearThrottle(db, u.email, ip);
   await audit(c, 'admin.signin.ok', {}, u.id);
-  return c.json({ ok: true });
+  return c.json({ ok: true, recoveryCodes: codes });
+});
+
+// Step 2c: a single-use recovery code stands in for the authenticator app.
+admin.post('/totp/recovery', requireAdminPassword, async (c) => {
+  const b = await c.req.json<{ code?: string }>();
+  const u = c.get('user');
+  const db = c.get('db');
+  const ip = clientIp(c);
+  const locked = await throttleMinutes(db, u.email, ip);
+  if (locked > 0) return c.json({ error: lockedMessage(locked) }, 429);
+  const used = u.totpEnabled
+    ? await db.update(recoveryCodes).set({ usedAt: new Date() })
+        .where(and(eq(recoveryCodes.userId, u.id), eq(recoveryCodes.codeHash, await hashRecoveryCode(String(b.code ?? ''))), isNull(recoveryCodes.usedAt))).returning({ id: recoveryCodes.id })
+    : [];
+  if (used.length === 0) {
+    const m = await recordFailure(db, u.email, ip);
+    return m > 0 ? c.json({ error: lockedMessage(m) }, 429) : c.json({ error: 'That recovery code is not valid or was already used.' }, 401);
+  }
+  await db.update(sessions).set({ mfaOk: true }).where(eq(sessions.id, c.get('sessionId')));
+  await clearThrottle(db, u.email, ip);
+  const left = await db.select({ n: sql<number>`count(*)::int` }).from(recoveryCodes).where(and(eq(recoveryCodes.userId, u.id), isNull(recoveryCodes.usedAt)));
+  await audit(c, 'admin.signin.recovery_code', { left: left[0]?.n ?? 0 }, u.id);
+  return c.json({ ok: true, left: left[0]?.n ?? 0 });
+});
+
+// Replaces all recovery codes with ten new ones (shown once).
+admin.post('/recovery-codes', requireAdmin, async (c) => {
+  const u = c.get('user');
+  const codes = await replaceRecoveryCodes(c.get('db'), u.id);
+  await audit(c, 'admin.recovery_codes.replaced', {}, u.id);
+  return c.json({ recoveryCodes: codes });
 });
 
 admin.get('/me', requireAdmin, (c) => {

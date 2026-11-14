@@ -6,6 +6,10 @@ import '@niko/ui/src/styles.css';
 import './admin.css';
 
 type Stage = 'loading' | 'password' | 'setup' | 'verify' | 'in';
+
+function Codes({ codes }: { codes: string[] }) {
+  return <ul className="codes mono" aria-label="Recovery codes">{codes.map((c) => <li key={c}>{c}</li>)}</ul>;
+}
 interface UserRow { id: string; name: string; email: string; role: string; status: string; isOwner: boolean; lastActiveAt: string | null }
 interface InviteRow { id: string; email: string; role: string; expiresAt: string }
 interface AuditRow { id: string; action: string; detail: Record<string, unknown>; createdAt: string }
@@ -22,6 +26,8 @@ function SignIn({ stage, setStage }: { stage: Stage; setStage: (s: Stage) => voi
   const [code, setCode] = useState('');
   const [secret, setSecret] = useState<{ secret: string; uri: string } | null>(null);
   const [err, setErr] = useState('');
+  const [codes, setCodes] = useState<string[] | null>(null);
+  const [useRecovery, setUseRecovery] = useState(false);
   useEffect(() => {
     if (stage === 'setup' && !secret) api('/admin/totp/setup', { method: 'POST' }).then(setSecret).catch((e) => setErr(e.message));
   }, [stage, secret]);
@@ -31,8 +37,25 @@ function SignIn({ stage, setStage }: { stage: Stage; setStage: (s: Stage) => voi
   };
   const verify = async (e: FormEvent) => {
     e.preventDefault(); setErr('');
-    try { await api('/admin/totp/verify', { body: { code } }); setStage('in'); } catch (x: any) { setErr(x.message); }
+    try {
+      if (useRecovery) { await api('/admin/totp/recovery', { body: { code } }); setStage('in'); return; }
+      const r = await api<{ recoveryCodes?: string[] }>('/admin/totp/verify', { body: { code } });
+      if (r.recoveryCodes) setCodes(r.recoveryCodes); else setStage('in');
+    } catch (x: any) { setErr(x.message); }
   };
+  if (codes) {
+    return (
+      <div className="gate">
+        <div className="g gate-card">
+          <div className="brand"><span className="wordmark">NIKO</span><span className="k tag">Admin</span></div>
+          <h1>Save your recovery codes</h1>
+          <p className="sub">Each code works once if you lose your authenticator app. They are shown only now. Keep them in a password manager.</p>
+          <Codes codes={codes} />
+          <button className="pri" onClick={() => setStage('in')}>I’ve saved them</button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="gate">
       <form className="g gate-card" onSubmit={stage === 'password' ? pw : verify}>
@@ -50,8 +73,11 @@ function SignIn({ stage, setStage }: { stage: Stage; setStage: (s: Stage) => voi
           <a className="lnk" href={secret.uri}>Open in an authenticator app on this device</a>
         </>}
         {(stage === 'setup' || stage === 'verify') && <>
-          <Field label="6-digit code"><input className="in mono" inputMode="numeric" autoComplete="one-time-code" pattern="\d{6}" maxLength={6} value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))} required /></Field>
+          {useRecovery
+            ? <Field label="Recovery code"><input className="in mono" autoComplete="off" placeholder="xxxxx-xxxxx" value={code} onChange={(e) => setCode(e.target.value)} required /></Field>
+            : <Field label="6-digit code"><input className="in mono" inputMode="numeric" autoComplete="one-time-code" pattern="\d{6}" maxLength={6} value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))} required /></Field>}
           <button className="pri">Sign in</button>
+          {stage === 'verify' && <button type="button" className="lnk" onClick={() => { setUseRecovery(!useRecovery); setCode(''); setErr(''); }}>{useRecovery ? 'Use my authenticator app' : 'Use a recovery code instead'}</button>}
         </>}
       </form>
     </div>
@@ -67,6 +93,8 @@ function Users({ onSignedOut }: { onSignedOut: () => void }) {
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [email, setEmail] = useState('');
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [fresh, setFresh] = useState<string[] | null>(null);
+  const [confirmCodes, setConfirmCodes] = useState(false);
 
   const guard = useCallback((e: unknown) => { if (e instanceof ApiError && e.status === 401) onSignedOut(); else setNote({ ok: false, text: (e as Error).message }); }, [onSignedOut]);
   const load = useCallback(async () => {
@@ -89,6 +117,11 @@ function Users({ onSignedOut }: { onSignedOut: () => void }) {
   const setMode = async (mode: 'invite' | 'open') => { try { await api('/admin/registration', { method: 'PUT', body: { mode } }); setReg(mode); } catch (e) { guard(e); } };
   const toggle = async (u: UserRow) => { try { await api(`/admin/users/${u.id}`, { method: 'PATCH', body: { status: u.status === 'active' ? 'off' : 'active' } }); await load(); } catch (e) { guard(e); } };
   const revoke = async (id: string) => { try { await api(`/admin/invites/${id}`, { method: 'DELETE' }); await load(); } catch (e) { guard(e); } };
+  const newCodes = async () => {
+    if (!confirmCodes) return setConfirmCodes(true);
+    setConfirmCodes(false);
+    try { const r = await api<{ recoveryCodes: string[] }>('/admin/recovery-codes', { method: 'POST' }); setFresh(r.recoveryCodes); setTab('users'); } catch (e) { guard(e); }
+  };
   const signOut = async () => { await api('/admin/sign-out', { method: 'POST' }).catch(() => undefined); onSignedOut(); };
   const active = users.filter((u) => u.status === 'active').length;
 
@@ -100,12 +133,20 @@ function Users({ onSignedOut }: { onSignedOut: () => void }) {
           <button className="nv" aria-current={tab === 'users' ? 'page' : undefined} onClick={() => setTab('users')}>Users</button>
           <button className="nv" aria-current={tab === 'audit' ? 'page' : undefined} onClick={() => setTab('audit')}>Audit log</button>
         </nav>
-        <div className="who"><span className="sub" style={{ fontSize: 13 }}>Signed in as {me?.name || me?.email || '…'}</span><button className="nv line" onClick={signOut}>Sign out</button></div>
+        <div className="who"><span className="sub" style={{ fontSize: 13 }}>Signed in as {me?.name || me?.email || '…'}</span><button className="nv line" onClick={newCodes}>{confirmCodes ? 'Confirm: replace old codes' : 'New recovery codes'}</button><button className="nv line" onClick={signOut}>Sign out</button></div>
       </aside>
       <main>
         {tab === 'users' ? <>
           <header><h1>Users</h1><p className="sub" style={{ fontSize: 15 }}>{active} active · {invites.length} invited · {reg === 'invite' ? 'invite only' : 'open registration'}</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
+          {fresh && (
+            <section className="g card" aria-label="New recovery codes">
+              <span className="k">Your new recovery codes · shown once</span>
+              <p className="sub">The old codes no longer work. Each of these works once if you lose your authenticator app.</p>
+              <Codes codes={fresh} />
+              <div><button className="bt" onClick={() => setFresh(null)}>I’ve saved them</button></div>
+            </section>
+          )}
           <div className="two">
             <section className="g card" aria-label="Registration">
               <span className="k">Registration</span>

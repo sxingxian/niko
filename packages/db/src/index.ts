@@ -14,6 +14,7 @@ export const users = pgTable('users', {
   isOwner: boolean('is_owner').notNull().default(false),
   totpSecretEnc: text('totp_secret_enc'),
   totpEnabled: boolean('totp_enabled').notNull().default(false),
+  totpLastStep: bigint('totp_last_step', { mode: 'number' }).notNull().default(0),
   appearance: jsonb('appearance').notNull().default({}).$type<Record<string, unknown>>(),
   engine: jsonb('engine').notNull().default({}).$type<Record<string, unknown>>(),
   permissions: jsonb('permissions').notNull().default({}).$type<Record<string, unknown>>(),
@@ -147,9 +148,17 @@ export const authAttempts = pgTable('auth_attempts', {
   createdAt: ts('created_at').notNull().defaultNow(),
 });
 
+export const recoveryCodes = pgTable('recovery_codes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull(),
+  codeHash: text('code_hash').notNull(),
+  usedAt: ts('used_at'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
 export const schema = {
   users, sessions, invites, passwordResets, passkeys, webauthnChallenges, appSettings,
-  connections, oauthStates, messages, pendingSends, chatTurns, auditLog, authAttempts,
+  connections, oauthStates, messages, pendingSends, chatTurns, auditLog, authAttempts, recoveryCodes,
 };
 
 export function createDb(databaseUrl: string) {
