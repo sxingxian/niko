@@ -17,7 +17,7 @@
     { "pattern": "nikoapp.midnightpoetry.studio", "custom_domain": true }
   ],
   "vars": {
-    "EMAIL_FROM": "Niko <niko@sxingxian.com>",
+    "EMAIL_FROM": "Niko <niko-noreply@app.midnightpoetry.studio>",
     "AI_MODEL": "@cf/meta/llama-3.1-8b-instruct"
   }
   // Secrets (set with `wrangler secret put NAME`, never committed):

@@ -37,9 +37,9 @@ How it behaves:
 
 ## 1b. Email (Resend)
 
-1. Create a Resend account, add the domain `sxingxian.com` and the DNS records it asks for (SPF/DKIM). If the domain is already verified for another project, skip this.
+1. Create a Resend account, add the domain `app.midnightpoetry.studio` and the DNS records it asks for (SPF/DKIM) in the `midnightpoetry.studio` zone. If that domain is already verified in Resend, skip this.
 2. Create an API key with **sending access only** → `RESEND_API_KEY`.
-3. The sender is the `EMAIL_FROM` variable in `apps/api/wrangler.jsonc` (`Niko <niko@sxingxian.com>`). Change it there if you want another address; it must be on the verified domain.
+3. The sender is the `EMAIL_FROM` variable in `apps/api/wrangler.jsonc` (`Niko <niko-noreply@app.midnightpoetry.studio>`). Change it there if you want another address; it must be on the verified domain.
 
 Niko sends two kinds of email: invitations and password-reset links. Until `RESEND_API_KEY` is set, invites are still created in the admin portal but no email goes out, and "Forgot password" sends nothing.
 
