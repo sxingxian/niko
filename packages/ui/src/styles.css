@@ -1,5 +1,10 @@
 /* Niko design language, taken from the approved mockups (adaptive core direction). */
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap');
+/* Fonts are bundled with the app (no requests to Google). */
+@import '@fontsource/space-grotesk/latin-400.css';
+@import '@fontsource/space-grotesk/latin-500.css';
+@import '@fontsource/space-grotesk/latin-600.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
 
 :root { --h: 190; --ink: #fff; --muted: #c3cad6; --base: #05070d; --line: rgba(255,255,255,.2); color-scheme: dark; }
 * { box-sizing: border-box; }
@@ -12,18 +17,20 @@ h1, h2, h3, p { margin: 0; }
 :focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 
 /* The shifting background: one glow in the user's colour over a near-black base. */
-.bg { position: fixed; inset: 0; z-index: 0; pointer-events: none;
+/* z-index -1: always behind the page's own content, positioned or not. */
+.bg { position: fixed; inset: 0; z-index: -1; pointer-events: none;
   background: radial-gradient(60% 75% at var(--gx, 50%) 44%, hsl(var(--h) 80% 45% / .3), transparent 65%),
     radial-gradient(50% 65% at 100% 0%, hsl(calc(var(--h) + 50) 70% 40% / .2), transparent 65%),
     radial-gradient(50% 65% at 0% 100%, hsl(calc(var(--h) - 40) 70% 40% / .16), transparent 65%),
     hsl(var(--h) 55% 6%); }
-.accent { color: hsl(var(--h) 90% 74%); }
-.accent-bg { background: hsl(var(--h) 90% 72%); color: #05070d; }
 
 .g { background: rgba(255,255,255,.06); border: 1px solid var(--line); -webkit-backdrop-filter: blur(26px) saturate(140%); backdrop-filter: blur(26px) saturate(140%);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.1), 0 24px 60px rgba(0,0,0,.35); border-radius: 28px; }
 .k { font: 500 12px 'JetBrains Mono', monospace; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
 .sub { font: 400 14px/1.45 system-ui, sans-serif; color: var(--muted); }
+/* After .k so a label can take the accent colour (the mockups' #7fe3ff at cyan). */
+.accent, .k.accent { color: hsl(var(--h) 100% 75%); }
+.accent-bg { background: hsl(var(--h) 90% 72%); color: #05070d; }
 .wordmark { font-weight: 600; font-size: 15px; letter-spacing: .32em; text-decoration: none; color: #fff; }
 .err { font: 400 14px/1.4 system-ui, sans-serif; color: #ffd0c9; border: 1px solid rgba(255,160,150,.5); border-radius: 12px; padding: 10px 14px; }
 .ok { font: 400 14px/1.4 system-ui, sans-serif; color: #d6ffe9; border: 1px solid rgba(150,255,200,.4); border-radius: 12px; padding: 10px 14px; }
@@ -64,8 +71,8 @@ h1, h2, h3, p { margin: 0; }
 .row { display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 5px 0; border-top: 1px solid rgba(255,255,255,.12); }
 .row .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .row .txt b { font-size: 16px; font-weight: 500; }
-.dot { width: 10px; height: 10px; border-radius: 50%; flex: none; border: 1.5px solid hsl(var(--h) 90% 74%); }
-.dot.on { background: hsl(var(--h) 90% 74%); }
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: none; border: 1.5px solid hsl(var(--h) 100% 75%); }
+.dot.on { background: hsl(var(--h) 100% 75%); }
 .stp { width: 44px; height: 44px; border-radius: 12px; border: 1px solid rgba(255,255,255,.25); background: transparent; color: #fff; font-size: 20px; cursor: pointer; flex: none; }
 
 .page { position: relative; z-index: 1; min-height: 100%; padding: 30px clamp(16px, 2.6vw, 36px) 32px; display: flex; flex-direction: column; gap: 22px; }

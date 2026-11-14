@@ -10,7 +10,7 @@ function Shell({ tag, children }: { tag: string; children: ReactNode }) {
     <div className="auth">
       <a className="wordmark mark" href={landing}>NIKO</a>
       <div className="stage">
-        <ParticleCore size="min(600px, 62vh, 84vw)" mode="listening" />
+        <ParticleCore size="min(600px, 66vh)" mode="listening" />
         <span className="k accent">Listening</span>
         <span className="line">{tag}</span>
       </div>
@@ -115,7 +115,7 @@ export function Invite() {
           <button className="pri">Create account</button>
           <p className="sub" style={{ fontSize: 13 }}>This link works once and expires in 7 days.</p>
         </>}
-        <Link className="lnk" to="/sign-in">I already have an account</Link>
+        {!info && <Link className="lnk" to="/sign-in">Back to sign in</Link>}
       </form>
     </Shell>
   );

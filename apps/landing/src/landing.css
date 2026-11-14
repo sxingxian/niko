@@ -1,4 +1,9 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap');
+/* Fonts are bundled with the app (no requests to Google). */
+@import '@fontsource/space-grotesk/latin-400.css';
+@import '@fontsource/space-grotesk/latin-500.css';
+@import '@fontsource/space-grotesk/latin-600.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
 * { box-sizing: border-box; }
 html.lenis, html.lenis body { height: auto; }
 body { margin: 0; background: #05070d; color: #fff; font-family: 'Space Grotesk', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
@@ -14,9 +19,11 @@ a { color: #fff; } a:hover { color: #c3cad6; }
 .wordmark { font-weight: 600; font-size: 16px; letter-spacing: .32em; }
 .signin { text-decoration: none; height: 44px; padding: 0 22px; border-radius: 999px; border: 1px solid rgba(255,255,255,.4); display: inline-flex; align-items: center; font-weight: 500; font-size: 15px; }
 .k { font: 500 12px 'JetBrains Mono', monospace; letter-spacing: .16em; text-transform: uppercase; color: #c3cad6; }
-.sec { position: relative; min-height: 100vh; display: flex; align-items: center; }
-.sec.hero { min-height: calc(100vh - 84px); align-items: flex-end; }
-.center { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 22px; padding-bottom: clamp(40px, 8vh, 72px); }
+.sec { position: relative; min-height: 720px; display: flex; align-items: center; }
+.sec.hero { min-height: 636px; align-items: flex-end; }
+.sec.end { align-items: flex-end; }
+.center { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 22px; padding-bottom: 56px; }
+.end .center { gap: 26px; padding-bottom: 72px; }
 h1 { margin: 0; font-weight: 500; font-size: clamp(44px, 7.4vw, 96px); line-height: .96; letter-spacing: -.035em; max-width: 1000px; text-wrap: balance; }
 h2 { margin: 0; font-weight: 500; font-size: clamp(32px, 4.2vw, 52px); line-height: 1.02; letter-spacing: -.025em; text-wrap: balance; }
 h2.last { font-size: clamp(36px, 6vw, 76px); line-height: .98; letter-spacing: -.03em; max-width: 860px; }
@@ -29,5 +36,5 @@ h2.last { font-size: clamp(36px, 6vw, 76px); line-height: .98; letter-spacing: -
 .li { display: flex; align-items: baseline; gap: 16px; padding: 14px 0; border-top: 1px solid rgba(255,255,255,.16); font-size: 18px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chips span { height: 40px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,.25); display: inline-flex; align-items: center; font-size: 14px; background: rgba(5,7,13,.5); }
-.foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding-top: 28px; padding-bottom: 40px; border-top: 1px solid rgba(255,255,255,.18); font: 400 14px system-ui, sans-serif; color: #c3cad6; position: relative; background: #05070d; }
+.foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding-top: 28px; padding-bottom: 40px; border-top: 1px solid rgba(255,255,255,.18); font: 400 14px system-ui, sans-serif; color: #c3cad6; position: relative; }
 .foot .wordmark { font-size: 13px; color: #fff; }

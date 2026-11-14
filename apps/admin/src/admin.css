@@ -18,18 +18,23 @@ body { background: #07090d; }
 .nv[aria-current='page'] { background: #fff; color: #07090d; font-weight: 500; }
 .nv.line { border: 1px solid rgba(255,255,255,.25); text-align: center; }
 .who { margin-top: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid rgba(255,255,255,.14); }
-.shell main { padding: 32px clamp(16px, 3vw, 44px); display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.shell { height: 100%; }
+.shell main { padding: 32px clamp(16px, 3vw, 44px); display: flex; flex-direction: column; gap: 20px; min-width: 0; min-height: 0; overflow: auto; }
 .shell main header { display: flex; flex-direction: column; gap: 8px; }
 .shell main h1 { font-weight: 500; font-size: 34px; letter-spacing: -.02em; }
-.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 20px; }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 20px; }
+@media (max-width: 1000px) { .two { grid-template-columns: 1fr; } }
 .card { padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; }
 .seg { height: 44px; padding: 0 18px; border-radius: 999px; border: 1px solid rgba(255,255,255,.3); background: transparent; color: #fff; font-size: 14px; font-weight: 500; cursor: pointer; }
 .seg[aria-pressed='true'] { background: #fff; color: #07090d; }
-.table { gap: 0; padding: 14px 24px 8px; overflow-x: auto; }
-.tr { display: grid; grid-template-columns: minmax(120px, 1.3fr) minmax(160px, 1.7fr) 90px 130px 120px 110px; align-items: center; gap: 16px; min-height: 60px; border-top: 1px solid rgba(255,255,255,.12); min-width: 780px; font-size: 14px; }
+.table { gap: 0; padding: 14px 24px 8px; overflow-x: auto; flex: 1; min-height: 0; }
+.table > .tr:last-child { margin-bottom: 0; }
+.tr { display: grid; grid-template-columns: minmax(120px, 1.3fr) minmax(160px, 1.7fr) 110px 120px 120px 150px; align-items: center; gap: 16px; min-height: 60px; border-top: 1px solid rgba(255,255,255,.12); min-width: 780px; font-size: 14px; }
 .tr.head { border-top: 0; min-height: 40px; }
 .tr.audit { grid-template-columns: 190px 200px minmax(0, 1fr); }
 .tr b { font-size: 16px; font-weight: 500; }
+.shell .sub, .gate .sub { color: #b9c2cf; }
+.shell .k { color: #b9c2cf; }
 .ell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .st { display: flex; align-items: center; gap: 8px; }
 .st i { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid #fff; }

@@ -1,6 +1,19 @@
 {
-  "name": "@niko/landing", "version": "0.1.0", "private": true, "type": "module",
-  "scripts": { "dev": "vite", "build": "vite build" },
-  "dependencies": { "lenis": "^1.1.0" },
-  "devDependencies": { "typescript": "^5.6.0", "vite": "^7.0.0" }
+  "name": "@niko/landing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@fontsource/space-grotesk": "^5.3.0",
+    "lenis": "^1.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vite": "^7.0.0"
+  }
 }

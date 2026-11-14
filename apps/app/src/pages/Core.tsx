@@ -5,7 +5,8 @@ import { SEND_COUNTDOWN_SECONDS } from '@niko/shared';
 import { api, Icon, ParticleCore } from '@niko/ui';
 import { useNiko, type Brief } from '../niko';
 
-const NAVS: [string, string, string][] = [['/', 'spark', 'Home'], ['/inbox', 'mail', 'Inbox'], ['/calendar', 'calendar', 'Calendar'], ['/notes', 'note', 'Notes'], ['/connections', 'plug', 'Connections'], ['/appearance', 'palette', 'Appearance'], ['/account', 'user', 'Account']];
+// The mockups' rail: Home, Inbox, Calendar, Notes, Connections. Settings (appearance, engine, account) sit behind the last button.
+const NAVS: [string, string, string][] = [['/', 'spark', 'Home'], ['/inbox', 'mail', 'Inbox'], ['/calendar', 'calendar', 'Calendar'], ['/notes', 'note', 'Notes'], ['/connections', 'plug', 'Connections'], ['/appearance', 'user', 'Settings']];
 
 function Dock({ className }: { className: string }) {
   return (
@@ -29,7 +30,7 @@ export function Home() {
     <div className={'home' + (open ? ' open' : '')}>
       <div className="bg" />
       <div className="stage">
-        <ParticleCore size="min(720px, 70vh, 92vw)" mode={n.mode} />
+        <ParticleCore size="var(--s)" mode={n.mode} />
         <div className="caption">
           <span className="k accent" role="status">{n.label}</span>
           <p>{n.line}</p>
@@ -37,10 +38,10 @@ export function Home() {
       </div>
       <div className="top">
         <div className="left">
-          <button className="ib g line" style={{ width: 44, height: 44, boxShadow: 'none' }} onClick={() => setNav(!nav)} aria-label="Show or hide navigation" aria-expanded={nav}><Icon name="menu" /></button>
+          <button className="ib g" style={{ width: 44, height: 44 }} onClick={() => setNav(!nav)} aria-label="Show or hide navigation" aria-expanded={nav}><Icon name="menu" /></button>
           <span className="wordmark">NIKO</span>
         </div>
-        <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="k">Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : 'Workers AI'} · {n.me?.engine.voice === 'elevenlabs' ? 'ElevenLabs' : 'Device voice'}</Link>
+        <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : 'Workers AI'} · {n.me?.engine.voice === 'elevenlabs' ? 'ElevenLabs' : 'Device voice'}</span><span className="short">Engine</span></Link>
       </div>
       <Dock className={'dock' + (nav ? ' show' : '')} />
       <aside className="panels" aria-label="Details" aria-hidden={!open}>
@@ -51,12 +52,15 @@ export function Home() {
           </div>
           <p className="reply">{n.reply}</p>
         </section>
-        {n.brief && (n.brief.events.length > 0 || n.brief.mail.length > 0) && (
-          <section className="g">
-            <span className="k">Today</span>
-            {n.brief.events.slice(0, 3).map((e, i) => <div key={i} className="row"><span className="k" style={{ color: '#fff', width: 48 }}>{e.time}</span><span className="txt"><b>{e.title}</b></span><span className="sub">{e.source}</span></div>)}
-            {n.brief.mail.slice(0, 3).map((m) => <div key={m.id} className="row"><span className="txt"><b>{m.from}</b><span className="sub">{m.subject}</span></span><span className="sub">{m.source}</span></div>)}
-            <Link className="sec" to="/inbox" tabIndex={open ? 0 : -1}>Open inbox</Link>
+        {n.brief && n.brief.chats[0] && (
+          <section className="g" aria-label="Waiting for a reply">
+            <div className="meta"><span className="k">Waiting for a reply</span><span>{n.brief.chats[0].source}</span></div>
+            <h2 style={{ fontSize: 18 }}>{n.brief.chats[0].title}</h2>
+            <p className="reply">{n.brief.chats[0].last}</p>
+            <div className="two">
+              <Link className="sec" to="/inbox" tabIndex={open ? 0 : -1}>Review</Link>
+              <Link className="pri" to="/inbox" tabIndex={open ? 0 : -1}>Reply</Link>
+            </div>
           </section>
         )}
       </aside>
@@ -68,9 +72,9 @@ export function Home() {
         </form>
       )}
       <div className="controls" style={wide ? undefined : { transform: 'none' }}>
-        <button className="ib g line" style={{ boxShadow: 'none' }} onClick={() => setTyping(!typing)} aria-label="Type instead" aria-pressed={typing}><Icon name="keys" /></button>
-        <button className="micbtn accent-bg" onClick={n.toggleMic} aria-label="Talk"><Icon name="mic" size={28} /></button>
-        <button className="ib g line" style={{ boxShadow: 'none' }} onClick={n.stop} aria-label="Stop"><Icon name="stop" /></button>
+        <button className="ib g" onClick={() => setTyping(!typing)} aria-label="Type instead" aria-pressed={typing}><Icon name="keys" /></button>
+        <button className="micbtn" onClick={n.toggleMic} aria-label="Talk"><Icon name="mic" size={28} /></button>
+        <button className="ib g" onClick={n.stop} aria-label="Stop"><Icon name="stop" /></button>
       </div>
     </div>
   );
@@ -154,11 +158,20 @@ export function Workspace() {
   }, [n, start, cancel, send.phase, view]);
   useEffect(() => () => window.clearInterval(timer.current), []);
 
-  const askDraft = async () => {
-    if (!sel) return;
-    const about = sel.kind === 'mail' ? `the email from ${sel.title} with subject "${sel.subject}"` : `the last message from ${sel.title}: "${thread.filter((m) => m.direction === 'in').slice(-1)[0]?.body ?? ''}"`;
-    try { const r = await api<{ reply: string }>('/chat', { body: { message: `Write only the text of a short, friendly reply to ${about}. No preamble.`, tz: new Date().getTimezoneOffset() } }); setDraft(r.reply); } catch (e: any) { setErr(e.message); }
-  };
+  // "Draft replies" (Connections → What Niko may do): Niko prepares a reply as soon as a conversation opens, for you to review.
+  const [drafting, setDrafting] = useState(false);
+  const drafted = useRef('');
+  useEffect(() => {
+    if (!sel || view !== 'inbox' || n.me?.permissions.draft === false) return;
+    const key = sel.kind === 'chat' ? 'c:' + sel.chatId : 'm:' + sel.id;
+    const lastIn = thread.filter((m) => m.direction === 'in').slice(-1)[0]?.body;
+    if (drafted.current === key || (sel.kind === 'chat' && !lastIn)) return;
+    drafted.current = key;
+    const about = sel.kind === 'mail' ? `the email from ${sel.title} with subject "${sel.subject}"` : `the last message from ${sel.title}: "${lastIn}"`;
+    setDrafting(true);
+    api<{ reply: string }>('/chat', { body: { message: `Write only the text of a short, friendly reply to ${about}. No preamble.`, tz: new Date().getTimezoneOffset() } })
+      .then((r) => setDraft((d) => d || (typeof r.reply === 'string' ? r.reply : ''))).catch(() => undefined).finally(() => setDrafting(false));
+  }, [sel, thread, view, n.me?.permissions.draft]);
 
   const counting = send.phase === 'counting';
   const C = 1646.2;
@@ -182,10 +195,6 @@ export function Workspace() {
           {counting && <div className="num" role="status">{send.left}</div>}
         </div>
         <div className="status"><span className="k accent" role="status">{n.label}</span><span>{n.line}</span></div>
-        <div style={{ display: 'flex', gap: 12 }}>
-          <button className="micbtn accent-bg" style={{ width: 56, height: 56 }} onClick={n.toggleMic} aria-label="Talk"><Icon name="mic" /></button>
-          <button className="ib g line" style={{ boxShadow: 'none' }} onClick={n.stop} aria-label="Stop"><Icon name="stop" /></button>
-        </div>
       </div>
 
       <div className="content">
@@ -215,7 +224,7 @@ export function Workspace() {
                 <div className="draft">
                   <span className="k">{counting ? 'Niko · sending' : 'Niko · draft'}</span>
                   <label className="sr" htmlFor="draft">Reply</label>
-                  <textarea id="draft" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Write a reply, or ask Niko to draft one" readOnly={counting} rows={2} />
+                  <textarea id="draft" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={drafting ? 'Niko is drafting…' : 'Write a reply'} readOnly={counting} rows={2} />
                   {file && <div className="att"><Icon name="clip" size={18} /><span style={{ flex: 1 }}>{file.name}</span><span className="k">Not stored</span></div>}
                 </div>
               )}
@@ -223,10 +232,9 @@ export function Workspace() {
                 {send.phase === 'draft' && <>
                   {canFile && <>
                     <input ref={fileInput} type="file" hidden onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-                    <button className="ib line" style={{ width: 48, height: 48 }} onClick={() => (file ? setFile(null) : fileInput.current?.click())} aria-label={file ? 'Remove the attachment' : 'Attach an image or file'} aria-pressed={!!file}><Icon name="clip" size={18} /></button>
+                    <button className="ib" onClick={() => (file ? setFile(null) : fileInput.current?.click())} aria-label={file ? 'Remove the attachment' : 'Attach an image or file'} aria-pressed={!!file}><Icon name="clip" size={18} /></button>
                   </>}
-                  {n.me?.permissions.draft !== false && !draft && <button className="sec" onClick={askDraft}>Draft for me</button>}
-                  <button className="sec" onClick={() => start('voice')} disabled={!draft.trim()}><Icon name="mic" size={18} />“Niko, send it”</button>
+                  <button className="sec voice" onClick={() => start('voice')} disabled={!draft.trim()}><Icon name="mic" size={18} />“Niko, send it”</button>
                   <button className="pri" onClick={() => start('tap')} disabled={!draft.trim()}>Send</button>
                 </>}
                 {counting && <>

@@ -19,6 +19,8 @@ export interface ProviderDef {
   fields?: ProviderField[];
   /** What the current code can actually do with this connection. */
   can: { read: boolean; send: boolean };
+  /** Set on the Engine screen, not listed on Connections. */
+  hidden?: boolean;
 }
 
 const hostField: ProviderField = { key: 'host', label: 'Server address', type: 'url', placeholder: 'https://' };
@@ -50,6 +52,11 @@ export const PROVIDERS: ProviderDef[] = [
     { key: 'apiKey', label: 'API key', type: 'password' },
     { key: 'model', label: 'Model name', type: 'text' },
   ], can: { read: true, send: false } },
+  { id: 'self-hosted-ai', name: 'Self-hosted model', group: 'ai', how: 'A model server you run · OpenAI-compatible', kind: 'token', hidden: true, fields: [
+    { key: 'baseUrl', label: 'Server address', type: 'url', placeholder: 'https://' },
+    { key: 'model', label: 'Model name', type: 'text', optional: true },
+    { key: 'apiKey', label: 'API key', type: 'password', optional: true },
+  ], can: { read: true, send: false } },
 ];
 
 const clientId: ProviderField = { key: 'clientId', label: 'Client ID', type: 'text' };
@@ -79,7 +86,10 @@ export const COLOURS: Record<string, number> = { cyan: 190, violet: 262, rose: 3
 export const SHIFT_ORDER = ['cyan', 'violet', 'rose', 'amber', 'emerald'];
 
 export interface Appearance { mode: 'shift' | 'single'; colours: string[]; single: string; customHue: number; seconds: number }
-export interface EnginePrefs { brain: 'workers-ai' | 'custom-ai'; voice: 'elevenlabs' | 'device'; wake: boolean; onlyMyVoice: boolean; fallback: boolean; listen: 'device' }
+export type Brain = 'workers-ai' | 'custom-ai' | 'self-hosted-ai';
+export interface EnginePrefs { brain: Brain; model?: 'fast' | 'large'; voice: 'elevenlabs' | 'device'; wake: boolean; onlyMyVoice: boolean; fallback: boolean; listen: 'device' }
+/** Workers AI models behind the Engine screen's two choices. */
+export const WORKERS_MODELS = { fast: '@cf/meta/llama-3.1-8b-instruct', large: '@cf/meta/llama-3.3-70b-instruct-fp8-fast' } as const;
 export interface Permissions { draft: boolean; chatReply: boolean; files: boolean }
 
 export interface Me {

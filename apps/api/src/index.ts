@@ -60,7 +60,7 @@ const SECURITY_HEADERS: Record<string, string> = {
   'referrer-policy': 'strict-origin-when-cross-origin',
   'permissions-policy': 'microphone=(self), camera=(), geolocation=()',
   'content-security-policy': [
-    "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com", "font-src 'self' https://fonts.gstatic.com",
+    "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'", "font-src 'self'",
     "img-src 'self' data:", "media-src 'self' blob:", "connect-src 'self'", "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'", "object-src 'none'",
   ].join('; '),
 };

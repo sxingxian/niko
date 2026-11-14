@@ -17,7 +17,7 @@ interface AuditRow { id: string; action: string; detail: Record<string, unknown>
 const ago = (iso: string | null) => {
   if (!iso) return 'Not yet';
   const d = (Date.now() - Date.parse(iso)) / 86400_000;
-  return d < 1 ? 'Today' : d < 2 ? 'Yesterday' : d < 31 ? `${Math.floor(d)} days ago` : new Date(iso).toLocaleDateString();
+  return d < 1 ? 'Today' : d < 2 ? 'Yesterday' : d < 31 ? `${Math.floor(d)} days ago` : d < 62 ? 'Last month' : new Date(iso).toLocaleDateString();
 };
 
 function SignIn({ stage, setStage }: { stage: Stage; setStage: (s: Stage) => void }) {
@@ -85,7 +85,7 @@ function SignIn({ stage, setStage }: { stage: Stage; setStage: (s: Stage) => voi
 }
 
 function Users({ onSignedOut }: { onSignedOut: () => void }) {
-  const [tab, setTab] = useState<'users' | 'audit'>('users');
+  const [tab, setTab] = useState<'users' | 'security' | 'audit'>('users');
   const [me, setMe] = useState<{ name: string; email: string } | null>(null);
   const [users, setUsers] = useState<UserRow[]>([]);
   const [invites, setInvites] = useState<InviteRow[]>([]);
@@ -120,7 +120,7 @@ function Users({ onSignedOut }: { onSignedOut: () => void }) {
   const newCodes = async () => {
     if (!confirmCodes) return setConfirmCodes(true);
     setConfirmCodes(false);
-    try { const r = await api<{ recoveryCodes: string[] }>('/admin/recovery-codes', { method: 'POST' }); setFresh(r.recoveryCodes); setTab('users'); } catch (e) { guard(e); }
+    try { const r = await api<{ recoveryCodes: string[] }>('/admin/recovery-codes', { method: 'POST' }); setFresh(r.recoveryCodes); } catch (e) { guard(e); }
   };
   const signOut = async () => { await api('/admin/sign-out', { method: 'POST' }).catch(() => undefined); onSignedOut(); };
   const active = users.filter((u) => u.status === 'active').length;
@@ -131,22 +131,15 @@ function Users({ onSignedOut }: { onSignedOut: () => void }) {
         <div className="brand"><span className="wordmark">NIKO</span><span className="k tag">Admin</span></div>
         <nav aria-label="Admin sections">
           <button className="nv" aria-current={tab === 'users' ? 'page' : undefined} onClick={() => setTab('users')}>Users</button>
+          <button className="nv" aria-current={tab === 'security' ? 'page' : undefined} onClick={() => setTab('security')}>Security</button>
           <button className="nv" aria-current={tab === 'audit' ? 'page' : undefined} onClick={() => setTab('audit')}>Audit log</button>
         </nav>
-        <div className="who"><span className="sub" style={{ fontSize: 13 }}>Signed in as {me?.name || me?.email || '…'}</span><button className="nv line" onClick={newCodes}>{confirmCodes ? 'Confirm: replace old codes' : 'New recovery codes'}</button><button className="nv line" onClick={signOut}>Sign out</button></div>
+        <div className="who"><span className="sub" style={{ fontSize: 13 }}>Signed in as {me?.name || me?.email || '…'}</span><button className="nv line" onClick={signOut}>Sign out</button></div>
       </aside>
       <main>
         {tab === 'users' ? <>
           <header><h1>Users</h1><p className="sub" style={{ fontSize: 15 }}>{active} active · {invites.length} invited · {reg === 'invite' ? 'invite only' : 'open registration'}</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
-          {fresh && (
-            <section className="g card" aria-label="New recovery codes">
-              <span className="k">Your new recovery codes · shown once</span>
-              <p className="sub">The old codes no longer work. Each of these works once if you lose your authenticator app.</p>
-              <Codes codes={fresh} />
-              <div><button className="bt" onClick={() => setFresh(null)}>I’ve saved them</button></div>
-            </section>
-          )}
           <div className="two">
             <section className="g card" aria-label="Registration">
               <span className="k">Registration</span>
@@ -184,6 +177,29 @@ function Users({ onSignedOut }: { onSignedOut: () => void }) {
             ))}
           </section>
           <p className="sub" style={{ fontSize: 13 }}>Admin sign-in needs a second factor. Every change here is written to the audit log.</p>
+        </> : tab === 'security' ? <>
+          <header><h1>Security</h1><p className="sub" style={{ fontSize: 15 }}>Your own admin sign-in: authenticator app and recovery codes.</p></header>
+          {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
+          <div className="two">
+            <section className="g card" aria-label="Second factor">
+              <span className="k">Second factor</span>
+              <p className="sub">Admin sign-in asks for a 6-digit code from your authenticator app every time. Each code works once.</p>
+              <p className="sub">Lost the app? Sign in with a recovery code, or reset it from your computer with <span className="mono">npm run user -- reset-2fa</span>.</p>
+            </section>
+            <section className="g card" aria-label="Recovery codes">
+              <span className="k">Recovery codes</span>
+              <p className="sub">Ten single-use codes for when you lose your authenticator app. Making new ones cancels the old ones.</p>
+              <div><button className="bt" onClick={newCodes}>{confirmCodes ? 'Confirm: replace the old codes' : 'Make new recovery codes'}</button></div>
+            </section>
+          </div>
+          {fresh && (
+            <section className="g card" aria-label="New recovery codes">
+              <span className="k">Your new recovery codes · shown once</span>
+              <p className="sub">The old codes no longer work. Each of these works once if you lose your authenticator app.</p>
+              <Codes codes={fresh} />
+              <div><button className="bt" onClick={() => setFresh(null)}>I’ve saved them</button></div>
+            </section>
+          )}
         </> : <>
           <header><h1>Audit log</h1><p className="sub" style={{ fontSize: 15 }}>The latest 200 events. File entries record name, size and time only, never contents.</p></header>
           <section className="g card table" aria-label="Audit entries">
