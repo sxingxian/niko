@@ -37,6 +37,7 @@ Nothing here has run against live services yet. The code typechecks, all three f
 | Landing, sign-in, invite, sign-up, forgot/reset password | Built |
 | Passkeys (sign-in only; added from Account) | Built |
 | Admin: second factor (authenticator app), users on/off, invites, registration switch, audit log | Built |
+| Database updates applied automatically on deploy (`npm run migrate`) | Built; tested on a local PostgreSQL 16, not yet on Neon |
 | Sign-in lockout (doubling), single-use second-factor codes, recovery codes, command-line account recovery | Built; database logic tested on an in-process Postgres, not yet on Neon |
 | Home core, voice loop (wake word "Niko", commands, speech), text input | Built |
 | Voice navigation ("Niko, open my inbox") | Built |

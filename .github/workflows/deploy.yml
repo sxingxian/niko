@@ -3,11 +3,23 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Only list the database changes that would run (no deploy)
+        type: boolean
+        default: false
 permissions:
   contents: read
+# One deploy at a time, in order; never cancel one that is part-way through.
+concurrency:
+  group: deploy-niko
+  cancel-in-progress: false
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      # Only used to decide whether to deploy; the steps below get the secrets they need and no others.
+      HAS_CLOUDFLARE: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -17,12 +29,17 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build:web
+      # The database is updated first, so the new code never runs against an old database.
+      # Migrations only add things, so the code that is still live keeps working in between.
+      - name: Update the database (Neon)
+        if: ${{ env.HAS_CLOUDFLARE == 'true' }}
+        run: npm run migrate -- ${{ inputs.dry_run && '--dry-run' || '' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Deploy Worker
-        if: ${{ env.CLOUDFLARE_API_TOKEN != '' }}
+        if: ${{ env.HAS_CLOUDFLARE == 'true' && !inputs.dry_run }}
         run: npx wrangler deploy
         working-directory: apps/api
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

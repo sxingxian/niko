@@ -15,18 +15,24 @@ All three hosts are the same Niko: one Worker, one database, shared accounts. Th
 ## 1. Neon database
 
 1. Create a project at neon.tech. Choose the region nearest you (**AWS Asia Pacific (Singapore)**) and PostgreSQL 16 or later.
-2. Open the **SQL Editor** and run these files once each, in order (paste the whole file):
+2. Dashboard → **Connect** → copy the **pooled** connection string (the host contains `-pooler`). This is `DATABASE_URL`.
 
-   | File | Adds |
-   | --- | --- |
-   | `packages/db/migrations/0001_init.sql` | Accounts, sessions, invites, passkeys, connections, messages, sends, audit log, and the `pgcrypto` extension used for password hashing |
-   | `packages/db/migrations/0002_signin_protections.sql` | Sign-in lockout, single-use second-factor codes, recovery codes |
+That is all you do in Neon. The tables are created and updated for you on every deploy: `npm run migrate` (`scripts/migrate.mjs`) applies the files in `packages/db/migrations` in name order, once each, before the Worker is deployed. Section 3 shows where it runs.
 
-3. Dashboard → **Connect** → copy the **pooled** connection string (the host contains `-pooler`). This is `DATABASE_URL`.
+| File | Adds |
+| --- | --- |
+| `0001_init.sql` | Accounts, sessions, invites, passkeys, connections, messages, sends, audit log, and the `pgcrypto` extension used for password hashing |
+| `0002_signin_protections.sql` | Sign-in lockout, single-use second-factor codes, recovery codes |
 
-There is no migration runner yet: each new file in `packages/db/migrations` is run by hand in the SQL Editor, once, before the code that needs it is deployed. The release notes for a change say when there is one.
+How it behaves:
 
-`DATABASE_URL` is the master key: anyone who has it can read every account and reset any password (see "Account recovery" below). Store it in your password manager and nowhere else except the Worker secret.
+- Applied files are recorded in the table `schema_migrations`, so running it again does nothing.
+- Everything pending is applied in one transaction. If any statement fails, nothing is changed and the deploy stops before the Worker is touched.
+- Two runs at the same time wait for each other.
+- A file that has been applied must not be edited; the run refuses if it was. Put every change in a new file (`0003_…sql`), and only add things (new tables, new columns with defaults) so the code that is still live keeps working while the deploy finishes.
+- If you already ran the files by hand in the SQL Editor, the first automatic run simply records them (they are written to be safe to repeat).
+
+`DATABASE_URL` is the master key: anyone who has it can read every account and reset any password (see "Account recovery" below). Keep it in three places only: your password manager, the Worker secret, and the deploy secret (GitHub or Cloudflare build) that updates the database.
 
 ## 1b. Email (Resend)
 
@@ -80,7 +86,7 @@ Both `sxingxian.com` and `midnightpoetry.studio` must be zones in the **same Clo
 
 ### Deploy from GitHub (recommended)
 
-`.github/workflows/deploy.yml` type-checks, builds the three front ends and deploys on every push to `main`. It skips the deploy step until the token below exists.
+`.github/workflows/deploy.yml` type-checks, builds the three front ends, **updates the Neon database**, then deploys the Worker, on every push to `main`. It skips the database and deploy steps until the Cloudflare token below exists; once it does, `DATABASE_URL` is required too.
 
 One-time setup (in a browser at github.com; the GitHub app can't edit secrets):
 
@@ -88,8 +94,11 @@ One-time setup (in a browser at github.com; the GitHub app can't edit secrets):
 2. Repository → Settings → Secrets and variables → Actions → **Secrets**:
    - `CLOUDFLARE_API_TOKEN` (the token)
    - `CLOUDFLARE_ACCOUNT_ID` (Cloudflare dashboard → Workers & Pages → the Account ID in the sidebar)
+   - `DATABASE_URL` (the Neon connection string, the same value as the Worker secret)
 
-**Each time:** push to `main`, or GitHub app → the repository → **Actions** → **Deploy Niko** → **Run workflow**.
+**Each time:** push to `main`, or GitHub app → the repository → **Actions** → **Deploy Niko** → **Run workflow**. Tick *dry run* to only list the database changes that would run; nothing is changed and nothing is deployed.
+
+The database secret is given to the one step that needs it, the workflow runs only for `main` of this repository (never for pull requests or forks), and it can only read the repository. For an extra lock, put the three secrets in a GitHub **Environment** with yourself as required reviewer.
 
 ### Deploy from your computer
 
@@ -97,6 +106,8 @@ From the repository root:
 
 ```bash
 npm ci
+export DATABASE_URL='…'   # only in this terminal; never in a file in the repository
+npm run migrate    # updates the database (add -- --dry-run to only list changes)
 npm run deploy     # builds landing, app and admin, then runs wrangler deploy
 ```
 
@@ -106,8 +117,10 @@ If you connect the repository in Workers & Pages → Create → Import a reposit
 
 - **Root directory:** `/` (repository root)
 - **Build command:** `npm ci && npm run build:web`
-- **Deploy command:** `npm run deploy -w @niko/api`
-- **Build variables:** `NODE_VERSION=22`
+- **Deploy command:** `npm run migrate && npm run deploy -w @niko/api`
+- **Build variables:** `NODE_VERSION=22`, and `DATABASE_URL` added as a **Secret** (Settings → Build → Variables and secrets). This is separate from the Worker's own `DATABASE_URL` secret; both hold the same value.
+
+The database is updated during Cloudflare's build, just before the Worker goes live. If the update fails, the deploy stops.
 
 The Worker's name must stay `niko` (it matches `name` in `wrangler.jsonc`). Use one way of deploying, not both, or each push deploys twice.
 
@@ -159,7 +172,8 @@ Incoming addresses the Worker listens on:
 
 ## 6. After the first deploy
 
-- [ ] `https://niko.sxingxian.com/api/auth/config` answers with JSON. An error here means `DATABASE_URL` is missing or the migrations were not run.
+- [ ] The deploy log shows `Applied 2 migrations.` (or `Database is up to date`).
+- [ ] `https://niko.sxingxian.com/api/auth/config` answers with JSON. An error here means the Worker's `DATABASE_URL` secret is missing or wrong.
 - [ ] All three hosts load: the landing page on both `niko.` addresses, the app on `/app` and on `nikoapp.midnightpoetry.studio`, the admin portal on both `/admin` addresses.
 - [ ] Create the owner (section 4), set up the authenticator and save the recovery codes.
 - [ ] Sign out of the admin portal and sign in again with a **recovery code**, then press **New recovery codes** and save the new set.
@@ -218,6 +232,7 @@ Use a separate Neon branch or project for development, not the live database.
 - The deploy workflow installs only the versions in `package-lock.json` (`npm ci`) and will not deploy a commit that fails the type check or the build.
 - The workflow has read-only access to the repository; the Cloudflare token is the only secret it sees.
 - The Worker serves only its three custom domains (`workers_dev` and `preview_urls` are off).
-- Run a new migration in Neon **before** pushing the code that needs it; migrations only add things, so the old code keeps working in between.
+- The database is updated before the Worker on every deploy, in one transaction; a failed update stops the deploy. Migrations only add things, so the old code keeps working in between. To undo a change, add a new migration; Neon's point-in-time restore is the fallback.
+- Deploys run one at a time, in order.
 - Rotating secrets: `RESEND_API_KEY`, provider secrets and `DATABASE_URL` (Neon → reset password) can be replaced at any time with `wrangler secret put`. `ENCRYPTION_KEY` cannot be rotated without losing saved connections and second factors.
 - There are no automated tests in CI yet beyond the type check; the security notes are in [SECURITY.md](SECURITY.md).
