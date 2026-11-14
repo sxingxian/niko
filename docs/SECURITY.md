@@ -9,7 +9,7 @@
 - **Sign-in lockout**: counted per email and network address together. After 5 wrong attempts in a row that pair is locked for 1 minute, then 2, 4, 8, 16, 32, up to 60. While locked, even the right password is refused. Unknown emails are counted the same way, so a lock does not reveal which accounts exist. Wrong second-factor and recovery codes count too. A separate per-address cap limits guessing across many emails.
 - **Single-use codes**: each authenticator time step is accepted once per admin (an atomic database update), so a code that was seen or intercepted cannot be used again.
 - **Recovery codes**: ten codes shown once when the second factor is first set up; only their hashes are stored; each works once; an admin can replace the set, which cancels the old ones.
-- **Command-line recovery**: `npm run user` (see SETUP) resets a password or second factor and clears locks using the database connection string. There is no recovery path over the web that skips the second factor.
+- **Command-line recovery**: `npm run user` (see [DEPLOYMENT.md](DEPLOYMENT.md)) resets a password or second factor and clears locks using the database connection string. There is no recovery path over the web that skips the second factor.
 - **Invite only by default**: invites and reset links are single-use, stored hashed, and expire (7 days / 30 minutes). With open registration, new accounts stay switched off until an admin enables them.
 - **Passkeys**: sign-in only, one per registrable domain (`sxingxian.com`, `midnightpoetry.studio`).
 - **Attempt limits**: sign-in, admin sign-in, second-factor, invite, reset and setup attempts are limited per email and per IP.

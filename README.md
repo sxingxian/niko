@@ -10,7 +10,7 @@ A voice assistant across your mail, calendars, notes and chat apps. One Cloudfla
 
 Both domains share one Neon database, so an account works on either. Sessions and passkeys are per domain.
 
-**Start with [docs/SETUP.md](docs/SETUP.md).** Security notes are in [docs/SECURITY.md](docs/SECURITY.md).
+**Start with [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).** Security notes are in [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Layout
 

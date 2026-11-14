@@ -120,7 +120,7 @@ app.get('/connections/:provider/oauth', async (c) => {
   const provider = c.req.param('provider');
   const cfg = oauthConfig(c.env, provider);
   if (!cfg) return c.json({ error: 'This connection does not use sign-in.' }, 400);
-  if (!cfg.clientId || !cfg.clientSecret) return c.json({ error: 'This connection is not set up on the server yet. See docs/SETUP.md.' }, 503);
+  if (!cfg.clientId || !cfg.clientSecret) return c.json({ error: 'This connection is not set up on the server yet. See docs/DEPLOYMENT.md.' }, 503);
   const state = randomToken();
   const url = new URL(c.req.url);
   await c.get('db').insert(oauthStates).values({ state, userId: c.get('user').id, provider, host: url.host });
