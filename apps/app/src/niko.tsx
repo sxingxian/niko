@@ -40,6 +40,14 @@ const NAV: [RegExp, string][] = [
   [/\bengine\b/, '/engine'], [/\b(appearance|colou?rs?)\b/, '/appearance'], [/\baccount\b/, '/account'], [/\bhome\b/, '/'],
 ];
 
+/** "Niko" as speech recognisers write it: Niko, Nico, Nikko, Nicko, Neko, Neeko, Nicco, optionally after "hey"/"ok".
+ * Returns what was said after the name (empty if the name was said alone), or null if the name wasn't heard. */
+const WAKE = /(?:^|[^a-z])(?:(?:hey|hi|ok|okay)[\s,]+)?n(?:i|ee|e|y)(?:k|c|ck|kk|cc|q)h?o[h]?(?![a-z])[\s,.!?:;-]*(.*)$/i;
+export function matchWake(text: string): { command: string } | null {
+  const m = WAKE.exec(text);
+  return m ? { command: (m[1] ?? '').trim() } : null;
+}
+
 export function NikoProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null | undefined>(undefined);
   const [mode, setMode] = useState<CoreMode>('idle');
@@ -118,18 +126,35 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, [navigate, idle, say]);
 
   // Speech recognition: runs while the app is open and the mic is allowed.
+  // Interim results let the core react the moment "Niko" is heard; the command itself is taken from the final text.
   const startRec = useCallback(() => {
     if (!SR || rec.current) return;
     const r = new SR();
-    r.continuous = true; r.interimResults = false; r.lang = navigator.language || 'en-US';
+    r.continuous = true; r.interimResults = true; r.maxAlternatives = 3; r.lang = navigator.language || 'en-US';
     r.onresult = (ev: any) => {
-      const text: string = ev.results[ev.results.length - 1][0].transcript.trim();
-      const m = text.match(/\bni[ck]ko\b[,.!]?\s*(.*)$/i);
-      if (m) { active.current = false; if (m[1]) void ask(m[1]); else { active.current = true; setMode('listening'); setLabel('Listening'); setLine('Go ahead.'); } }
-      else if (active.current) { active.current = false; void ask(text); }
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const res = ev.results[i];
+        // Recognisers often spell the name differently in their first guess, so check every alternative.
+        const alts: string[] = Array.from({ length: res.length }, (_, k) => String(res[k]?.transcript ?? '').trim());
+        const hit = alts.map(matchWake).find(Boolean);
+        if (!res.isFinal) {
+          if (hit && !active.current) { setMode('listening'); setLabel('Listening'); setLine('Go ahead.'); }
+          continue;
+        }
+        if (hit) {
+          if (hit.command) { active.current = false; void ask(hit.command); }
+          else { active.current = true; setMode('listening'); setLabel('Listening'); setLine('Go ahead.'); }
+        } else if (active.current && alts[0]) { active.current = false; void ask(alts[0]); }
+      }
     };
-    r.onend = () => { rec.current = null; if (wantRec.current) setTimeout(startRec, 300); };
-    r.onerror = (ev: any) => { if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') { wantRec.current = false; setMicOn(false); } };
+    r.onend = () => { rec.current = null; if (wantRec.current) setTimeout(startRec, 300); else setMicOn(false); };
+    r.onerror = (ev: any) => {
+      if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+        // Some browsers (Safari, iOS) only allow listening after a tap. One tap on the mic keeps it on from then on.
+        wantRec.current = false; setMicOn(false);
+        setLabel('Mic is off'); setLine('Tap the mic once so Niko can listen for its name.');
+      }
+    };
     try { r.start(); rec.current = r; setMicOn(true); } catch { /* already started */ }
   }, [SR, ask]);
   const wantRec = useRef(false);

@@ -89,7 +89,9 @@ export interface Appearance { mode: 'shift' | 'single'; colours: string[]; singl
 export type Brain = 'workers-ai' | 'custom-ai' | 'self-hosted-ai';
 export interface EnginePrefs { brain: Brain; model?: 'fast' | 'large'; voice: 'elevenlabs' | 'device'; wake: boolean; onlyMyVoice: boolean; fallback: boolean; listen: 'device' }
 /** Workers AI models behind the Engine screen's two choices. */
-export const WORKERS_MODELS = { fast: '@cf/meta/llama-3.1-8b-instruct', large: '@cf/meta/llama-3.3-70b-instruct-fp8-fast' } as const;
+// Fallback defaults; the live fast list is AI_MODEL in apps/api/wrangler.jsonc. Each is a comma-separated, ordered list.
+// Check https://developers.cloudflare.com/workers-ai/models/ for retirement dates before changing.
+export const WORKERS_MODELS = { fast: '@cf/meta/llama-4-scout-17b-16e-instruct,@cf/mistralai/mistral-small-3.1-24b-instruct', large: '@cf/meta/llama-3.3-70b-instruct-fp8-fast' } as const;
 export interface Permissions { draft: boolean; chatReply: boolean; files: boolean }
 
 export interface Me {

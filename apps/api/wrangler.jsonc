@@ -18,7 +18,9 @@
   ],
   "vars": {
     "EMAIL_FROM": "Niko <niko-noreply@app.midnightpoetry.studio>",
-    "AI_MODEL": "@cf/meta/llama-3.1-8b-instruct"
+    // Tried in order; the second is used only if the first fails (for example after Cloudflare retires a model).
+    // Check https://developers.cloudflare.com/workers-ai/models/ for retirement dates before changing.
+    "AI_MODEL": "@cf/meta/llama-4-scout-17b-16e-instruct,@cf/mistralai/mistral-small-3.1-24b-instruct"
   }
   // Secrets (set with `wrangler secret put NAME`, never committed):
   // DATABASE_URL, ENCRYPTION_KEY, BOOTSTRAP_TOKEN, RESEND_API_KEY
