@@ -33,7 +33,7 @@ auth.post('/setup', async (c) => {
   if ((await userCount(c)) > 0) return c.json({ error: 'Niko is already set up.' }, 409);
   if (!c.env.BOOTSTRAP_TOKEN || !b.token || !safeEqual(b.token, c.env.BOOTSTRAP_TOKEN)) return c.json({ error: 'Setup token is not correct.' }, 403);
   if (!isEmail(b.email)) return c.json({ error: 'Enter a valid email.' }, 400);
-  const bad = passwordProblem(b.password);
+  const bad = passwordProblem(b.password, b.email);
   if (bad) return c.json({ error: bad }, 400);
   const [u] = await c.get('db').insert(users).values({
     email: b.email, name: (b.name ?? '').slice(0, 80), passwordHash: await hashPassword(c.get('db'), b.password!), role: 'admin', isOwner: true,
@@ -71,7 +71,7 @@ auth.post('/sign-up', async (c) => {
   const b = await c.req.json<{ email?: string; name?: string; password?: string }>();
   if (await tooMany(c, 'signup-ip:' + clientIp(c), 6, 60)) return c.json({ error: 'Too many attempts. Try again later.' }, 429);
   if (!isEmail(b.email)) return c.json({ error: 'Enter a valid email.' }, 400);
-  const bad = passwordProblem(b.password);
+  const bad = passwordProblem(b.password, b.email);
   if (bad) return c.json({ error: bad }, 400);
   if (!(await findUser(c.get('db'), b.email))) {
     // New accounts stay switched off until an admin enables them.
@@ -103,7 +103,7 @@ auth.post('/invite/:token', async (c) => {
   const db = c.get('db');
   const inv = await liveInvite(db, c.req.param('token'));
   if (!inv) return c.json({ error: 'This invite link has expired or was already used.' }, 404);
-  const bad = passwordProblem(b.password);
+  const bad = passwordProblem(b.password, inv.email);
   if (bad) return c.json({ error: bad }, 400);
   if (await findUser(db, inv.email)) return c.json({ error: 'An account with this email already exists. Sign in instead.' }, 409);
   const [u] = await db.insert(users).values({

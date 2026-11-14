@@ -73,10 +73,30 @@ export const MAX_RELAY_BYTES = 20 * 1024 * 1024;
 export function isEmail(v: unknown): v is string {
   return typeof v === 'string' && v.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
-export function passwordProblem(v: unknown): string | null {
+export const PASSWORD_MIN = 12;
+export const PASSWORD_MAX = 256;
+
+// The most common passwords that pass a 12-character minimum.
+const COMMON = new Set([
+  'password1234', 'password12345', 'password123456', '123456789012', '1234567890123', '12345678910', 'qwertyuiop12',
+  'qwertyuiopas', 'qwerty123456', '1q2w3e4r5t6y', '1qaz2wsx3edc', 'q1w2e3r4t5y6', 'iloveyou1234', 'administrator',
+  'adminadmin12', 'admin1234567', 'welcome12345', 'letmein12345', 'passw0rd1234', 'p@ssw0rd1234', 'p@ssword1234',
+  'changeme1234', 'abcdefghijkl', 'abc123456789', 'aaaaaaaaaaaa', '111111111111', '000000000000', '123123123123',
+  'qazwsxedcrfv', 'zaq12wsxcde3', 'trustno11234', 'football1234', 'baseball1234', 'superman1234', 'sunshine1234',
+  'princess1234', 'starwars1234', 'dragon123456', 'monkey123456', 'master123456', 'whatever1234', 'nikonikoniko',
+  'niko12345678', 'correcthorsebatterystaple',
+]);
+
+/** Returns a reason the password is not acceptable, or null if it is. Same policy as sxingxian.com admin accounts. */
+export function passwordProblem(v: unknown, email = ''): string | null {
   if (typeof v !== 'string') return 'Enter a password.';
-  if (v.length < 12) return 'Use 12 or more characters.';
-  // bcrypt reads at most 72 bytes; refuse anything longer so no part of a password is silently ignored.
-  if (new TextEncoder().encode(v).length > 72) return 'Use 72 characters or fewer.';
+  const chars = [...v];
+  if (chars.length < PASSWORD_MIN) return `Use at least ${PASSWORD_MIN} characters. A few unrelated words works well.`;
+  if (chars.length > PASSWORD_MAX) return `Use at most ${PASSWORD_MAX} characters.`;
+  if (new Set(chars).size < 5) return 'Use more varied characters.';
+  const lower = v.toLowerCase();
+  if (COMMON.has(lower)) return 'That password is too common. Choose another.';
+  const local = email.toLowerCase().split('@')[0] ?? '';
+  if (local.length >= 4 && lower.includes(local)) return 'Don’t include your email address in the password.';
   return null;
 }

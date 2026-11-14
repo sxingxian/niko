@@ -2,7 +2,7 @@
 
 ## What the code does
 
-- **Passwords**: bcrypt (cost 12), computed inside Postgres by the `pgcrypto` extension, not in the Worker. 12 to 72 characters. The password travels from the Worker to Neon over TLS as a bound query parameter and is never stored in plain form.
+- **Passwords**: stored the same way as the sxingxian.com admin accounts. The Worker pre-hashes with SHA-256 (domain-separated, NFKC-normalised), and Neon stores `bcrypt(prehash)` at cost 12 via `pgcrypto`. The plaintext never leaves the Worker, bcrypt's 72-byte limit cannot truncate a long passphrase, and hashing runs on Neon instead of the Worker's CPU budget. Policy: 12 to 256 characters, not a common password, does not contain the email name. Unknown emails are checked against a dummy hash so they take the same time.
 - **Sessions**: random 256-bit token in an `HttpOnly`, `Secure`, `SameSite=Lax`, `__Host-` cookie; only its SHA-256 hash is stored. App sessions last 30 days, admin sessions 8 hours.
 - **Cross-site requests**: every state-changing API call must carry an `Origin` that matches the host. Webhooks and the OAuth return leg are exempt and authenticate by signature, secret or state instead.
 - **Admin**: separate session cookie; password then a time-based code from an authenticator app. Admin routes refuse sessions that have not passed the second factor.
@@ -25,4 +25,4 @@
 - **Attempt limits are stored in Postgres** and are approximate under bursts. Add a Cloudflare rate-limiting rule on `/api/auth/*` and `/api/admin/*` for a firmer limit.
 - **Telegram bots** see only messages people send to the bot. The Telegram file link is fetched with the bot token on demand; the token never reaches the browser.
 - **Audit log and chat history** grow without pruning. Add retention if this runs for long.
-- **Password hashing in the database** means the plain password is briefly visible to Postgres while it is hashed. Do not enable statement logging that records query parameters on the Neon project.
+- **Sign-in protections that sxingxian.com has and Niko does not yet**: the per-email-and-IP lockout that doubles, single-use time codes for the admin second factor, recovery codes, and the command-line account recovery tool.
