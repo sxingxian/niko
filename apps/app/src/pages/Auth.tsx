@@ -19,14 +19,28 @@ function Shell({ tag, children }: { tag: string; children: ReactNode }) {
   );
 }
 
-function useConfig() {
-  const [cfg, setCfg] = useState<{ registration: 'invite' | 'open'; needsSetup: boolean } | null>(null);
-  useEffect(() => { api('/auth/config').then(setCfg).catch(() => setCfg({ registration: 'invite', needsSetup: false })); }, []);
-  return cfg;
+type Config = { registration: 'invite' | 'open'; needsSetup: boolean };
+const SERVER_DOWN = 'Niko can’t reach its server right now. Sign-in may not work until it’s back.';
+
+/** Sign-in settings. If the server can't answer, say so (instead of quietly guessing "invite only, already
+ * set up", which hid the first-run setup) and keep checking, so the page recovers on its own once it's back. */
+function useConfig(): { cfg: Config | null; down: string } {
+  const [cfg, setCfg] = useState<Config | null>(null);
+  const [down, setDown] = useState('');
+  useEffect(() => {
+    let stop = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const load = () => api<Config>('/auth/config')
+      .then((c) => { if (!stop) { setCfg(c); setDown(''); } })
+      .catch(() => { if (!stop) { setDown(SERVER_DOWN); timer = setTimeout(load, 10_000); } });
+    load();
+    return () => { stop = true; clearTimeout(timer); };
+  }, []);
+  return { cfg, down };
 }
 
 export function SignIn() {
-  const cfg = useConfig();
+  const { cfg, down } = useConfig();
   const { refreshMe } = useNiko();
   const nav = useNavigate();
   const [email, setEmail] = useState('');
@@ -55,7 +69,7 @@ export function SignIn() {
         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
           <h1>Sign in</h1>{cfg?.registration !== 'open' && <span className="k">Invite only</span>}
         </div>
-        {err && <p className="err" role="alert">{err}</p>}
+        {(err || down) && <p className="err" role="alert">{err || down}</p>}
         <Field label="Email"><input className="in" type="email" autoComplete="username" placeholder="name@example.com" value={email} onChange={(e) => setEmail(e.target.value)} required /></Field>
         <PasswordField label="Password" autoComplete="current-password" value={password} onChange={setPassword} />
         <button className="pri" disabled={busy}>Sign in</button>
@@ -108,7 +122,7 @@ export function Invite() {
 }
 
 export function SignUp() {
-  const cfg = useConfig();
+  const { cfg, down } = useConfig();
   const { refreshMe } = useNiko();
   const nav = useNavigate();
   const [f, setF] = useState({ name: '', email: '', password: '', token: '' });
@@ -122,6 +136,9 @@ export function SignUp() {
       else { await api('/auth/sign-up', { body: f }); setSent(true); }
     } catch (x: any) { setErr(x.message); }
   };
+  if (!cfg && down) {
+    return <Shell tag="Reconnecting."><h1>Can’t reach Niko</h1><p className="err" role="alert">{down}</p><p className="sub">This page keeps trying and continues by itself once the server answers.</p><Link className="lnk" to="/sign-in">Back to sign in</Link></Shell>;
+  }
   if (cfg && !setup && cfg.registration !== 'open') {
     return <Shell tag="Invite only."><h1>Invite only</h1><p className="sub">Niko accounts are created by invitation. Ask your admin for an invite.</p><Link className="lnk" to="/sign-in">Sign in</Link></Shell>;
   }

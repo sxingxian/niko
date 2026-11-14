@@ -33,7 +33,7 @@ How it behaves:
 - A file that has been applied must not be edited; the run refuses if it was. Put every change in a new file (`0003_…sql`), and only add things (new tables, new columns with defaults) so the code that is still live keeps working while the deploy finishes.
 - If you already ran the files by hand in the SQL Editor, the first automatic run simply records them (they are written to be safe to repeat).
 
-`DATABASE_URL` is the master key: anyone who has it can read every account and reset any password (see "Account recovery" below). Keep it in three places only: your password manager, the Worker secret, and the deploy secret (GitHub or Cloudflare build) that updates the database.
+`DATABASE_URL` is the master key: anyone who has it can read every account and reset any password (see "Account recovery" below). Keep it in two places only: your password manager and the deploy secret (Cloudflare build, or GitHub) that updates the database. Each deploy copies that same value to the Worker as its runtime secret, so you never set it on the Worker by hand and the two can't drift apart.
 
 ## 1b. Email (Resend)
 
@@ -52,11 +52,10 @@ openssl rand -base64 32   # ENCRYPTION_KEY
 openssl rand -hex 24      # BOOTSTRAP_TOKEN
 ```
 
-Then set the Worker secrets from `apps/api`:
+Then set the Worker secrets from `apps/api` (not `DATABASE_URL`: the deploy sets that one, see the table):
 
 ```bash
 npx wrangler login
-npx wrangler secret put DATABASE_URL      # Neon pooled connection string
 npx wrangler secret put ENCRYPTION_KEY
 npx wrangler secret put BOOTSTRAP_TOKEN
 npx wrangler secret put RESEND_API_KEY
@@ -64,7 +63,7 @@ npx wrangler secret put RESEND_API_KEY
 
 | Secret | Needed | What it does |
 | --- | --- | --- |
-| `DATABASE_URL` | Yes | Connects the Worker to Neon |
+| `DATABASE_URL` | Yes | Connects the Worker to Neon. **Set automatically**: `npm run release` uploads the build's `DATABASE_URL` with every deploy (`scripts/deploy-worker.mjs`). Cloudflare *build* variables are not visible to the running Worker, which is why it isn't left to a second copy |
 | `ENCRYPTION_KEY` | Yes | Encrypts saved connection tokens and admin second-factor keys before they reach the database |
 | `BOOTSTRAP_TOKEN` | Once | Lets you create the owner account on first run (section 4). Useless after one user exists; delete it then |
 | `RESEND_API_KEY` | For email | Sends invitations and reset links |
@@ -73,7 +72,7 @@ There are no Google, Microsoft, Notion or Slack keys here. Each account adds its
 
 **Keep a copy of `ENCRYPTION_KEY` in your password manager.** If it is lost or changed, every saved connection, every account's app keys and every admin second factor become unreadable: people add their keys and reconnect and admins run `reset-2fa` (see "Account recovery").
 
-**Without a computer:** let the first deploy run (section 3), then add the same names in Cloudflare → Workers & Pages → `niko` → Settings → **Variables and secrets** → Add → type **Secret**. Secrets set there are kept across deploys. Make the two random values with a password manager's generator (44+ characters for `BOOTSTRAP_TOKEN`; `ENCRYPTION_KEY` must be exactly 32 random bytes in base64, so use the `openssl` line when you can).
+**Without a computer:** let the first deploy run (section 3), then add `ENCRYPTION_KEY`, `BOOTSTRAP_TOKEN` and `RESEND_API_KEY` in Cloudflare → Workers & Pages → `niko` → Settings → **Variables and secrets** → Add → type **Secret**. Secrets set there are kept across deploys. Make the two random values with a password manager's generator (44+ characters for `BOOTSTRAP_TOKEN`; `ENCRYPTION_KEY` must be exactly 32 random bytes in base64, so use the `openssl` line when you can).
 
 **Never put any of these in `wrangler.jsonc`, a committed `.env` or `.dev.vars` file, or a GitHub variable.** Only `EMAIL_FROM` and `AI_MODEL` are plain variables.
 
@@ -100,7 +99,7 @@ Connect the repository to Cloudflare once. After that, every new commit on `main
 
 > **Don't keep the default deploy command `npx wrangler deploy`.** The Worker's settings live in `apps/api`, not the repository root, so the default fails. `npm run release` updates the Neon database (`npm run migrate`) and then deploys from the right folder. If the database update fails, the deploy stops and the live site is left as it was.
 
-The build's `DATABASE_URL` secret is separate from the Worker's own `DATABASE_URL` secret (section 2); both hold the same value. Other branches are never built, so a branch or pull request can't reach the database.
+The build's `DATABASE_URL` is the only copy you keep: `npm run release` migrates with it and then hands the same value to the Worker as a runtime secret. Other branches are never built, so a branch or pull request can't reach the database.
 
 GitHub still runs `.github/workflows/deploy.yml` on every push as a check (type check and build). Its own database and deploy steps stay switched off unless you add a Cloudflare token there (next heading), so nothing deploys twice.
 
@@ -131,6 +130,14 @@ npm run release    # updates the database, then deploys (npm run migrate -- --dr
 `wrangler.jsonc` claims `niko.sxingxian.com`, `niko.midnightpoetry.studio` and `nikoapp.midnightpoetry.studio` as Worker custom domains, so the first deploy creates the DNS records and certificates. If a hostname already has a DNS record or belongs to another Worker or Pages project, remove that first or the deploy fails. Keep the orange-cloud proxy on: the audit log and the sign-in lockout read the real client address from `CF-Connecting-IP`.
 
 The Worker answers only on those three hosts: `workers_dev` and `preview_urls` are off.
+
+## Troubleshooting
+
+| What you see | Cause | Fix |
+| --- | --- | --- |
+| The app says "Niko can't reach its server", or `/api/...` answers **503** `not_configured` | A required Worker secret is missing. The Worker log (Worker → Observability) names it: `Worker secret(s) missing: …` | `DATABASE_URL`: redeploy (Deployments → Retry build); the deploy sets it. `ENCRYPTION_KEY`: add it as in section 2 |
+| `/api/...` answers **500** "Something went wrong on the server" | The Worker log line `api error <method> <path>: …` gives the reason, including the database error code (e.g. `42P01` = a table is missing → the migration didn't run on this database; `28P01` = wrong password in `DATABASE_URL`) | Fix what it names, then redeploy |
+| No **Set up Niko** screen on a new install | The app can't read `/api/auth/config` | See the two rows above |
 
 ## 4. First owner and admin
 

@@ -10,7 +10,7 @@
     "dev:api": "npm run dev -w @niko/api",
     "deploy": "npm run build:web && npm run deploy -w @niko/api",
     "migrate": "node scripts/migrate.mjs",
-    "release": "npm run migrate && npm run deploy -w @niko/api",
+    "release": "npm run migrate && node scripts/deploy-worker.mjs",
     "user": "node scripts/user.mjs"
   },
   "devDependencies": { "@neondatabase/serverless": "^1.0.0", "esbuild": "^0.25.0", "pg": "^8.13.0" },

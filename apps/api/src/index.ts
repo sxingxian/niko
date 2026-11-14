@@ -9,7 +9,16 @@ import { hooks } from './routes/hooks';
 
 const api = new Hono<AppEnv>().basePath('/api');
 
+// Secrets the API can't run without. A missing one is a deploy problem, so say so plainly in the
+// Worker log and answer 503 instead of failing later inside a database call with a vague 500.
+const REQUIRED_SECRETS = ['DATABASE_URL', 'ENCRYPTION_KEY'] as const;
+
 api.use('*', async (c, next) => {
+  const missing = REQUIRED_SECRETS.filter((k) => !c.env[k]);
+  if (missing.length) {
+    console.error(`niko not configured: Worker secret(s) missing: ${missing.join(', ')}. See docs/DEPLOYMENT.md section 2.`);
+    return c.json({ error: 'Niko’s server isn’t fully set up yet. Try again in a few minutes.', code: 'not_configured' }, 503, { 'cache-control': 'no-store', 'retry-after': '60' });
+  }
   c.set('db', createDb(c.env.DATABASE_URL));
   c.set('site', siteFor(new URL(c.req.url)));
   await next();
@@ -27,8 +36,20 @@ api.route('/admin', admin);
 api.route('/', appRoutes);
 
 api.notFound((c) => c.json({ error: 'Not found.' }, 404));
+/** One log line with the real reason. Drizzle wraps the Postgres error as `cause`, and logging only the
+ * wrapper prints a bare stack. Query text and parameters are left out (they can hold emails and hashes). */
+function describe(err: unknown): string {
+  const parts: string[] = [];
+  let e: any = err;
+  for (let depth = 0; e && depth < 4; depth++, e = e.cause) {
+    const msg = typeof e.message === 'string' ? e.message.replace(/^Failed query:[\s\S]*?(\nparams:[\s\S]*)?$/, 'Failed query') : String(e);
+    parts.push([e.name, e.code && `code ${e.code}`, msg.slice(0, 300)].filter(Boolean).join(' · '));
+  }
+  return parts.join(' ← caused by ');
+}
+
 api.onError((err, c) => {
-  console.error('api error', err);
+  console.error(`api error ${c.req.method} ${new URL(c.req.url).pathname}: ${describe(err)}`, err);
   return c.json({ error: 'Something went wrong on the server.' }, 500);
 });
 
