@@ -1,0 +1,238 @@
+// Provider adapters. Every call here goes to a third-party API with the user's own credentials.
+// None of this has been exercised against live accounts yet: treat each adapter as untested until you link one.
+import { and, eq } from 'drizzle-orm';
+import { connections, type Db } from '@niko/db';
+import type { Env } from './env';
+import { seal, unseal } from './lib/crypto';
+
+export interface OAuthSecret { accessToken: string; refreshToken?: string; expiresAt?: number; extra?: Record<string, unknown> }
+export type Secret = OAuthSecret & Record<string, any>;
+
+interface OAuthCfg { authUrl: string; tokenUrl: string; scopes: string; clientId?: string; clientSecret?: string; extraAuth?: Record<string, string>; basicAuth?: boolean; scopeParam?: string }
+
+const GOOGLE = { authUrl: 'https://accounts.google.com/o/oauth2/v2/auth', tokenUrl: 'https://oauth2.googleapis.com/token', extraAuth: { access_type: 'offline', prompt: 'consent' } };
+const MS = { authUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize', tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token' };
+
+export function oauthConfig(env: Env, provider: string): OAuthCfg | null {
+  const g = { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET };
+  const m = { clientId: env.MICROSOFT_CLIENT_ID, clientSecret: env.MICROSOFT_CLIENT_SECRET };
+  switch (provider) {
+    case 'gmail': return { ...GOOGLE, ...g, scopes: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send' };
+    case 'google-calendar': return { ...GOOGLE, ...g, scopes: 'https://www.googleapis.com/auth/calendar.readonly' };
+    case 'outlook-mail': return { ...MS, ...m, scopes: 'offline_access Mail.Read Mail.Send' };
+    case 'outlook-calendar': return { ...MS, ...m, scopes: 'offline_access Calendars.Read' };
+    case 'onenote': return { ...MS, ...m, scopes: 'offline_access Notes.Read' };
+    case 'notion': return { authUrl: 'https://api.notion.com/v1/oauth/authorize', tokenUrl: 'https://api.notion.com/v1/oauth/token', scopes: '', clientId: env.NOTION_CLIENT_ID, clientSecret: env.NOTION_CLIENT_SECRET, extraAuth: { owner: 'user' }, basicAuth: true };
+    case 'slack': return { authUrl: 'https://slack.com/oauth/v2/authorize', tokenUrl: 'https://slack.com/api/oauth.v2.access', scopes: 'chat:write,channels:history,im:history,channels:read', clientId: env.SLACK_CLIENT_ID, clientSecret: env.SLACK_CLIENT_SECRET };
+    default: return null;
+  }
+}
+
+export function authorizeUrl(cfg: OAuthCfg, redirectUri: string, state: string): string {
+  const u = new URL(cfg.authUrl);
+  u.searchParams.set('client_id', cfg.clientId!);
+  u.searchParams.set('redirect_uri', redirectUri);
+  u.searchParams.set('response_type', 'code');
+  u.searchParams.set('state', state);
+  if (cfg.scopes) u.searchParams.set('scope', cfg.scopes);
+  for (const [k, v] of Object.entries(cfg.extraAuth ?? {})) u.searchParams.set(k, v);
+  return u.toString();
+}
+
+async function tokenRequest(cfg: OAuthCfg, params: Record<string, string>): Promise<any> {
+  const headers: Record<string, string> = { accept: 'application/json' };
+  let body: string;
+  if (cfg.basicAuth) {
+    headers.authorization = 'Basic ' + btoa(`${cfg.clientId}:${cfg.clientSecret}`);
+    headers['content-type'] = 'application/json';
+    body = JSON.stringify(params);
+  } else {
+    headers['content-type'] = 'application/x-www-form-urlencoded';
+    body = new URLSearchParams({ ...params, client_id: cfg.clientId!, client_secret: cfg.clientSecret! }).toString();
+  }
+  const res = await fetch(cfg.tokenUrl, { method: 'POST', headers, body });
+  const json: any = await res.json().catch(() => ({}));
+  if (!res.ok || json.error || json.ok === false) throw new Error('Token exchange failed: ' + (json.error_description ?? json.error ?? res.status));
+  return json;
+}
+
+export async function exchangeCode(cfg: OAuthCfg, code: string, redirectUri: string): Promise<{ secret: OAuthSecret; meta: Record<string, unknown> }> {
+  const j = await tokenRequest(cfg, { grant_type: 'authorization_code', code, redirect_uri: redirectUri });
+  return {
+    secret: { accessToken: j.access_token, refreshToken: j.refresh_token, expiresAt: j.expires_in ? Date.now() + j.expires_in * 1000 : undefined },
+    meta: { teamId: j.team?.id, teamName: j.team?.name, workspace: j.workspace_name },
+  };
+}
+
+export async function getConnection(db: Db, userId: string, provider: string) {
+  return (await db.select().from(connections).where(and(eq(connections.userId, userId), eq(connections.provider, provider))).limit(1))[0];
+}
+
+/** Decrypts a connection's credentials, refreshing the OAuth access token when it is about to expire. */
+export async function credentials(env: Env, db: Db, userId: string, provider: string): Promise<Secret | null> {
+  const conn = await getConnection(db, userId, provider);
+  if (!conn) return null;
+  const secret = await unseal<Secret>(env.ENCRYPTION_KEY, conn.secretEnc);
+  if (!secret) return null;
+  const cfg = oauthConfig(env, provider);
+  if (cfg && secret.refreshToken && secret.expiresAt && secret.expiresAt < Date.now() + 60_000) {
+    const j = await tokenRequest(cfg, { grant_type: 'refresh_token', refresh_token: secret.refreshToken });
+    secret.accessToken = j.access_token;
+    if (j.refresh_token) secret.refreshToken = j.refresh_token;
+    secret.expiresAt = j.expires_in ? Date.now() + j.expires_in * 1000 : undefined;
+    await db.update(connections).set({ secretEnc: await seal(env.ENCRYPTION_KEY, secret), updatedAt: new Date() }).where(eq(connections.id, conn.id));
+  }
+  return secret;
+}
+
+/** Refuses URLs that are not plain https to a public host. Used for every user-supplied address. */
+export function publicHttpsUrl(raw: unknown): URL | null {
+  if (typeof raw !== 'string') return null;
+  let u: URL;
+  try { u = new URL(raw); } catch { return null; }
+  if (u.protocol !== 'https:' || u.username || u.password) return null;
+  const h = u.hostname.toLowerCase();
+  if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal') || h.startsWith('[')) return null;
+  if (/^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h)) return null;
+  return u;
+}
+
+async function api(url: string, token: string, init: RequestInit = {}, scheme = 'Bearer'): Promise<any> {
+  const res = await fetch(url, { ...init, headers: { authorization: `${scheme} ${token}`, accept: 'application/json', ...(init.headers as Record<string, string> | undefined) } });
+  if (!res.ok) throw new Error(`${new URL(url).hostname} answered ${res.status}`);
+  return res.status === 204 ? null : res.json();
+}
+
+export interface MailItem { id: string; from: string; subject: string; source: string; provider: string }
+export interface EventItem { time: string; title: string; source: string; start: number }
+export interface NoteItem { title: string; source: string }
+
+export async function listMail(env: Env, db: Db, userId: string, provider: string): Promise<MailItem[]> {
+  const s = await credentials(env, db, userId, provider);
+  if (!s) return [];
+  if (provider === 'gmail') {
+    const base = 'https://gmail.googleapis.com/gmail/v1/users/me/messages';
+    const list = await api(`${base}?q=${encodeURIComponent('is:unread in:inbox')}&maxResults=6`, s.accessToken);
+    const out: MailItem[] = [];
+    for (const m of list.messages ?? []) {
+      const d = await api(`${base}/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, s.accessToken);
+      const h = (n: string) => d.payload?.headers?.find((x: any) => x.name === n)?.value ?? '';
+      out.push({ id: m.id, from: h('From').replace(/<.*>/, '').replace(/"/g, '').trim() || h('From'), subject: h('Subject'), source: 'Gmail', provider });
+    }
+    return out;
+  }
+  if (provider === 'outlook-mail') {
+    const j = await api("https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$filter=isRead eq false&$top=6&$select=id,subject,from", s.accessToken);
+    return (j.value ?? []).map((m: any) => ({ id: m.id, from: m.from?.emailAddress?.name ?? m.from?.emailAddress?.address ?? '', subject: m.subject ?? '', source: 'Outlook', provider }));
+  }
+  return [];
+}
+
+export async function listEvents(env: Env, db: Db, userId: string, provider: string, dayStart: Date, dayEnd: Date): Promise<EventItem[]> {
+  const s = await credentials(env, db, userId, provider);
+  if (!s) return [];
+  if (provider === 'google-calendar') {
+    const u = new URL('https://www.googleapis.com/calendar/v3/calendars/primary/events');
+    u.searchParams.set('timeMin', dayStart.toISOString()); u.searchParams.set('timeMax', dayEnd.toISOString());
+    u.searchParams.set('singleEvents', 'true'); u.searchParams.set('orderBy', 'startTime'); u.searchParams.set('maxResults', '12');
+    const j = await api(u.toString(), s.accessToken);
+    return (j.items ?? []).map((e: any) => ({ title: e.summary ?? '(no title)', source: 'Google', start: Date.parse(e.start?.dateTime ?? e.start?.date), time: '' }));
+  }
+  if (provider === 'outlook-calendar') {
+    const u = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${dayStart.toISOString()}&endDateTime=${dayEnd.toISOString()}&$top=12&$select=subject,start&$orderby=start/dateTime`;
+    const j = await api(u, s.accessToken, { headers: { prefer: 'outlook.timezone="UTC"' } });
+    return (j.value ?? []).map((e: any) => ({ title: e.subject ?? '(no title)', source: 'Outlook', start: Date.parse(e.start?.dateTime + 'Z'), time: '' }));
+  }
+  return [];
+}
+
+export async function listNotes(env: Env, db: Db, userId: string, provider: string): Promise<NoteItem[]> {
+  const s = await credentials(env, db, userId, provider);
+  if (!s) return [];
+  if (provider === 'notion') {
+    const j = await api('https://api.notion.com/v1/search', s.accessToken, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'notion-version': '2022-06-28' },
+      body: JSON.stringify({ page_size: 6, sort: { direction: 'descending', timestamp: 'last_edited_time' }, filter: { property: 'object', value: 'page' } }),
+    });
+    return (j.results ?? []).map((p: any) => {
+      const titleProp: any = Object.values(p.properties ?? {}).find((v: any) => v?.type === 'title');
+      return { title: titleProp?.title?.map((t: any) => t.plain_text).join('') || 'Untitled', source: 'Notion' };
+    });
+  }
+  if (provider === 'onenote') {
+    const j = await api('https://graph.microsoft.com/v1.0/me/onenote/pages?$top=6&$select=title&$orderby=lastModifiedDateTime desc', s.accessToken);
+    return (j.value ?? []).map((p: any) => ({ title: p.title || 'Untitled', source: 'OneNote' }));
+  }
+  return [];
+}
+
+const utf8b64url = (s: string) => btoa(String.fromCharCode(...new TextEncoder().encode(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+/** Sends a reply or message. `chatId` is the mail message id, chat id or channel id, depending on the provider. */
+export async function sendText(env: Env, db: Db, userId: string, provider: string, chatId: string, body: string): Promise<void> {
+  const s = await credentials(env, db, userId, provider);
+  if (!s) throw new Error('That connection is not linked.');
+  switch (provider) {
+    case 'telegram-bot': {
+      const j = await (await fetch(`https://api.telegram.org/bot${s.token}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: body }) })).json<any>();
+      if (!j.ok) throw new Error('Telegram refused the message.');
+      return;
+    }
+    case 'slack': {
+      const j = await api('https://slack.com/api/chat.postMessage', s.accessToken, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: chatId, text: body }) });
+      if (!j.ok) throw new Error('Slack refused the message: ' + j.error);
+      return;
+    }
+    case 'discord':
+      await api(`https://discord.com/api/v10/channels/${encodeURIComponent(chatId || s.channelId)}/messages`, s.token, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: body.slice(0, 2000) }) }, 'Bot');
+      return;
+    case 'outlook-mail':
+      await api(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(chatId)}/reply`, s.accessToken, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ comment: body }) });
+      return;
+    case 'gmail': {
+      const base = 'https://gmail.googleapis.com/gmail/v1/users/me/messages';
+      const d = await api(`${base}/${encodeURIComponent(chatId)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Message-ID&metadataHeaders=Reply-To`, s.accessToken);
+      const h = (n: string) => d.payload?.headers?.find((x: any) => x.name.toLowerCase() === n.toLowerCase())?.value ?? '';
+      const clean = (v: string) => v.replace(/[\r\n]+/g, ' ');
+      const subject = /^re:/i.test(h('Subject')) ? h('Subject') : 'Re: ' + h('Subject');
+      const raw = [`To: ${clean(h('Reply-To') || h('From'))}`, `Subject: ${clean(subject)}`, `In-Reply-To: ${clean(h('Message-ID'))}`, `References: ${clean(h('Message-ID'))}`, 'Content-Type: text/plain; charset=utf-8', '', body].join('\r\n');
+      await api(`${base}/send`, s.accessToken, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ raw: utf8b64url(raw), threadId: d.threadId }) });
+      return;
+    }
+    default:
+      throw new Error('Sending is not available for this connection yet.');
+  }
+}
+
+/** Relays one file straight to the chat app. The bytes live only in this request's memory. */
+export async function relayFile(env: Env, db: Db, userId: string, provider: string, chatId: string, file: File, caption: string): Promise<void> {
+  const s = await credentials(env, db, userId, provider);
+  if (!s) throw new Error('That connection is not linked.');
+  const form = new FormData();
+  if (provider === 'telegram-bot') {
+    form.set('chat_id', chatId);
+    if (caption) form.set('caption', caption.slice(0, 1024));
+    form.set('document', file, file.name);
+    const j = await (await fetch(`https://api.telegram.org/bot${s.token}/sendDocument`, { method: 'POST', body: form })).json<any>();
+    if (!j.ok) throw new Error('Telegram refused the file.');
+    return;
+  }
+  if (provider === 'discord') {
+    form.set('payload_json', JSON.stringify({ content: caption.slice(0, 2000) }));
+    form.set('files[0]', file, file.name);
+    const res = await fetch(`https://discord.com/api/v10/channels/${encodeURIComponent(chatId || s.channelId)}/messages`, { method: 'POST', headers: { authorization: `Bot ${s.token}` }, body: form });
+    if (!res.ok) throw new Error('Discord refused the file.');
+    return;
+  }
+  throw new Error('Sending files is not available for this connection yet.');
+}
+
+export async function telegramSetWebhook(token: string, url: string, secret: string): Promise<{ ok: boolean; username?: string }> {
+  const me = await (await fetch(`https://api.telegram.org/bot${token}/getMe`)).json<any>();
+  if (!me.ok) return { ok: false };
+  const r = await (await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url, secret_token: secret, allowed_updates: ['message'] }),
+  })).json<any>();
+  return { ok: !!r.ok, username: me.result?.username };
+}

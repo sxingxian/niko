@@ -1,0 +1,14 @@
+{
+  "name": "niko",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "build:web": "npm run build -w @niko/landing && npm run build -w @niko/app && npm run build -w @niko/admin",
+    "build": "npm run build:web && npm run typecheck",
+    "typecheck": "npm run typecheck -w @niko/api",
+    "dev:api": "npm run dev -w @niko/api",
+    "deploy": "npm run build:web && npm run deploy -w @niko/api"
+  },
+  "engines": { "node": ">=20" }
+}

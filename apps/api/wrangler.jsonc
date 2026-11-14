@@ -1,0 +1,24 @@
+{
+  // Niko: one Worker serves the API and the three front ends on both domains.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "niko",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "none" },
+  "ai": { "binding": "AI" },
+  "observability": { "enabled": true },
+  "routes": [
+    { "pattern": "niko.sxingxian.com", "custom_domain": true },
+    { "pattern": "niko.midnightpoetry.studio", "custom_domain": true },
+    { "pattern": "nikoapp.midnightpoetry.studio", "custom_domain": true }
+  ],
+  "vars": {
+    "EMAIL_FROM": "Niko <niko@sxingxian.com>",
+    "AI_MODEL": "@cf/meta/llama-3.1-8b-instruct"
+  }
+  // Secrets (set with `wrangler secret put NAME`, never committed):
+  // DATABASE_URL, ENCRYPTION_KEY, BOOTSTRAP_TOKEN, RESEND_API_KEY,
+  // GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET,
+  // NOTION_CLIENT_ID, NOTION_CLIENT_SECRET, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET
+}
