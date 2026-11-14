@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#05070d" />
+    <meta name="description" content="Niko is a voice assistant for your mail, calendars, notes and chats. Invite only." />
+    <title>Niko</title>
+    <link rel="icon" href="/app/icon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <div id="root" data-root>
+      <div class="stage" data-stage aria-hidden="true"><div class="glow" data-bg></div><canvas data-core></canvas></div>
+      <div class="content">
+        <header class="w top">
+          <span class="wordmark">NIKO</span>
+          <a class="signin" data-app="/sign-in" href="/app/sign-in">Sign in</a>
+        </header>
+
+        <section class="sec hero" data-sec>
+          <div class="w center" data-reveal>
+            <span class="k" data-reg>Invite only</span>
+            <h1>“Niko, what needs me today?”</h1>
+            <div class="row">
+              <a class="cta" data-app="/sign-in" href="/app/sign-in">Sign in</a>
+              <a class="plain" data-app="/invite" data-join href="/app/invite">I have an invite</a>
+            </div>
+          </div>
+        </section>
+
+        <section class="sec" data-sec>
+          <div class="w"><div class="blk" data-reveal>
+            <span class="k">How it works</span>
+            <h2>One question. Every account checked.</h2>
+            <div>
+              <div class="li"><span class="k">01</span>You say “Niko” and ask.</div>
+              <div class="li"><span class="k">02</span>It reads your mail, calendars and notes.</div>
+              <div class="li"><span class="k">03</span>It answers, drafts, and waits for you.</div>
+            </div>
+          </div></div>
+        </section>
+
+        <section class="sec" data-sec>
+          <div class="w"><div class="blk right" data-reveal>
+            <span class="k">Voice</span>
+            <h2>It listens for you. It sounds like you.</h2>
+            <div>
+              <div class="li"><span class="k">In</span>Wakes when you say its name.</div>
+              <div class="li"><span class="k">Out</span>Replies in your own cloned voice.</div>
+              <div class="li"><span class="k">Send</span>“Niko, send it” starts a 10-second countdown.</div>
+            </div>
+          </div></div>
+        </section>
+
+        <section class="sec" data-sec>
+          <div class="w"><div class="blk" data-reveal>
+            <span class="k">Connections</span>
+            <h2>It works with what you already use.</h2>
+            <div class="chips" data-services></div>
+          </div></div>
+        </section>
+
+        <section class="sec" data-sec>
+          <div class="w"><div class="blk right" data-reveal>
+            <span class="k">Trust</span>
+            <h2>Your accounts. Your keys. Your choice of AI.</h2>
+            <div>
+              <div class="li"><span class="k">Keys</span>Encrypted on the server, never in the browser.</div>
+              <div class="li"><span class="k">AI</span>Workers AI, or your own key.</div>
+              <div class="li"><span class="k">Access</span>Invite only. Your admin decides who gets in.</div>
+            </div>
+          </div></div>
+        </section>
+
+        <section class="sec hero" data-sec>
+          <div class="w center" data-reveal>
+            <h2 class="last">Start the morning by saying “Niko”.</h2>
+            <a class="cta" data-app="/sign-in" href="/app/sign-in">Sign in</a>
+          </div>
+        </section>
+
+        <footer class="w foot"><span class="wordmark">NIKO</span><span>Private service · access by invitation</span></footer>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
