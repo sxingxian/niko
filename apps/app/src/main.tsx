@@ -48,13 +48,16 @@ function Screens() {
   // The screen on display can lag the address for a moment: between Home and the workspace the old screen
   // fades out while the particles start to flow, then the new one is mounted and builds itself in.
   const [shown, setShown] = useState(loc);
-  const [flow, setFlow] = useState<{ dir: 'in' | 'out'; at: number } | null>(null);
+  const [flow, setFlow] = useState<{ dir: 'in' | 'out' | 'swap'; at: number; loose?: boolean } | null>(null);
   const [leaving, setLeaving] = useState(false);
   useEffect(() => {
     if (loc.pathname === shown.pathname) { setShown(loc); return; }
     const a = kindOf(shown.pathname), b = kindOf(loc.pathname);
-    if (!reduced() && ((a === 'home' && b === 'ws') || (a === 'ws' && b === 'home'))) {
-      setFlow({ dir: b === 'ws' ? 'in' : 'out', at: performance.now() });
+    // Between Inbox, Calendar and Notes the ring breaks up and is rebuilt, the same build as arriving from Home.
+    if (!reduced() && (a === 'ws' || b === 'ws') && (a === 'home' || b === 'home' || a === b)) {
+      const now = performance.now();
+      // If the last build is still under way, its particles are still loose, so the next one starts from the cloud.
+      setFlow((f) => ({ dir: a === b ? 'swap' : b === 'ws' ? 'in' : 'out', at: now, loose: !!f && now - f.at < FLOW_SECONDS * 800 }));
       setLeaving(true);
       const t = window.setTimeout(() => { setLeaving(false); setShown(loc); }, LEAVE_MS);
       return () => window.clearTimeout(t);
@@ -63,16 +66,17 @@ function Screens() {
     setShown(loc);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loc]);
-  // Settings keep their sidebar and the workspace keeps its rail, so those animate inside, not as a whole screen.
-  const group = SETTINGS_PATHS.includes(shown.pathname) ? 'settings' : WORKSPACE_PATHS.includes(shown.pathname) ? 'workspace' : shown.pathname;
+  // Settings keep their sidebar, so those pages animate inside it, not as a whole screen.
+  // Each workspace view is its own screen, so the build replays when moving between them.
+  const group = SETTINGS_PATHS.includes(shown.pathname) ? 'settings' : shown.pathname;
   const flowing = !!flow;
   // How a screen arrives is fixed when it mounts, so the end of the flow never restarts an entrance animation.
-  const entry = useMemo(() => (flow ? 'flow flow-' + flow.dir : 'hud-in'), [group]); // eslint-disable-line react-hooks/exhaustive-deps
+  const entry = useMemo(() => (!flow ? 'hud-in' : flow.dir === 'swap' ? 'flow flow-in swap' : 'flow flow-' + flow.dir), [group]); // eslint-disable-line react-hooks/exhaustive-deps
   // Once the flow has finished, its arrival styles come off, so they never hold back later animations on that screen.
   const [settled, setSettled] = useState<string | null>(null);
   const groupNow = useRef(group);
   groupNow.current = group;
-  const cls = 'route ' + (leaving ? 'leaving' : settled === group && entry !== 'hud-in' ? '' : entry);
+  const cls = 'route ' + (leaving ? (flow?.dir === 'swap' ? 'leaving swap' : 'leaving') : settled === group && entry !== 'hud-in' ? '' : entry);
   const vars = { ['--D' as string]: FLOW_SECONDS + 's', ['--el' as string]: LEAVE_MS / 1000 + 's' } as CSSProperties;
   return (
     <>
@@ -95,7 +99,7 @@ function Screens() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       </div>
-      {flow && <FlowLayer key={flow.at} dir={flow.dir} startedAt={flow.at} onDone={() => { setFlow(null); setSettled(groupNow.current); }} />}
+      {flow && <FlowLayer key={flow.at} dir={flow.dir} loose={flow.loose} startedAt={flow.at} onDone={() => { setFlow(null); setSettled(groupNow.current); }} />}
       <HudSweep pathname={shown.pathname} skip={flowing} />
     </>
   );

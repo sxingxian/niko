@@ -320,7 +320,7 @@ dialog.sheet form { display: flex; flex-direction: column; gap: 16px; }
 @keyframes slideUp { from { opacity: 0; transform: translateY(72px); } to { opacity: 1; transform: none; } }
 @keyframes slideDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(72px); } }
 
-/* ---- Home ⇄ workspace: the particle flow (drawn by flow.tsx) and how each screen leaves and arrives around it.
+/* ---- Home ⇄ workspace, and between workspace views: the particle flow (drawn by flow.tsx) and how each screen leaves and arrives around it.
    Times are fractions of --D (the whole flow); --el is how long the old screen stays while fading out. */
 .flow-layer { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 4; }
 @keyframes fadeAway { to { opacity: 0; } }
@@ -351,6 +351,9 @@ dialog.sheet form { display: flex; flex-direction: column; gap: 16px; }
 .route.flow-in .ws .content > * { transform-origin: left center; animation: swingIn calc(var(--D) * .21) cubic-bezier(.2,.8,.2,1) calc(var(--D) * .7 - var(--el)) both; }
 .route.flow-in .ws .content > :nth-child(2) { animation-delay: calc(var(--D) * .78 - var(--el)); }
 .route.flow-in .ws .content > :nth-child(n+3) { animation-delay: calc(var(--D) * .84 - var(--el)); }
+
+/* Between Inbox, Calendar and Notes: the same build, but the rail stays, as it is the menu that was just used. */
+.route.swap .ws .rail { animation: none; }
 
 /* Arriving back at Home: the core takes over from the flow; the caption and controls return. */
 .route.flow-out .home canvas[data-core] { animation: fadeIn calc(var(--D) * .12) ease calc(var(--D) * .9 - var(--el)) both; }

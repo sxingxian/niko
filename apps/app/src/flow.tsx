@@ -1,5 +1,6 @@
 // The particle flow between Home and the workspace (Inbox, Calendar, Notes): the home sphere pours into the
 // workspace ring, every fifth particle landing on the ring to become its ticks; going back plays it in reverse.
+// Between Inbox, Calendar and Notes ('swap') the ring and its core break up into a loose cloud and the same build runs again.
 // Drawn on one full-screen canvas above the pages; the pages' own cores fade in underneath when it ends.
 import { useEffect, useRef } from 'react';
 import { currentHue, sphereOf, spots } from '@niko/ui';
@@ -31,7 +32,7 @@ function ringNow(): { core: Sphere; ring: number } | null {
   return { core, ring: box.getBoundingClientRect().width * 292 / 600 };
 }
 
-export function FlowLayer({ dir, startedAt, onDone }: { dir: 'in' | 'out'; startedAt: number; onDone: () => void }) {
+export function FlowLayer({ dir, loose, startedAt, onDone }: { dir: 'in' | 'out' | 'swap'; loose?: boolean; startedAt: number; onDone: () => void }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const cv = ref.current;
@@ -56,17 +57,22 @@ export function FlowLayer({ dir, startedAt, onDone }: { dir: 'in' | 'out'; start
     const clamp = (v: number) => Math.max(0, Math.min(1, v)), seg = (p: number, a: number, b: number) => clamp((p - a) / (b - a));
     const smooth = (t: number) => t * t * t * (t * (t * 6 - 15) + 10);
     // Home end: known now if Home is the screen being left, else estimated until Home mounts.
+    const swap = dir === 'swap';
     let home: Sphere | null = dir === 'in' ? sphereOf(spots.get('home')) : null;
-    let ws = dir === 'out' ? ringNow() : null;
+    // The ring being left is measured once, now; for a swap the new ring sits in the same place.
+    let ws = dir !== 'in' ? ringNow() : null;
     let rot = 0.6, raf = 0, finished = false;
     const D = FLOW_SECONDS * 1000;
     const frame = (now: number) => {
       const u = clamp((now - startedAt) / D);
       // The same choreography both ways: forwards into the workspace, backwards out of it.
-      const p = dir === 'in' ? u : 1 - u;
-      if (!home) home = sphereOf(spots.get('home'));
+      const p = dir === 'out' ? 1 - u : u;
+      if (!swap && !home) home = sphereOf(spots.get('home'));
       if (!ws) ws = ringNow();
-      const A = home ?? homeEstimate(), Bx = ws ?? ringEstimate(), B = Bx.core, RING = Bx.ring;
+      const Bx = ws ?? ringEstimate(), B = Bx.core, RING = Bx.ring;
+      // A swap starts from the ring as it stands, loosens it into a cloud the size of the Home sphere, then builds from that cloud.
+      const A = swap ? { x: B.x, y: B.y, R: B.R * 1.4 } : home ?? homeEstimate();
+      const undo = swap && !loose ? 1 - smooth(seg(u, 0, 0.24)) : 0;
       const dl = Math.hypot(B.x - A.x, B.y - A.y) || 1, dirX = (B.x - A.x) / dl, dirY = (B.y - A.y) / dl;
       const t = now / 1000;
       rot += 0.0012;
@@ -87,23 +93,25 @@ export function FlowLayer({ dir, startedAt, onDone }: { dir: 'in' | 'out'; start
         const sx = A.x + ux * A.R * grow + dirX * 14 * loosen, sy = A.y + uy * A.R * grow + dirY * 14 * loosen;
         const ex = o.ring ? B.x + Math.cos(o.theta) * RING : B.x + ux * B.R, ey = o.ring ? B.y + Math.sin(o.theta) * RING : B.y + uy * B.R;
         // The side facing the destination leaves first; the far side follows, so the sphere pours rather than jumps.
-        const lead = (1 - ((ux * dirX + uy * dirY) / 1.2 + 1) / 2) * 0.3 + o.jit + (o.ring ? 0.05 : 0);
+        // In a swap there is no direction to pour from, so the rebuild runs round the ring like the sweep.
+        const lead = (swap ? ((Math.atan2(uy, ux) + Math.PI * 2.5) % (Math.PI * 2)) / (Math.PI * 2) * 0.3 : (1 - ((ux * dirX + uy * dirY) / 1.2 + 1) / 2) * 0.3) + o.jit + (o.ring ? 0.05 : 0);
         const e = smooth(seg(p, 0.08 + lead, 0.62 + lead * 0.75));
         const dx = ex - sx, dy = ey - sy, l = Math.hypot(dx, dy) || 1, arc = Math.sin(Math.PI * e), bend = arc * o.swirl;
         px[i] = sx + dx * e - (dy / l) * bend; py[i] = sy + dy * e + (dx / l) * bend;
+        if (undo > 0) { px[i] = px[i]! + (ex - px[i]!) * undo; py[i] = py[i]! + (ey - py[i]!) * undo; }
         sz[i] = 1 + 0.3 * arc;
         alpha[i] = o.ring ? 1 - seg(p, 0.74, 0.94) : 1;
         cx += px[i]!; cy += py[i]!;
       }
       cx /= N; cy /= N;
       // Hand over to the pages' own cores in the last moments.
-      const fade = dir === 'in' ? 1 - seg(u, 0.9, 1) : 1 - seg(u, 0.9, 1);
+      const fade = 1 - seg(u, 0.9, 1);
       const hue = currentHue().toFixed(1), col = (l: number, a: number) => `hsla(${hue},90%,${l}%,${(a * fade).toFixed(3)})`;
       const R = A.R + (B.R - A.R) * smooth(seg(p, 0.1, 0.8));
       const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 1.4);
       g.addColorStop(0, col(60, 0.1)); g.addColorStop(1, col(60, 0));
       ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-      const settled = Math.min(1, 1 - seg(p, 0, 0.14) + seg(p, 0.84, 0.98));
+      const settled = swap ? Math.min(1, undo + seg(p, 0.84, 0.98)) : Math.min(1, 1 - seg(p, 0, 0.14) + seg(p, 0.84, 0.98));
       if (settled > 0.01) {
         ctx.strokeStyle = col(70, 0.1 * settled); ctx.lineWidth = 0.6; ctx.beginPath();
         for (let m = 0; m < links.length; m += 2) { const a1 = links[m]!, b1 = links[m + 1]!; if (pts[a1]!.ring || pts[b1]!.ring) continue; ctx.moveTo(px[a1]!, py[a1]!); ctx.lineTo(px[b1]!, py[b1]!); }
