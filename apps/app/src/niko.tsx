@@ -1,6 +1,6 @@
 // Shared Niko state: who is signed in, and the voice loop (wake word, commands, speech).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, setAppearance, type CoreMode } from '@niko/ui';
@@ -100,7 +100,10 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, []);
   useEffect(() => { void refreshMe(); }, [refreshMe]);
   // The on-device voice's engine starts in the background, so it is ready by the time Niko speaks.
-  useEffect(() => { if (me && voiceOrder(me.engine).includes('kokoro')) kokoroWarm(); }, [me]);
+  // Only on the screens where Niko speaks (Home and the workspace), not on Settings or sign-in pages.
+  const path = useLocation().pathname;
+  const speaksHere = /^\/(inbox|calendar|notes)?$/.test(path.replace(/^\/app(?=\/|$)/, '') || '/');
+  useEffect(() => { if (me && speaksHere && voiceOrder(me.engine).includes('kokoro')) kokoroWarm(); }, [me, speaksHere]);
 
   const idle = useCallback(() => {
     setMode('idle'); setLabel('Standing by');

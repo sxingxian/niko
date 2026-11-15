@@ -145,6 +145,7 @@ app.put('/apps/:app', async (c) => {
 });
 
 app.delete('/apps/:app', async (c) => {
+  forgetChatBrief(c.get('user').id);
   const def = APPS.find((a) => a.id === c.req.param('app'));
   if (!def) return c.json({ error: 'Unknown provider.' }, 404);
   const u = c.get('user');
@@ -157,6 +158,7 @@ app.delete('/apps/:app', async (c) => {
 });
 
 app.post('/connections/:provider', async (c) => {
+  forgetChatBrief(c.get('user').id);
   const def = PROVIDERS.find((p) => p.id === c.req.param('provider'));
   if (!def || !def.fields) return c.json({ error: 'This connection cannot be linked that way.' }, 400);
   const b = await c.req.json<Record<string, string>>();
@@ -213,6 +215,7 @@ app.post('/connections/telegram-bot/refresh', async (c) => {
 });
 
 app.delete('/connections/:provider', async (c) => {
+  forgetChatBrief(c.get('user').id);
   const u = c.get('user');
   // Credentials are deleted outright, not just marked unlinked.
   await c.get('db').delete(connections).where(and(eq(connections.userId, u.id), eq(connections.provider, c.req.param('provider'))));
@@ -297,6 +300,22 @@ async function buildBrief(c: import('hono').Context<AppEnv>, tzOffsetMin: number
 function briefParts(q: string | undefined): Set<BriefPart> {
   const asked = String(q ?? '').split(',').map((x) => x.trim()).filter((x): x is BriefPart => (BRIEF_PARTS as string[]).includes(x));
   return new Set(asked.length ? asked : BRIEF_PARTS);
+}
+
+const EMPTY_BRIEF: Brief = { mail: [], events: [], notes: [], chats: [], problems: [] };
+/** Mail, events and notes as read for the last chat message, per person, kept 3 minutes in this Worker instance.
+ * Chats come from Niko's own store, so they are always read fresh. Linking or removing a connection clears it. */
+const CHAT_BRIEF_MS = 3 * 60_000;
+const chatBriefs = new Map<string, { at: number; tz: number; brief: Brief }>();
+export function forgetChatBrief(userId: string) { chatBriefs.delete(userId); }
+async function chatBrief(c: import('hono').Context<AppEnv>, tz: number): Promise<Brief> {
+  const id = c.get('user').id;
+  const kept = chatBriefs.get(id);
+  if (kept && kept.tz === tz && Date.now() - kept.at < CHAT_BRIEF_MS) return { ...kept.brief, chats: await recentChats(c) };
+  const brief = await buildBrief(c, tz);
+  if (chatBriefs.size > 500) chatBriefs.delete(chatBriefs.keys().next().value!);
+  chatBriefs.set(id, { at: Date.now(), tz, brief });
+  return brief;
 }
 
 /** The latest conversation from each chat, from Niko's own store (no third-party calls, so it is cheap to ask often). */
@@ -442,8 +461,10 @@ app.post('/chat', async (c) => {
   if (!text) return c.json({ error: 'Say or type something first.' }, 400);
   const u = c.get('user');
   const db = c.get('db');
-  const brief = await buildBrief(c, clampNum(b.tz, -840, 840, 0));
-  const data = [
+  // A draft only needs the message it answers (it is in the prompt): no mail server, calendar or notes are read.
+  // A spoken question gets the whole day as context, reused for 3 minutes so a conversation doesn't re-read every source.
+  const brief = oneOff ? EMPTY_BRIEF : await chatBrief(c, clampNum(b.tz, -840, 840, 0));
+  const data = oneOff ? '' : [
     'EVENTS TODAY:', ...brief.events.map((e) => `- ${e.time} ${e.title} (${e.source})`),
     'MAIL NEEDING A REPLY:', ...brief.mail.map((m) => `- ${m.from}: ${m.subject} (${m.source})`),
     'RECENT NOTES:', ...brief.notes.map((n) => `- ${n.title} (${n.source})`),
@@ -451,7 +472,7 @@ app.post('/chat', async (c) => {
   ].join('\n').slice(0, 6000);
   const history = oneOff ? [] : (await db.select().from(chatTurns).where(eq(chatTurns.userId, u.id)).orderBy(desc(chatTurns.createdAt)).limit(8)).reverse();
   const msgs = [
-    { role: 'system', content: `${SYSTEM}\nThe user's name is ${u.name || 'not given'}.\n<DATA>\n${data}\n</DATA>` },
+    { role: 'system', content: `${SYSTEM}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}` },
     ...history.map((h) => ({ role: h.role, content: h.content })),
     { role: 'user', content: text },
   ];
@@ -470,12 +491,12 @@ app.post('/chat', async (c) => {
       console.error(`chat: AI engine failed (${engine.brain ?? 'workers-ai'}): ${String((e as Error)?.message ?? e).slice(0, 300)}`);
       return c.json({ error: engine.brain && engine.brain !== 'workers-ai'
         ? 'Niko couldn’t reach your AI engine just now. Check its address, key and model on the Engine screen, or try again.'
-        : 'Niko couldn’t reach its AI engine just now. Try again in a moment.', brief }, 502);
+        : 'Niko couldn’t reach its AI engine just now. Try again in a moment.', ...(oneOff ? {} : { brief }) }, 502);
     }
   }
   if (oneOff) reply = cleanDraft(reply);
   if (!oneOff) await db.insert(chatTurns).values([{ userId: u.id, role: 'user', content: text }, { userId: u.id, role: 'assistant', content: reply }]);
-  return c.json({ reply, engine: used, brief });
+  return c.json({ reply, engine: used, ...(oneOff ? {} : { brief }) });
 });
 
 // ---------------------------------------------------------------- sending, with the countdown rule enforced here

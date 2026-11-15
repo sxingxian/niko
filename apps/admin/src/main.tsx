@@ -84,9 +84,9 @@ function SignIn({ stage, setStage }: { stage: Stage; setStage: (s: Stage) => voi
   );
 }
 
-function Users({ onSignedOut }: { onSignedOut: () => void }) {
+function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?: { name: string; email: string } | null }) {
   const [tab, setTab] = useState<'users' | 'security' | 'audit'>('users');
-  const [me, setMe] = useState<{ name: string; email: string } | null>(null);
+  const [me, setMe] = useState<{ name: string; email: string } | null>(initialMe ?? null);
   const [users, setUsers] = useState<UserRow[]>([]);
   const [invites, setInvites] = useState<InviteRow[]>([]);
   const [reg, setReg] = useState<'invite' | 'open'>('invite');
@@ -103,7 +103,8 @@ function Users({ onSignedOut }: { onSignedOut: () => void }) {
       setUsers(r.users); setInvites(r.invites); setReg(r.registration);
     } catch (e) { guard(e); }
   }, [guard]);
-  useEffect(() => { void load(); api('/admin/me').then(setMe).catch(() => undefined); }, [load]);
+  // The account is already known when the portal opened signed in; it is asked for only after a fresh sign-in.
+  useEffect(() => { void load(); if (!initialMe) api('/admin/me').then(setMe).catch(() => undefined); }, [load]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (tab === 'audit') api<{ entries: AuditRow[] }>('/admin/audit').then((r) => setAudit(r.entries)).catch(guard); }, [tab, guard]);
 
   const invite = async (e: FormEvent) => {
@@ -215,11 +216,12 @@ function Users({ onSignedOut }: { onSignedOut: () => void }) {
 
 function Admin() {
   const [stage, setStage] = useState<Stage>('loading');
+  const [me, setMe] = useState<{ name: string; email: string } | null>(null);
   useEffect(() => {
-    api('/admin/me').then(() => setStage('in')).catch((e) => setStage(e instanceof ApiError && e.data?.mfa ? 'verify' : 'password'));
+    api<{ name: string; email: string }>('/admin/me').then((m) => { setMe(m); setStage('in'); }).catch((e) => setStage(e instanceof ApiError && e.data?.mfa ? 'verify' : 'password'));
   }, []);
   if (stage === 'loading') return null;
-  return stage === 'in' ? <Users onSignedOut={() => setStage('password')} /> : <SignIn stage={stage} setStage={setStage} />;
+  return stage === 'in' ? <Users initialMe={me} onSignedOut={() => { setMe(null); setStage('password'); }} /> : <SignIn stage={stage} setStage={setStage} />;
 }
 
 createRoot(document.getElementById('root')!).render(<StrictMode><Admin /></StrictMode>);

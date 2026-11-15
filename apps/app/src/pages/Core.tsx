@@ -19,6 +19,8 @@ function Dock({ className }: { className: string }) {
   );
 }
 
+/** Niko's draft for each message it drafted in this visit (key: conversation and the message it answers). */
+const draftCache = new Map<string, string>();
 /** Which parts of the briefing each workspace screen shows. */
 const VIEW_PARTS: Record<string, BriefPart[]> = { inbox: ['mail', 'chats'], calendar: ['events'], notes: ['notes'] };
 const BRIEF_FRESH_MS = 300_000;
@@ -290,19 +292,20 @@ export function Workspace() {
     document.addEventListener('visibilitychange', tick);
     return () => { window.clearInterval(t); document.removeEventListener('visibilitychange', tick); };
   }, [loadBrief, loadChats]); // eslint-disable-line react-hooks/exhaustive-deps
-  const items: Sel[] = brief ? [
+  // The conversation list belongs to Inbox only: on Calendar and Notes nothing is selected, so no thread is fetched.
+  const items: Sel[] = brief && view === 'inbox' ? [
     ...brief.chats.map((c) => ({ kind: 'chat' as const, provider: c.provider, chatId: c.chatId, title: c.title, source: c.source })),
     ...brief.mail.map((m) => ({ kind: 'mail' as const, provider: m.provider, id: m.id, title: m.from, source: m.source, subject: m.subject })),
   ] : [];
   useEffect(() => { if (!sel && items[0]) setSel(items[0]); /* first item opens by default */ }, [items.length]); // eslint-disable-line react-hooks/exhaustive-deps
   const selKey = sel ? (sel.kind === 'chat' ? `c:${sel.provider}:${sel.chatId}` : `m:${sel.provider}:${sel.id}`) : null;
   const loadThread = useCallback(() => {
-    if (sel?.kind !== 'chat') return;
+    if (sel?.kind !== 'chat' || view !== 'inbox') return;
     const key = selKey;
     api<{ messages: typeof thread }>(`/threads/${sel.provider}/${encodeURIComponent(sel.chatId)}`)
       .then((r) => { if (key === selKeyNow.current) setThread((t) => (t.length === r.messages.length && t.every((m, i) => m.id === r.messages[i]!.id) ? t : r.messages)); })
       .catch(() => undefined);
-  }, [selKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selKey, view]); // eslint-disable-line react-hooks/exhaustive-deps
   const selKeyNow = useRef(selKey);
   selKeyNow.current = selKey;
   useEffect(() => {
@@ -382,10 +385,13 @@ export function Workspace() {
     const key = sel.kind === 'chat' ? `c:${sel.chatId}:${lastInMsg?.id ?? ''}` : 'm:' + sel.id;
     if (drafted.current === key || (sel.kind === 'chat' && !lastIn) || send.phase !== 'draft' || draft.trim()) return;
     drafted.current = key;
+    // Already drafted earlier in this visit (the workspace remounts on each screen): reuse it, don't ask the AI again.
+    const kept = draftCache.get(key);
+    if (kept !== undefined) { setDraft((d) => d || kept); return; }
     const about = sel.kind === 'mail' ? `the email from ${sel.title} with subject "${sel.subject}"` : `the last message from ${sel.title}: "${lastIn}"`;
     setDrafting(true);
     api<{ reply: string }>('/chat', { body: { message: `Write only the text of a short, friendly reply to ${about}. No preamble.`, tz: new Date().getTimezoneOffset(), purpose: 'draft' } })
-      .then((r) => setDraft((d) => d || (typeof r.reply === 'string' ? r.reply : ''))).catch(() => undefined).finally(() => setDrafting(false));
+      .then((r) => { const t = typeof r.reply === 'string' ? r.reply : ''; if (t) { if (draftCache.size > 100) draftCache.delete(draftCache.keys().next().value!); draftCache.set(key, t); } setDraft((d) => d || t); }).catch(() => undefined).finally(() => setDrafting(false));
   }, [sel, thread, view, n.me?.permissions.draft, send.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const counting = send.phase === 'counting';
