@@ -87,7 +87,8 @@ export const PROVIDERS: ProviderDef[] = [
   { id: 'discord', name: 'Discord', group: 'messaging', how: 'Bot token · servers you pick', kind: 'token', fields: [{ key: 'token', label: 'Bot token', type: 'password' }, { key: 'channelId', label: 'Default channel ID', type: 'text', shown: true }], can: { read: false, send: true } },
   { id: 'workers-ai', name: 'Cloudflare Workers AI', group: 'ai', how: 'Free daily allowance', kind: 'builtin', can: { read: true, send: false } },
   { id: 'elevenlabs', name: 'ElevenLabs voice', group: 'ai', how: 'Your API key · your cloned voice', kind: 'token', fields: [{ key: 'apiKey', label: 'API key', type: 'password' }, { key: 'voiceId', label: 'Voice ID', type: 'text', shown: true }], can: { read: false, send: false } },
-  { id: 'custom-ai', name: 'Other AI systems', group: 'ai', how: 'Your API key · OpenAI-compatible or Anthropic', kind: 'token', fields: [
+  // Keys for other AI systems are added, ordered and removed on the Engine screen, where there can be several.
+  { id: 'custom-ai', name: 'Other AI systems', group: 'ai', how: 'Your API keys · OpenAI-compatible, Anthropic or Google', kind: 'token', hidden: true, fields: [
     { key: 'baseUrl', label: 'Base URL', type: 'url', placeholder: 'https://', shown: true },
     { key: 'apiKey', label: 'API key', type: 'password' },
     { key: 'model', label: 'Model name', type: 'text', shown: true },
@@ -168,8 +169,21 @@ export const KOKORO_VOICES: { id: string; name: string }[] = [
   ['bf_emma', 'Emma · British'], ['bf_isabella', 'Isabella · British'], ['bm_george', 'George · British'], ['bm_fable', 'Fable · British'],
 ].map(([id, name]) => ({ id: id!, name: name! }));
 
+/** One way for Niko to think, in the Engine screen's order: Workers AI, your model server, or one of your saved AI keys ("key:<id>"). */
+export type BrainEntry = 'workers-ai' | 'self-hosted-ai' | `key:${string}`;
+/** Why a brain is being skipped for now, and until when (ms since 1970). Set by the server only. */
+export interface BrainRest { until: number; why: 'limit' | 'refused' | 'down' }
+/** A saved AI key as the Engine screen sees it: everything except the key itself. */
+export interface AiKeyInfo { id: string; label: string; provider: 'openai' | 'anthropic' | 'google'; baseUrl: string; model: string }
+export const MAX_AI_KEYS = 10;
+export const BRAIN_ENTRY = /^(workers-ai|self-hosted-ai|key:[a-z0-9]{1,16})$/;
+
 export interface EnginePrefs {
+  /** The first brain's kind, kept for older screens; the order in `brains` is what is used. */
   brain: Brain; model?: 'fast' | 'large';
+  /** The brains to try, in order. When one reaches its usage limit or fails, the next one answers. */
+  brains?: BrainEntry[];
+  rest?: Record<string, BrainRest>;
   /** Older single choice, kept so accounts saved before the voice order still work. */
   voice?: 'elevenlabs' | 'device';
   /** The voices to try, in order; the device voice always comes after them. */
@@ -183,6 +197,18 @@ export interface EnginePrefs {
 export function voiceOrder(e: Partial<EnginePrefs> | undefined): VoiceSource[] {
   if (Array.isArray(e?.voices)) return [...new Set(e!.voices.filter((v): v is VoiceSource => (VOICE_SOURCES as string[]).includes(v)))];
   return e?.voice === 'elevenlabs' ? ['elevenlabs', 'workers'] : [...DEFAULT_VOICES];
+}
+/** The order to try brains in, for accounts saved before and after the order existed. */
+export function brainOrder(e: Partial<EnginePrefs> | undefined): BrainEntry[] {
+  if (Array.isArray(e?.brains)) return [...new Set(e!.brains.filter((b) => BRAIN_ENTRY.test(String(b))))] as BrainEntry[];
+  // Before the order: one chosen brain, then Workers AI unless the fallback was switched off. A key saved then is "k1".
+  const first: BrainEntry = e?.brain === 'custom-ai' ? 'key:k1' : e?.brain === 'self-hosted-ai' ? 'self-hosted-ai' : 'workers-ai';
+  return first !== 'workers-ai' && e?.fallback !== false ? [first, 'workers-ai'] : [first];
+}
+export const brainKind = (b: BrainEntry | undefined): Brain => (!b || b === 'workers-ai' ? 'workers-ai' : b === 'self-hosted-ai' ? 'self-hosted-ai' : 'custom-ai');
+/** Where a key's address points, which decides how Niko talks to it. */
+export function aiProviderOf(baseUrl?: string): AiKeyInfo['provider'] {
+  try { const h = new URL(baseUrl ?? '').hostname; return h.endsWith('anthropic.com') ? 'anthropic' : h === 'generativelanguage.googleapis.com' ? 'google' : 'openai'; } catch { return 'openai'; }
 }
 /** Workers AI models behind the Engine screen's two choices. */
 // Fallback defaults; the live fast list is AI_MODEL in apps/api/wrangler.jsonc. Each is a comma-separated, ordered list.

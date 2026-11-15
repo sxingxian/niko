@@ -4,6 +4,7 @@ import { passkeyError } from '../passkeyError';
 import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSpeak, kokoroSpeed, kokoroSupported, kokoroTooSlow } from '../kokoro';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { aiProviderOf, brainOrder, MAX_AI_KEYS, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
 import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, VOICE_NAMES, VOICE_SOURCES, voiceOrder, WORKERS_VOICES, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
 import { api, Field, Icon, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
@@ -390,101 +391,189 @@ function AppKeysForm({ app, then, redirects, onSave, onCancel, onRemove, confirm
 }
 
 // ---------------------------------------------------------------- engine (the brain)
-const AI_BASES: Record<string, string> = { openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com/v1', google: 'https://generativelanguage.googleapis.com/v1beta/openai' };
-/** The same rule the server uses to pick how to talk to a saved address. */
-function providerOf(baseUrl?: string): string {
-  try { const h = new URL(baseUrl ?? '').hostname; return h.endsWith('anthropic.com') ? 'anthropic' : h === 'generativelanguage.googleapis.com' ? 'google' : 'openai'; } catch { return 'openai'; }
-}
-
-function Opt({ on, onClick, title, sub, tag }: { on: boolean; onClick: () => void; title: string; sub: string; tag?: string }) {
-  return <button className="opt" aria-pressed={on} onClick={onClick}><i /><span className="txt"><b>{title}</b><span className="sub">{sub}</span></span>{tag && <span className="k tag">{tag}</span>}</button>;
+const AI_BASES: Record<AiKeyInfo['provider'], string> = { openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com/v1', google: 'https://generativelanguage.googleapis.com/v1beta/openai' };
+const PROVIDER_LABEL: Record<AiKeyInfo['provider'], string> = { openai: 'OpenAI-compatible', anthropic: 'Anthropic', google: 'Google' };
+/** A key being added or changed on this page. `id` is the saved key's id, or a temporary "new-…" one. */
+type KeyDraft = { id: string; label: string; provider: AiKeyInfo['provider']; baseUrl: string; model: string; apiKey: string; saved: boolean };
+const isNew = (id: string) => id.startsWith('new-');
+const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const day = (ms: number) => (new Date(ms).toDateString() === new Date().toDateString() ? clock(ms) : `${new Date(ms).toLocaleDateString([], { weekday: 'short' })} ${clock(ms)}`);
+/** Why a brain is being skipped right now, in words. */
+function restLine(r: BrainRest | undefined): string {
+  if (!r || r.until <= Date.now()) return '';
+  if (r.why === 'limit') return `Usage limit reached. Niko is using the next one, and tries this again at ${day(r.until)}.`;
+  if (r.why === 'refused') return `It refused the last request. Check its key and model; Niko tries it again at ${day(r.until)}.`;
+  return `It did not answer just now. Niko is using the next one, and tries this again at ${day(r.until)}.`;
 }
 
 export function Engine() {
   const { me, refreshMe } = useNiko();
   const { linked, values, ready, reload } = useLinks();
   const [e, setE] = useState<EnginePrefs | null>(null);
-  const [ai, setAi] = useState({ provider: 'openai', model: '', baseUrl: AI_BASES.openai!, apiKey: '' });
+  const [order, setOrder] = useState<BrainEntry[]>([]);
+  const [keys, setKeys] = useState<KeyDraft[]>([]);
+  const [open, setOpen] = useState<string | null>(null);
   const [self, setSelf] = useState({ baseUrl: '', model: '' });
   const [note, setNote] = useState<Note>(null);
   const [busy, setBusy] = useState('');
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
-  useEffect(() => { if (me && !e) setE({ model: 'fast', ...me.engine }); }, [me, e]);
-  // Reopen with what was saved: the provider follows from the saved address. Keys are never sent back.
+  const [confirm, setConfirm] = useState('');
+  const loadKeys = useCallback(async () => {
+    const r = await api<{ keys: AiKeyInfo[] }>('/engine/keys');
+    setKeys((cur) => [...(r.keys ?? []).map((k) => ({ ...k, apiKey: '', saved: true })), ...cur.filter((k) => isNew(k.id))]);
+  }, []);
+  useEffect(() => { if (me && !e) { setE({ model: 'fast', ...me.engine }); setOrder(brainOrder(me.engine)); void loadKeys(); } }, [me, e, loadKeys]);
+  // Reopen with what was saved. Keys are never sent back.
   useEffect(() => {
     if (!ready) return;
-    const c = values['custom-ai'], s = values['self-hosted-ai'];
-    if (c && !dirty.ai) setAi((v) => ({ ...v, provider: providerOf(c.baseUrl), baseUrl: c.baseUrl ?? v.baseUrl, model: c.model ?? '' }));
+    const s = values['self-hosted-ai'];
     if (s && !dirty.self) setSelf({ baseUrl: s.baseUrl ?? '', model: s.model ?? '' });
   }, [ready, values]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!me || !e) return null;
   const set = (p: Partial<EnginePrefs>) => setE({ ...e, ...p });
-  const editAi = (p: Partial<typeof ai>) => { setDirty((d) => ({ ...d, ai: true })); setAi({ ...ai, ...p }); };
   const editSelf = (p: Partial<typeof self>) => { setDirty((d) => ({ ...d, self: true })); setSelf({ ...self, ...p }); };
+  const editKey = (id: string, p: Partial<KeyDraft>) => { setDirty((d) => ({ ...d, [id]: true })); setKeys(keys.map((k) => (k.id === id ? { ...k, ...p } : k))); };
+  const keyOf = (b: BrainEntry) => keys.find((k) => `key:${k.id}` === b);
+  // Every saved or new key, plus Workers AI and the model server, is either in the order or listed as not in use.
+  const all: BrainEntry[] = ['workers-ai', 'self-hosted-ai', ...keys.map((k) => `key:${k.id}` as BrainEntry)];
+  const others = all.filter((b) => !order.includes(b));
+  const toggle = (b: BrainEntry, on: boolean) => { setOrder(on ? [...order, b] : order.filter((x) => x !== b)); if (on) setOpen(b); };
+  const move = (b: BrainEntry, by: -1 | 1) => {
+    const i = order.indexOf(b), j = i + by;
+    if (i < 0 || j < 0 || j >= order.length) return;
+    const next = [...order]; [next[i], next[j]] = [next[j]!, next[i]!]; setOrder(next);
+  };
+  const addKey = () => {
+    const id = 'new-' + Math.random().toString(36).slice(2, 8);
+    setKeys([...keys, { id, label: '', provider: 'openai', baseUrl: AI_BASES.openai, model: '', apiKey: '', saved: false }]);
+    setOrder([...order, `key:${id}`]); setOpen(`key:${id}`); setDirty((d) => ({ ...d, [id]: true }));
+  };
+  const removeKey = async (k: KeyDraft) => {
+    if (confirm !== k.id) { setConfirm(k.id); return; }
+    setConfirm(''); setNote(null);
+    try {
+      if (!isNew(k.id)) await api(`/engine/keys/${encodeURIComponent(k.id)}`, { method: 'DELETE' });
+      setKeys(keys.filter((x) => x.id !== k.id)); setOrder(order.filter((x) => x !== `key:${k.id}`));
+      if (!isNew(k.id)) { await refreshMe(); setNote({ ok: true, text: 'Key removed.' }); }
+    } catch (x: any) { setNote({ ok: false, text: x.message }); }
+  };
 
   const save = async () => {
     setNote(null); setBusy('save');
     try {
-      if (dirty.ai && (ai.apiKey.trim() || linked['custom-ai'])) await api('/connections/custom-ai', { body: { baseUrl: ai.baseUrl, apiKey: ai.apiKey, model: ai.model } });
+      if (!order.length) throw new Error('Switch on at least one brain.');
+      // New and changed keys are saved first; a new key's temporary id becomes its saved one.
+      let next = [...order];
+      const kept: KeyDraft[] = [], savedIds = new Set<string>();
+      for (const k of keys) {
+        if (!dirty[k.id]) { kept.push(k); continue; }
+        if (isNew(k.id) && !k.apiKey.trim()) { if (next.includes(`key:${k.id}`)) throw new Error(`Paste the API key for ${k.label || PROVIDER_LABEL[k.provider]}, or remove it.`); kept.push(k); continue; }
+        const r = await api<{ key: AiKeyInfo }>('/engine/keys', { body: { id: isNew(k.id) ? undefined : k.id, label: k.label, baseUrl: k.baseUrl, model: k.model, apiKey: k.apiKey } });
+        next = next.map((b) => (b === `key:${k.id}` ? `key:${r.key.id}` as BrainEntry : b));
+        kept.push({ ...r.key, apiKey: '', saved: true }); savedIds.add(k.id);
+      }
+      // Saved keys are kept in the page at once, so a problem further on never saves them twice.
+      setKeys(kept); setOrder(next);
+      setDirty((d) => Object.fromEntries(Object.entries(d).filter(([k]) => !savedIds.has(k))));
       if (dirty.self && self.baseUrl.trim()) await api('/connections/self-hosted-ai', { body: { baseUrl: self.baseUrl, model: self.model } });
-      const need = e.brain === 'custom-ai' && !linked['custom-ai'] && !ai.apiKey.trim() ? 'Add an API key for your own AI first.'
-        : e.brain === 'self-hosted-ai' && !linked['self-hosted-ai'] && !self.baseUrl.trim() ? 'Add your server address first.' : '';
-      if (need) throw new Error(need);
-      await api('/me', { method: 'PATCH', body: { engine: { brain: e.brain, model: e.model, fallback: e.fallback } } });
+      if (next.includes('self-hosted-ai') && !linked['self-hosted-ai'] && !self.baseUrl.trim()) throw new Error('Add your model server’s address, or switch it off.');
+      await api('/me', { method: 'PATCH', body: { engine: { brains: next, model: e.model } } });
+      setDirty({});
+      setOpen((o) => (o && isNew(o.slice(4)) ? null : o));
       await Promise.all([refreshMe(), reload()]);
-      setAi((v) => ({ ...v, apiKey: '' })); setDirty({});
       setNote({ ok: true, text: 'Saved.' });
     } catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setBusy(''); }
   };
-  const test = async (brain: EnginePrefs['brain']) => {
-    setNote(null); setBusy('test-' + brain);
-    try { const r = await api<{ ms: number }>('/engine/test', { body: { brain, model: e.model } }); setNote({ ok: true, text: `Connected. It answered in ${(r.ms / 1000).toFixed(1)} s.` }); }
+  const test = async (b: BrainEntry) => {
+    setNote(null); setBusy('test-' + b);
+    try { const r = await api<{ ms: number }>('/engine/test', { body: { entry: b, model: e.model } }); setNote({ ok: true, text: `Connected. It answered in ${(r.ms / 1000).toFixed(1)} s.` }); await refreshMe(); }
     catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setBusy(''); }
   };
-  const saved = (id: string) => (linked[id] ? 'Saved · type to replace' : '');
+  const testBtn = (b: BrainEntry, saved: boolean) => (
+    <button type="button" className="bt" onClick={() => test(b)} disabled={!!busy || !saved || !!dirty[b.startsWith('key:') ? b.slice(4) : b === 'self-hosted-ai' ? 'self' : '']} title={saved ? undefined : 'Save first'}>{busy === 'test-' + b ? 'Testing…' : 'Test'}</button>
+  );
+
+  const name = (b: BrainEntry) => (b === 'workers-ai' ? 'Cloudflare Workers AI' : b === 'self-hosted-ai' ? 'Your model server' : (keyOf(b)?.label || PROVIDER_LABEL[keyOf(b)?.provider ?? 'openai']));
+  const sub = (b: BrainEntry) => {
+    if (b === 'workers-ai') return 'Open models on Cloudflare’s network. Free up to a daily limit, shared with the Cloudflare voice.';
+    if (b === 'self-hosted-ai') return 'A model server you run, such as on a NAS, at a public https address.';
+    const k = keyOf(b);
+    return k ? [PROVIDER_LABEL[k.provider], k.model || 'model not set'].join(' · ') + (k.saved ? '' : ' · not saved yet') : '';
+  };
+  const tag = (b: BrainEntry) => (b === 'workers-ai' ? 'Free tier' : b === 'self-hosted-ai' ? 'Your server' : 'Your key');
+
+  const settings = (b: BrainEntry) => {
+    if (b === 'workers-ai') return (
+      <div className="eng-fields">
+        <label className="fld"><span className="k">Model</span><select className="in" value={e.model ?? 'fast'} onChange={(x) => set({ model: x.target.value === 'large' ? 'large' : 'fast' })}><option value="fast">Recommended · fast chat model</option><option value="large">Larger · slower, better reasoning</option></select></label>
+        {testBtn(b, true)}
+      </div>
+    );
+    if (b === 'self-hosted-ai') return (
+      <div className="eng-fields col">
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Server address</span><input className="in" type="url" placeholder="https://" value={self.baseUrl} onChange={(x) => editSelf({ baseUrl: x.target.value })} /></label>
+          <label className="fld"><span className="k">Model name · optional</span><input className="in" type="text" value={self.model} onChange={(x) => editSelf({ model: x.target.value })} /></label>
+          {testBtn(b, !!linked['self-hosted-ai'])}
+        </div>
+        <p className="hint">Any server with an OpenAI-compatible chat API, such as Ollama or LM Studio. It needs a public https address; Cloudflare Tunnel is a free way to give one to a NAS.</p>
+      </div>
+    );
+    const k = keyOf(b);
+    if (!k) return null;
+    return (
+      <div className="eng-fields col">
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Provider</span><select className="in" value={k.provider} onChange={(x) => { const p = x.target.value as AiKeyInfo['provider']; editKey(k.id, { provider: p, baseUrl: AI_BASES[p] }); }}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="google">Google</option></select></label>
+          <label className="fld"><span className="k">Name · optional</span><input className="in" type="text" maxLength={40} placeholder="Work OpenAI, Spare Gemini…" value={k.label} onChange={(x) => editKey(k.id, { label: x.target.value })} /></label>
+        </div>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Model name</span><input className="in" type="text" placeholder="As listed by your provider" value={k.model} onChange={(x) => editKey(k.id, { model: x.target.value })} /></label>
+          <label className="fld"><span className="k">Base URL</span><input className="in" type="url" placeholder="https://" value={k.baseUrl} onChange={(x) => editKey(k.id, { baseUrl: x.target.value, provider: aiProviderOf(x.target.value) })} /></label>
+        </div>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">API key</span><input className="in" type="password" autoComplete="off" placeholder={k.saved ? 'Saved · type to replace' : 'Paste key'} value={k.apiKey} onChange={(x) => editKey(k.id, { apiKey: x.target.value })} /></label>
+          {testBtn(b, k.saved)}
+          <button type="button" className={'bt' + (confirm === k.id ? ' danger' : '')} onClick={() => removeKey(k)} onBlur={() => confirm === k.id && setConfirm('')}>{confirm === k.id ? 'Tap again to remove' : 'Remove'}</button>
+        </div>
+      </div>
+    );
+  };
+  const row = (b: BrainEntry, i: number | null) => {
+    const on = i !== null, resting = on ? restLine(me.engine.rest?.[b]) : '';
+    return (
+      <li key={b} className={'vrow' + (on ? ' on' : '')}>
+        <div className="vrow-head">
+          <span className="n" aria-hidden="true">{on ? i + 1 : '–'}</span>
+          <button type="button" className="vrow-title" aria-expanded={open === b} onClick={() => setOpen(open === b ? null : b)}>
+            <b>{name(b)}</b><span className="sub">{sub(b)}</span>
+            {resting && <span className="sub vrow-warn">{resting}</span>}
+          </button>
+          <span className="k tag">{tag(b)}</span>
+          {on && <span className="vrow-move">
+            <button type="button" className="stp" onClick={() => move(b, -1)} disabled={i === 0} aria-label={`Move ${name(b)} up`}>↑</button>
+            <button type="button" className="stp" onClick={() => move(b, 1)} disabled={i === order.length - 1} aria-label={`Move ${name(b)} down`}>↓</button>
+          </span>}
+          <Switch on={on} onChange={(x) => toggle(b, x)} label={`Use ${name(b)}`} />
+        </div>
+        {open === b && <div className="vrow-body">{settings(b)}</div>}
+      </li>
+    );
+  };
   return (
     <SettingsPage title="Engine" sub="What Niko thinks with. You can change it at any time." action={<button className="pri set-save" onClick={save} disabled={busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save changes'}</button>}>
       <NoteLine note={note} />
       <section className="g eng-card wide" aria-label="Brain">
-        <span className="k" style={{ paddingBottom: 6 }}>Brain · language model</span>
-        <div className="eng-opt">
-          <Opt on={e.brain === 'workers-ai'} onClick={() => set({ brain: 'workers-ai' })} title="Cloudflare Workers AI" sub="Open models on Cloudflare’s network. Free up to a daily limit. Nothing to set up." tag="Free tier" />
-          {e.brain === 'workers-ai' && (
-            <div className="eng-fields">
-              <label className="fld"><span className="k">Model</span><select className="in" value={e.model ?? 'fast'} onChange={(x) => set({ model: x.target.value === 'large' ? 'large' : 'fast' })}><option value="fast">Recommended · fast chat model</option><option value="large">Larger · slower, better reasoning</option></select></label>
-              <button className="bt" onClick={() => test('workers-ai')} disabled={!!busy}>{busy === 'test-workers-ai' ? 'Testing…' : 'Test connection'}</button>
-            </div>
-          )}
-        </div>
-        <div className="eng-opt">
-          <Opt on={e.brain === 'custom-ai'} onClick={() => set({ brain: 'custom-ai' })} title="Your own AI key" sub="OpenAI, Anthropic, Google, or any OpenAI-compatible endpoint." />
-          {e.brain === 'custom-ai' && (
-            <div className="eng-fields col">
-              <div className="eng-fields">
-                <label className="fld"><span className="k">Provider</span><select className="in" value={ai.provider} onChange={(x) => editAi({ provider: x.target.value, baseUrl: AI_BASES[x.target.value] ?? ai.baseUrl })}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="google">Google</option></select></label>
-                <label className="fld"><span className="k">Model name</span><input className="in" type="text" placeholder="As listed by your provider" value={ai.model} onChange={(x) => editAi({ model: x.target.value })} /></label>
-              </div>
-              <div className="eng-fields">
-                <label className="fld"><span className="k">Base URL</span><input className="in" type="url" placeholder="https://" value={ai.baseUrl} onChange={(x) => editAi({ baseUrl: x.target.value })} /></label>
-                <label className="fld"><span className="k">AI API key</span><input className="in" type="password" autoComplete="off" placeholder={saved('custom-ai') || 'Paste key'} value={ai.apiKey} onChange={(x) => editAi({ apiKey: x.target.value })} /></label>
-                <button className="bt" onClick={() => test('custom-ai')} disabled={!!busy || !linked['custom-ai']} title={linked['custom-ai'] ? undefined : 'Save first'}>{busy === 'test-custom-ai' ? 'Testing…' : 'Test connection'}</button>
-              </div>
-            </div>
-          )}
-        </div>
-        <div className="eng-opt">
-          <Opt on={e.brain === 'self-hosted-ai'} onClick={() => set({ brain: 'self-hosted-ai' })} title="Self-hosted model" sub="A model server you run, such as on your NAS, reachable at a public https address." />
-          {e.brain === 'self-hosted-ai' && (
-            <div className="eng-fields">
-              <label className="fld"><span className="k">Server address</span><input className="in" type="url" placeholder="https://" value={self.baseUrl} onChange={(x) => editSelf({ baseUrl: x.target.value })} /></label>
-              <label className="fld"><span className="k">Model name · optional</span><input className="in" type="text" value={self.model} onChange={(x) => editSelf({ model: x.target.value })} /></label>
-              <button className="bt" onClick={() => test('self-hosted-ai')} disabled={!!busy || !linked['self-hosted-ai']} title={linked['self-hosted-ai'] ? undefined : 'Save first'}>{busy === 'test-self-hosted-ai' ? 'Testing…' : 'Test connection'}</button>
-            </div>
-          )}
-        </div>
-        <label className="eng-check"><input type="checkbox" checked={e.fallback !== false} onChange={(x) => set({ fallback: x.target.checked })} />If the chosen engine fails or reaches its limit, fall back to Workers AI.</label>
+        <span className="k" style={{ paddingBottom: 6 }}>Brain · tried in this order</span>
+        <p className="hint" style={{ paddingBottom: 8 }}>Niko answers with the first one that works. When one reaches its usage limit, refuses its key or stops answering, Niko moves to the next straight away, and goes back to it once its limit has reset.</p>
+        <ol className="vlist">{order.map((b, i) => row(b, i))}</ol>
+        <button type="button" className="bt add-key" onClick={addKey} disabled={keys.length >= MAX_AI_KEYS}><Icon name="plus" size={18} />Add an AI key</button>
+        {others.length > 0 && <>
+          <span className="k" style={{ padding: '18px 0 6px' }}>Not in use</span>
+          <ul className="vlist">{others.map((b) => row(b, null))}</ul>
+        </>}
       </section>
-      <p className="g eng-keys"><Icon name="shield" size={20} />Keys are encrypted on the server, never stored in this browser, and never shown again after saving. The voice (ElevenLabs) is set under Voice.</p>
+      <p className="g eng-keys"><Icon name="shield" size={20} />Keys are encrypted on the server, never stored in this browser, and never shown again after saving. Several keys from the same provider and account share one usage limit, so a second key helps most when it is from another account or provider. The voice is set under Voice.</p>
     </SettingsPage>
   );
 }

@@ -297,6 +297,8 @@ select.in option { color: #04070c; }
 .vrow-title .vrow-warn, .hint.vrow-warn { color: #ffe0a6; }
 .vrow:not(.on) .vrow-title b { color: #c8d0db; }
 .vrow .tag { border: 1px solid rgba(255,255,255,.3); border-radius: 999px; padding: 5px 10px; white-space: nowrap; }
+.add-key { align-self: flex-start; margin-top: 12px; display: inline-flex; align-items: center; gap: 8px; padding: 0 18px; font-weight: 400; }
+.bt.danger { border-color: rgba(255,160,150,.7); color: #ffd0c9; }
 .vrow-move { display: flex; gap: 6px; }
 .vrow-move .stp { width: 34px; height: 34px; }
 .vrow-move .stp:disabled { opacity: .3; }

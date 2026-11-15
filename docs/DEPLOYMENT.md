@@ -205,7 +205,7 @@ At sign-in Google and Microsoft both show an account picker, so a person signed 
 - *Calendars:* **Calendar link (iCal)** reads up to three private calendar addresses: Google's "Secret address in iCal format", an Outlook.com published calendar's ICS link, iCloud, and so on. Read-only. Repeating events, changed and skipped weeks, and time zones come from the file. Each link is cached for five minutes (under a hash of the address, never the address itself). Anyone holding such an address can read that calendar, so it is stored encrypted like a password; reset it at the source if it leaks.
 - *Refresh:* chats are checked every 30 seconds while the inbox is open; mail, calendars and notes every 5 minutes, which keeps IMAP sign-ins well within providers' limits.
 
-These need no app registration either. Each person pastes their own key: on **Connections**, Telegram bot (token from @BotFather), Discord (bot token and channel ID) and Make.com / n8n / Power Automate (webhook URL); on **Voice**, ElevenLabs (API key and voice); on **Engine**, their own AI key or self-hosted model.
+These need no app registration either. Each person pastes their own key: on **Connections**, Telegram bot (token from @BotFather), Discord (bot token and channel ID) and Make.com / n8n / Power Automate (webhook URL); on **Voice**, ElevenLabs (API key and voice); on **Engine**, their own AI keys (up to 10) or self-hosted model.
 
 - **Telegram groups:** a bot can't list the chats it is in or see messages from before it joined. A group appears in the inbox when the bot is added to it or someone writes there. Bots start with *group privacy* on, which hides ordinary group messages: @BotFather → `/setprivacy` → the bot → **Disable**, then remove and re-add the bot to each group. Connections → Telegram bot → Manage shows the current setting and has **Check again**. Bots connected before this change need **Check again** once so Telegram starts sending group joins.
 - **Voices:** on **Voice**, each person switches voices on, puts them in order, and Niko uses the first that works, always ending with the device voice. The default is Cloudflare's voice, then the device voice.
@@ -261,7 +261,7 @@ Every change is written to the audit log as "via command line". There is no way 
 
 ## Free-tier limits to know
 
-- **Workers AI** has a daily free allowance; once it is used up, the built-in brain fails until the next day. People can switch to their own AI key in **Engine**. Change the default model with the `AI_MODEL` variable in `wrangler.jsonc`.
+- **Workers AI** has a daily free allowance; once it is used up, the built-in brain fails until the next day. People can add their own AI keys in **Engine** and put them before or after Workers AI; when one brain reaches its limit, Niko moves to the next until it resets. Change the default model with the `AI_MODEL` variable in `wrangler.jsonc`.
 - **Workers free plan** allows 100,000 requests a day and a short CPU budget per request. Password hashing runs in Neon (bcrypt through `pgcrypto`), so it does not use that budget.
 - **Neon free plan** pauses the database when idle; the first request after a pause takes a second or two longer.
 - **Resend free plan** limits emails per day; invitations beyond it fail until the next day.
