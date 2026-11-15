@@ -2,7 +2,7 @@
 import { startRegistration } from '@simplewebauthn/browser';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { COLOURS, GROUPS, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef } from '@niko/shared';
+import { checkAppKey, COLOURS, GROUPS, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
 import { api, Field, Icon, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
 
@@ -12,7 +12,7 @@ function useMedia(q: string) {
   return on;
 }
 
-type Prov = ProviderDef & { linked: boolean; configured: boolean; label: string | null; readsGroups?: boolean | null };
+type Prov = ProviderDef & { linked: boolean; configured: boolean; label: string | null; values?: Record<string, string> | null; readsGroups?: boolean | null };
 type MyApp = AppDef & { configured: boolean; hint: string | null; uses: string[]; eventsUrl: string | null };
 type Note = { ok: boolean; text: string } | null;
 
@@ -60,11 +60,18 @@ function NoteLine({ note }: { note: Note }) {
 }
 
 /** Which connections are linked (the Engine and Voice pages need the ones Connections does not list). */
+/** What is linked, and the saved settings that are not secret (addresses, models, voices), so forms reopen as saved. */
 function useLinks() {
   const [linked, setLinked] = useState<Record<string, boolean>>({});
-  const load = useCallback(() => api<{ providers: Prov[] }>('/connections?all=1').then((r) => setLinked(Object.fromEntries(r.providers.map((p) => [p.id, p.linked])))).catch(() => undefined), []);
+  const [values, setValues] = useState<Record<string, Record<string, string>>>({});
+  const [ready, setReady] = useState(false);
+  const load = useCallback(() => api<{ providers: Prov[] }>('/connections?all=1').then((r) => {
+    setLinked(Object.fromEntries(r.providers.map((p) => [p.id, p.linked])));
+    setValues(Object.fromEntries(r.providers.filter((p) => p.linked && p.values).map((p) => [p.id, p.values!])));
+    setReady(true);
+  }).catch(() => undefined), []);
   useEffect(() => { void load(); }, [load]);
-  return { linked, reload: load };
+  return { linked, values, ready, reload: load };
 }
 
 // ---------------------------------------------------------------- connections
@@ -116,17 +123,15 @@ export function Connections() {
     try { const r = await api<{ url: string }>(`/connections/${p.id}/oauth`); location.href = r.url; } catch (e: any) { setNote({ ok: false, text: e.message }); }
   };
   const openApp = (app: MyApp, then: Prov | null) => { manageDlg.current?.close(); setNote(null); setValues({}); setConfirmRemove(''); setAppForm({ app, then }); appDlg.current?.showModal(); };
-  const saveApp = async (e: FormEvent) => {
-    e.preventDefault();
+  // Errors stay inside the sheet (thrown back to it), so nothing typed is lost.
+  const saveApp = async (keys: Record<string, string>) => {
     if (!appForm) return;
     const { app, then } = appForm;
-    try {
-      await api(`/apps/${app.id}`, { method: 'PUT', body: values });
-      setValues({}); appDlg.current?.close();
-      if (then) return signIn(then);
-      await load();
-      setNote({ ok: true, text: `Your ${app.name} app keys are saved. Connect ${app.uses.join(', ')} again to sign in with them.` });
-    } catch (x: any) { setNote({ ok: false, text: x.message }); appDlg.current?.close(); }
+    await api(`/apps/${app.id}`, { method: 'PUT', body: keys });
+    appDlg.current?.close();
+    if (then) return signIn(then);
+    await load();
+    setNote({ ok: true, text: `Your ${app.name} app keys are saved. Connect ${app.uses.join(', ')} again to sign in with them.` });
   };
   const removeApp = async (app: MyApp) => {
     appDlg.current?.close();
@@ -235,22 +240,11 @@ export function Connections() {
         )}
       </dialog>
 
-      <dialog ref={appDlg} className="sheet" onClose={() => setAppForm(null)}>
+      <dialog ref={appDlg} className="sheet wide" onClose={() => setAppForm(null)}>
         {appForm && (
-          <form onSubmit={saveApp}>
-            <h2 style={{ fontWeight: 500, fontSize: 24 }}>{appForm.then ? `Connect ${appForm.then.name}` : `Your ${appForm.app.name} app keys`}</h2>
-            <p className="sub">{appForm.then ? `First time only: ` : ''}Niko signs in to {appForm.app.uses.join(', ')} through an app you register yourself with {appForm.app.name}, so your data never passes through anyone else’s app. {appForm.app.where}</p>
-            {redirects.map((r, i) => (
-              <Field key={r} label={i === 0 ? 'Redirect address to register (add each one)' : 'Redirect address'}><input className="in mono" readOnly value={r} onFocus={(e) => e.currentTarget.select()} /></Field>
-            ))}
-            {appForm.app.eventsUrl && <Field label="Event request address (to receive messages)"><input className="in mono" readOnly value={appForm.app.eventsUrl} onFocus={(e) => e.currentTarget.select()} /></Field>}
-            {appForm.app.fields.map((f) => (
-              <Field key={f.key} label={f.label + (f.optional ? ' · optional' : '')}><input className="in" type={f.type === 'password' ? 'password' : 'text'} autoComplete="off" spellCheck={false} placeholder={f.placeholder ?? (appForm.app.configured ? 'Saved · type to replace' : undefined)} required={!f.optional && !appForm.app.configured} value={values[f.key] ?? ''} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} /></Field>
-            ))}
-            <p className="sub">Stored encrypted and never shown again.{appForm.app.configured ? ' Saving new keys removes the links made with the old ones.' : ''}</p>
-            <div className="sheet-actions"><button type="button" className="sec" onClick={() => appDlg.current?.close()}>Cancel</button><button className="pri">{appForm.then ? 'Save and sign in' : 'Save'}</button></div>
-            {appForm.app.configured && <button type="button" className="lnk" style={{ alignSelf: 'flex-start' }} onClick={() => (confirmRemove === appForm.app.id ? removeApp(appForm.app) : setConfirmRemove(appForm.app.id))}>{confirmRemove === appForm.app.id ? `Confirm: remove your ${appForm.app.name} keys and the links made with them` : `Remove your ${appForm.app.name} app keys`}</button>}
-          </form>
+          <AppKeysForm key={appForm.app.id} app={appForm.app} then={appForm.then} redirects={redirects}
+            onSave={saveApp} onCancel={() => appDlg.current?.close()}
+            onRemove={() => (confirmRemove === appForm.app.id ? removeApp(appForm.app) : setConfirmRemove(appForm.app.id))} confirmingRemove={confirmRemove === appForm.app.id} />
         )}
       </dialog>
 
@@ -280,8 +274,113 @@ export function Connections() {
   );
 }
 
+// ---------------------------------------------------------------- one account's own provider app (Google, Microsoft, Notion, Slack)
+/** Reads Google's downloaded client file in the browser; only the two values in it are ever sent, on Save. */
+function readGoogleFile(text: string, redirects: string[]): { keys?: Record<string, string>; error?: string; warn?: string } {
+  let j: any;
+  try { j = JSON.parse(text); } catch { return { error: 'That file is not the JSON file Google downloads.' }; }
+  if (j?.installed) return { error: 'That key is for a desktop app. Create a client of type Web application instead.' };
+  const w = j?.web;
+  if (!w?.client_id || !w?.client_secret) return { error: 'That file has no client ID and secret in it. Use Download JSON on the screen shown right after creating the client.' };
+  const listed: string[] = Array.isArray(w.redirect_uris) ? w.redirect_uris : [];
+  const missing = redirects.filter((r) => !listed.includes(r));
+  return { keys: { clientId: String(w.client_id), clientSecret: String(w.client_secret) }, warn: missing.length ? `The client does not list ${missing.length === 1 ? 'this address' : 'these addresses'} yet: ${missing.join(', ')}. Add ${missing.length === 1 ? 'it' : 'them'} under Authorised redirect URIs in Google Cloud, or signing in from there will fail.` : undefined };
+}
+
+function CopyRow({ value }: { value: string }) {
+  const [done, setDone] = useState(false);
+  const copy = async () => { try { await navigator.clipboard.writeText(value); setDone(true); window.setTimeout(() => setDone(false), 1500); } catch { /* the field stays selectable */ } };
+  // Shown in full (it wraps), so it can be checked by eye on a phone too; a tap selects it all.
+  return <div className="copy-row"><code className="addr">{value}</code><button type="button" className="bt" onClick={copy} aria-label={`Copy ${value}`}>{done ? 'Copied' : 'Copy'}</button></div>;
+}
+
+function AppKeysForm({ app, then, redirects, onSave, onCancel, onRemove, confirmingRemove }: {
+  app: MyApp; then: Prov | null; redirects: string[]; onSave: (keys: Record<string, string>) => Promise<void>; onCancel: () => void; onRemove: () => void; confirmingRemove: boolean;
+}) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [err, setErr] = useState('');
+  const [warn, setWarn] = useState('');
+  const [fileName, setFileName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [drag, setDrag] = useState(false);
+  // Changing keys later does not need the whole walk-through again.
+  const [steps, setSteps] = useState(!app.configured);
+  const [more, setMore] = useState(false);
+  const useFile = async (f: File | undefined) => {
+    setErr(''); setWarn('');
+    if (!f) return;
+    if (f.size > 20_000) return setErr('That file is too large to be Google’s client file.');
+    const r = readGoogleFile(await f.text(), redirects);
+    if (r.error) return setErr(r.error);
+    setValues((v) => ({ ...v, ...r.keys })); setFileName(f.name); setWarn(r.warn ?? '');
+  };
+  const submit = async (e: FormEvent) => {
+    e.preventDefault(); setErr('');
+    const keys = Object.fromEntries(Object.entries(values).map(([k, v]) => [k, v.trim()]).filter(([, v]) => v));
+    for (const f of app.fields) {
+      const v = keys[f.key];
+      if (!v && !f.optional && !app.configured) return setErr(`${f.label} is needed.`);
+      const wrong = v ? checkAppKey(app.id, f.key, v) : null;
+      if (wrong) return setErr(wrong);
+    }
+    setBusy(true);
+    try { await onSave(keys); } catch (x: any) { setErr(x.message ?? 'That did not save.'); } finally { setBusy(false); }
+  };
+  const field = (f: ProviderField) => (
+    <Field key={f.key} label={f.label + (f.optional ? ' · optional' : '')}>
+      <input className="in" type={f.type === 'password' ? 'password' : 'text'} autoComplete="off" spellCheck={false}
+        placeholder={app.configured ? 'Saved · type to replace' : f.placeholder} value={values[f.key] ?? ''}
+        onChange={(e) => { setFileName(''); setErr(''); setValues({ ...values, [f.key]: e.target.value }); }} />
+    </Field>
+  );
+  return (
+    <form onSubmit={submit} className="app-keys">
+      <h2 style={{ fontWeight: 500, fontSize: 24 }}>{then ? `Connect ${then.name}` : `Your ${app.name} app keys`}</h2>
+      <p className="sub">{then ? 'First time only. ' : ''}Niko signs in to {app.uses.join(', ')} through an app you register yourself, so your data never passes through anyone else’s. {app.where}</p>
+      {app.steps && !steps && <button type="button" className="lnk" style={{ alignSelf: 'flex-start' }} onClick={() => setSteps(true)}>Show the setup steps</button>}
+      {app.steps && steps ? (
+        <ol className="steps">
+          {app.steps.map((s, i) => (
+            <li key={i}>
+              <span className="n" aria-hidden="true">{i + 1}</span>
+              <div className="step">
+                <p>{s.text}</p>
+                {s.link && <a className="bt step-link" href={s.link} target="_blank" rel="noopener noreferrer">{s.linkLabel ?? 'Open'} <Icon name="external" size={16} /></a>}
+                {s.redirects && redirects.map((r) => <CopyRow key={r} value={r} />)}
+              </div>
+            </li>
+          ))}
+        </ol>
+      ) : !app.steps && <>{redirects.map((r) => <CopyRow key={r} value={r} />)}</>}
+      {!app.steps && app.eventsUrl && <Field label="Event request address (to receive messages)"><input className="in mono" readOnly value={app.eventsUrl} onFocus={(e) => e.currentTarget.select()} /></Field>}
+      {app.file === 'google-json' && (
+        <label className={'drop' + (drag ? ' over' : '') + (fileName ? ' done' : '')}
+          onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
+          onDrop={(e) => { e.preventDefault(); setDrag(false); void useFile(e.dataTransfer.files[0]); }}>
+          <input type="file" accept=".json,application/json" onChange={(e) => { void useFile(e.target.files?.[0]); e.target.value = ''; }} />
+          <Icon name={fileName ? 'check' : 'file'} size={22} />
+          <span>{fileName ? <><b>Keys read from {fileName}</b><span className="sub">Only the client ID and secret are kept, when you press Save.</span></> : <><b>Drop the downloaded JSON file here</b><span className="sub">or tap to choose it. It is read on this device.</span></>}</span>
+        </label>
+      )}
+      {app.file === 'google-json' && !fileName && <span className="k or">Or paste them</span>}
+      {(!app.file || !fileName) && app.fields.filter((f) => !f.advanced).map(field)}
+      {app.fields.some((f) => f.advanced) && (more ? app.fields.filter((f) => f.advanced).map((f) => <div key={f.key}>{field(f)}<p className="hint">{f.advanced}</p></div>)
+        : <button type="button" className="lnk" style={{ alignSelf: 'flex-start' }} onClick={() => setMore(true)}>Only for one organisation’s accounts?</button>)}
+      {warn && <p className="warn" role="status">{warn}</p>}
+      {err && <p className="err" role="alert">{err}</p>}
+      <p className="sub">Stored encrypted and never shown again.{app.configured ? ' Saving new keys removes the links made with the old ones.' : ''}</p>
+      <div className="sheet-actions"><button type="button" className="sec" onClick={onCancel}>Cancel</button><button className="pri" disabled={busy}>{busy ? 'Saving…' : then ? 'Save and sign in' : 'Save'}</button></div>
+      {app.configured && <button type="button" className="lnk" style={{ alignSelf: 'flex-start' }} onClick={onRemove}>{confirmingRemove ? `Confirm: remove your ${app.name} keys and the links made with them` : `Remove your ${app.name} app keys`}</button>}
+    </form>
+  );
+}
+
 // ---------------------------------------------------------------- engine (the brain)
 const AI_BASES: Record<string, string> = { openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com/v1', google: 'https://generativelanguage.googleapis.com/v1beta/openai' };
+/** The same rule the server uses to pick how to talk to a saved address. */
+function providerOf(baseUrl?: string): string {
+  try { const h = new URL(baseUrl ?? '').hostname; return h.endsWith('anthropic.com') ? 'anthropic' : h === 'generativelanguage.googleapis.com' ? 'google' : 'openai'; } catch { return 'openai'; }
+}
 
 function Opt({ on, onClick, title, sub, tag }: { on: boolean; onClick: () => void; title: string; sub: string; tag?: string }) {
   return <button className="opt" aria-pressed={on} onClick={onClick}><i /><span className="txt"><b>{title}</b><span className="sub">{sub}</span></span>{tag && <span className="k tag">{tag}</span>}</button>;
@@ -289,7 +388,7 @@ function Opt({ on, onClick, title, sub, tag }: { on: boolean; onClick: () => voi
 
 export function Engine() {
   const { me, refreshMe } = useNiko();
-  const { linked, reload } = useLinks();
+  const { linked, values, ready, reload } = useLinks();
   const [e, setE] = useState<EnginePrefs | null>(null);
   const [ai, setAi] = useState({ provider: 'openai', model: '', baseUrl: AI_BASES.openai!, apiKey: '' });
   const [self, setSelf] = useState({ baseUrl: '', model: '' });
@@ -297,6 +396,13 @@ export function Engine() {
   const [busy, setBusy] = useState('');
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
   useEffect(() => { if (me && !e) setE({ model: 'fast', ...me.engine }); }, [me, e]);
+  // Reopen with what was saved: the provider follows from the saved address. Keys are never sent back.
+  useEffect(() => {
+    if (!ready) return;
+    const c = values['custom-ai'], s = values['self-hosted-ai'];
+    if (c && !dirty.ai) setAi((v) => ({ ...v, provider: providerOf(c.baseUrl), baseUrl: c.baseUrl ?? v.baseUrl, model: c.model ?? '' }));
+    if (s && !dirty.self) setSelf({ baseUrl: s.baseUrl ?? '', model: s.model ?? '' });
+  }, [ready, values]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!me || !e) return null;
   const set = (p: Partial<EnginePrefs>) => setE({ ...e, ...p });
   const editAi = (p: Partial<typeof ai>) => { setDirty((d) => ({ ...d, ai: true })); setAi({ ...ai, ...p }); };
@@ -342,7 +448,7 @@ export function Engine() {
             <div className="eng-fields col">
               <div className="eng-fields">
                 <label className="fld"><span className="k">Provider</span><select className="in" value={ai.provider} onChange={(x) => editAi({ provider: x.target.value, baseUrl: AI_BASES[x.target.value] ?? ai.baseUrl })}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="google">Google</option></select></label>
-                <label className="fld"><span className="k">Model name</span><input className="in" type="text" placeholder={linked['custom-ai'] ? 'Saved · type to replace' : 'As listed by your provider'} value={ai.model} onChange={(x) => editAi({ model: x.target.value })} /></label>
+                <label className="fld"><span className="k">Model name</span><input className="in" type="text" placeholder="As listed by your provider" value={ai.model} onChange={(x) => editAi({ model: x.target.value })} /></label>
               </div>
               <div className="eng-fields">
                 <label className="fld"><span className="k">Base URL</span><input className="in" type="url" placeholder="https://" value={ai.baseUrl} onChange={(x) => editAi({ baseUrl: x.target.value })} /></label>
@@ -356,7 +462,7 @@ export function Engine() {
           <Opt on={e.brain === 'self-hosted-ai'} onClick={() => set({ brain: 'self-hosted-ai' })} title="Self-hosted model" sub="A model server you run, such as on your NAS, reachable at a public https address." />
           {e.brain === 'self-hosted-ai' && (
             <div className="eng-fields">
-              <label className="fld"><span className="k">Server address</span><input className="in" type="url" placeholder={saved('self-hosted-ai') || 'https://'} value={self.baseUrl} onChange={(x) => editSelf({ baseUrl: x.target.value })} /></label>
+              <label className="fld"><span className="k">Server address</span><input className="in" type="url" placeholder="https://" value={self.baseUrl} onChange={(x) => editSelf({ baseUrl: x.target.value })} /></label>
               <label className="fld"><span className="k">Model name · optional</span><input className="in" type="text" value={self.model} onChange={(x) => editSelf({ model: x.target.value })} /></label>
               <button className="bt" onClick={() => test('self-hosted-ai')} disabled={!!busy || !linked['self-hosted-ai']} title={linked['self-hosted-ai'] ? undefined : 'Save first'}>{busy === 'test-self-hosted-ai' ? 'Testing…' : 'Test connection'}</button>
             </div>
@@ -372,7 +478,7 @@ export function Engine() {
 // ---------------------------------------------------------------- voice (speech out, speech in)
 export function Voice() {
   const { me, refreshMe } = useNiko();
-  const { linked, reload } = useLinks();
+  const { linked, values, ready, reload } = useLinks();
   const [e, setE] = useState<EnginePrefs | null>(null);
   const [el, setEl] = useState({ apiKey: '', voiceId: '' });
   const [voices, setVoices] = useState<{ id: string; name: string; cloned: boolean }[]>([]);
@@ -385,10 +491,13 @@ export function Voice() {
       const r = await api<{ voices: { id: string; name: string; cloned: boolean }[] }>('/voice/voices', { body: { apiKey: apiKey || undefined } });
       const list = Array.isArray(r.voices) ? r.voices : [];
       setVoices(list);
-      setEl((v) => (v.voiceId || !list[0] ? v : { ...v, voiceId: (list.find((x) => x.cloned) ?? list[0])!.id }));
+      // Keep the chosen voice; pick one only if none is chosen or it no longer exists in the account.
+      setEl((v) => (!list[0] || list.some((x) => x.id === v.voiceId) ? v : { ...v, voiceId: (list.find((x) => x.cloned) ?? list[0])!.id }));
     } catch (x: any) { setNote({ ok: false, text: x.message }); }
   }, []);
-  useEffect(() => { if (linked.elevenlabs) void listVoices(); }, [linked.elevenlabs, listVoices]);
+  // The saved voice is selected before the list arrives, so the list never replaces it with another.
+  useEffect(() => { if (ready && values.elevenlabs?.voiceId && !dirty) setEl((v) => ({ ...v, voiceId: values.elevenlabs!.voiceId! })); }, [ready, values]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (ready && linked.elevenlabs) void listVoices(); }, [ready, linked.elevenlabs, listVoices]);
   if (!me || !e) return null;
   const set = (p: Partial<EnginePrefs>) => setE({ ...e, ...p });
   const editEl = (p: Partial<typeof el>) => { setDirty(true); setEl({ ...el, ...p }); };

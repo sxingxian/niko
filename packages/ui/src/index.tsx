@@ -45,6 +45,8 @@ const PATHS: Record<string, string> = {
   key: 'M8 10a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM11 11l9-8M16 6l3 3M14 8l2 2',
   arrow: 'M5 12h14M13 6l6 6-6 6',
   user: 'M12 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 21a8 8 0 0 1 16 0',
+  external: 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
+  file: 'M7 3h7l5 5v13H7zM14 3v5h5M12 12v6M9 15l3-3 3 3',
   palette: 'M12 3a9 9 0 1 0 0 18c1.7 0 2-1.3 1.2-2.3-.8-1 0-2.7 1.5-2.7H17a4 4 0 0 0 4-4c0-5-4-9-9-9zM7.5 11h.01M10 7.5h.01M14.5 7.5h.01',
 };
 export function Icon({ name, size = 22 }: { name: keyof typeof PATHS | string; size?: number }) {

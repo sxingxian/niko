@@ -3,11 +3,25 @@
 export type ProviderGroup = 'mail' | 'calendar' | 'notes' | 'automation' | 'messaging' | 'ai';
 export type ConnectKind = 'oauth' | 'credentials' | 'token' | 'webhook' | 'builtin' | 'planned';
 
-export interface ProviderField { key: string; label: string; type: 'text' | 'password' | 'url'; placeholder?: string; optional?: boolean }
+/** `shown`: not secret (an address, a model, a voice), so it is shown back to its owner after saving. Keys never are. */
+export interface ProviderField { key: string; label: string; type: 'text' | 'password' | 'url'; placeholder?: string; optional?: boolean; shown?: boolean; /** tucked away, with this explanation */ advanced?: string }
 
 /** The four providers that need an app registered with them. Each account registers its own and saves its keys. */
 export type AppId = 'google' | 'microsoft' | 'notion' | 'slack';
-export interface AppDef { id: AppId; name: string; where: string; fields: ProviderField[] }
+export interface AppStep { text: string; link?: string; linkLabel?: string; /** show the redirect addresses with this step */ redirects?: boolean }
+/** `steps`: a guided setup. `file`: the provider offers a key file that fills the fields (read in the browser, never uploaded). */
+export interface AppDef { id: AppId; name: string; where: string; fields: ProviderField[]; steps?: AppStep[]; file?: 'google-json' }
+
+/** Catches the usual pasting mistakes before sign-in fails with a vague error from the provider. Returns a message, or null. */
+export function checkAppKey(app: AppId, key: string, v: string): string | null {
+  const guid = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+  if (app === 'google' && key === 'clientId' && !/^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(v)) return 'A Google client ID ends in .apps.googleusercontent.com.';
+  if (app === 'google' && key === 'clientSecret' && v.endsWith('.apps.googleusercontent.com')) return 'That is the client ID. The client secret usually starts with GOCSPX-.';
+  if (app === 'microsoft' && key === 'clientId' && !guid.test(v)) return 'The Application (client) ID looks like 00000000-0000-0000-0000-000000000000. It is on the app’s Overview page.';
+  if (app === 'microsoft' && key === 'clientSecret' && guid.test(v)) return 'That looks like the Secret ID. Copy the Value column instead (shown only when the secret is made).';
+  if (app === 'microsoft' && key === 'tenant' && v && !/^(common|organizations|consumers)$/i.test(v) && !guid.test(v)) return 'Directory (tenant) ID should be the ID from the app registration, or left empty.';
+  return null;
+}
 export interface ProviderDef {
   id: string;
   name: string;
@@ -44,17 +58,17 @@ export const PROVIDERS: ProviderDef[] = [
   { id: 'telegram-bot', name: 'Telegram bot', group: 'messaging', how: 'Bot token · chats with your Niko bot', kind: 'token', fields: [{ key: 'token', label: 'Bot token', type: 'password' }], can: { read: true, send: true } },
   { id: 'telegram-user', name: 'Telegram personal account', group: 'messaging', how: 'Sign in with your number · all your chats', kind: 'planned', can: { read: false, send: false } },
   { id: 'slack', name: 'Slack', group: 'messaging', how: 'Slack sign-in · channels you pick', kind: 'oauth', app: 'slack', can: { read: true, send: true } },
-  { id: 'discord', name: 'Discord', group: 'messaging', how: 'Bot token · servers you pick', kind: 'token', fields: [{ key: 'token', label: 'Bot token', type: 'password' }, { key: 'channelId', label: 'Default channel ID', type: 'text' }], can: { read: false, send: true } },
+  { id: 'discord', name: 'Discord', group: 'messaging', how: 'Bot token · servers you pick', kind: 'token', fields: [{ key: 'token', label: 'Bot token', type: 'password' }, { key: 'channelId', label: 'Default channel ID', type: 'text', shown: true }], can: { read: false, send: true } },
   { id: 'workers-ai', name: 'Cloudflare Workers AI', group: 'ai', how: 'Free daily allowance', kind: 'builtin', can: { read: true, send: false } },
-  { id: 'elevenlabs', name: 'ElevenLabs voice', group: 'ai', how: 'Your API key · your cloned voice', kind: 'token', fields: [{ key: 'apiKey', label: 'API key', type: 'password' }, { key: 'voiceId', label: 'Voice ID', type: 'text' }], can: { read: false, send: false } },
+  { id: 'elevenlabs', name: 'ElevenLabs voice', group: 'ai', how: 'Your API key · your cloned voice', kind: 'token', fields: [{ key: 'apiKey', label: 'API key', type: 'password' }, { key: 'voiceId', label: 'Voice ID', type: 'text', shown: true }], can: { read: false, send: false } },
   { id: 'custom-ai', name: 'Other AI systems', group: 'ai', how: 'Your API key · OpenAI-compatible or Anthropic', kind: 'token', fields: [
-    { key: 'baseUrl', label: 'Base URL', type: 'url', placeholder: 'https://' },
+    { key: 'baseUrl', label: 'Base URL', type: 'url', placeholder: 'https://', shown: true },
     { key: 'apiKey', label: 'API key', type: 'password' },
-    { key: 'model', label: 'Model name', type: 'text' },
+    { key: 'model', label: 'Model name', type: 'text', shown: true },
   ], can: { read: true, send: false } },
   { id: 'self-hosted-ai', name: 'Self-hosted model', group: 'ai', how: 'A model server you run · OpenAI-compatible', kind: 'token', hidden: true, fields: [
-    { key: 'baseUrl', label: 'Server address', type: 'url', placeholder: 'https://' },
-    { key: 'model', label: 'Model name', type: 'text', optional: true },
+    { key: 'baseUrl', label: 'Server address', type: 'url', placeholder: 'https://', shown: true },
+    { key: 'model', label: 'Model name', type: 'text', optional: true, shown: true },
     { key: 'apiKey', label: 'API key', type: 'password', optional: true },
   ], can: { read: true, send: false } },
 ];
@@ -63,11 +77,23 @@ const clientId: ProviderField = { key: 'clientId', label: 'Client ID', type: 'te
 const clientSecret: ProviderField = { key: 'clientSecret', label: 'Client secret', type: 'password' };
 
 export const APPS: AppDef[] = [
-  { id: 'google', name: 'Google', where: 'In Google Cloud Console → APIs & Services: enable the Gmail API and the Calendar API; on the OAuth consent screen choose External (so personal Gmail accounts work) and add your Google address as a test user; then Credentials → Create OAuth client ID → Web application. When you sign in you can pick any of your Google accounts.', fields: [clientId, clientSecret] },
-  { id: 'microsoft', name: 'Microsoft', where: 'In the Microsoft Entra admin centre (entra.microsoft.com; a free personal Microsoft account works) → App registrations → New registration. Under Supported account types choose “Accounts in any organizational directory and personal Microsoft accounts”, so Outlook.com, Hotmail and work accounts can all sign in. Platform: Web. Then Certificates & secrets → New client secret. When you sign in you can pick which account to use.', fields: [
-    { ...clientId, label: 'Application (client) ID' },
+  { id: 'google', name: 'Google', where: 'Register Niko once in Google Cloud. It takes about five minutes and is free.', file: 'google-json', steps: [
+    { text: 'Create a project called Niko.', link: 'https://console.cloud.google.com/projectcreate', linkLabel: 'Create project' },
+    { text: 'Turn on the Gmail and Calendar APIs for it.', link: 'https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com,calendar-json.googleapis.com', linkLabel: 'Turn on APIs' },
+    { text: 'Set up sign-in: app name Niko, your email, audience External (that is what lets personal Gmail accounts in).', link: 'https://console.cloud.google.com/auth/overview', linkLabel: 'Set up sign-in' },
+    { text: 'Under Audience, press Publish app. Left in Testing, Google signs Niko out every 7 days. When you connect, Google warns the app is unverified once: choose Advanced, then Go to Niko.', link: 'https://console.cloud.google.com/auth/audience', linkLabel: 'Open Audience' },
+    { text: 'Create a client: type Web application, and add each address below under Authorised redirect URIs.', link: 'https://console.cloud.google.com/auth/clients/create', linkLabel: 'Create client', redirects: true },
+    { text: 'On the screen that follows, press Download JSON (Google shows the secret only this once) and drop the file here.' },
+  ], fields: [{ ...clientId, placeholder: '…apps.googleusercontent.com' }, { ...clientSecret, placeholder: 'GOCSPX-…' }] },
+  { id: 'microsoft', name: 'Microsoft', where: 'Register Niko once with Microsoft. It works for Outlook.com and Hotmail as well as work accounts, and registering is free.', steps: [
+    { text: 'Registering needs a Microsoft directory. A work or school account already has one. With only Outlook.com or Hotmail, create a free Azure account first: it asks for a card to confirm who you are.', link: 'https://azure.microsoft.com/free', linkLabel: 'Free Azure account' },
+    { text: 'New registration: name Niko; supported accounts “Any Entra ID tenant + personal Microsoft accounts”; redirect URI type Web, with the first address below. Add any others under Authentication.', link: 'https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade', linkLabel: 'App registrations', redirects: true },
+    { text: 'Certificates & secrets → New client secret. Copy its Value, not the Secret ID; it is shown only once.' },
+    { text: 'From Overview, copy the Application (client) ID. Paste both below.' },
+  ], fields: [
+    { ...clientId, label: 'Application (client) ID', placeholder: '00000000-0000-0000-0000-000000000000' },
     { ...clientSecret, label: 'Client secret value' },
-    { key: 'tenant', label: 'Directory (tenant) ID · leave empty for personal and work accounts', type: 'text', placeholder: 'Leave empty', optional: true },
+    { key: 'tenant', label: 'Directory (tenant) ID', type: 'text', placeholder: 'Leave empty', optional: true, advanced: 'Only to limit Niko to one organisation’s accounts. Leave empty for personal and work accounts.' },
   ] },
   { id: 'notion', name: 'Notion', where: 'notion.so/my-integrations → New integration → type Public.', fields: [{ ...clientId, label: 'OAuth client ID' }, { ...clientSecret, label: 'OAuth client secret' }] },
   { id: 'slack', name: 'Slack', where: 'api.slack.com/apps → Create New App → OAuth & Permissions.', fields: [clientId, clientSecret, { key: 'signingSecret', label: 'Signing secret (to receive messages)', type: 'password', optional: true }] },

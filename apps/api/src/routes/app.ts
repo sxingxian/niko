@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
-import { APPS, MAX_RELAY_BYTES, PROVIDERS, SEND_COUNTDOWN_SECONDS, WORKERS_MODELS, type Appearance, type Brain, type EnginePrefs, type Permissions } from '@niko/shared';
+import { APPS, checkAppKey, MAX_RELAY_BYTES, PROVIDERS, SEND_COUNTDOWN_SECONDS, WORKERS_MODELS, type Appearance, type Brain, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
 import { audit, requireUser } from '../lib/session';
@@ -65,7 +65,17 @@ app.patch('/me', async (c) => {
 
 // ---------------------------------------------------------------- connections
 app.get('/connections', async (c) => {
-  const rows = await c.get('db').select({ provider: connections.provider, meta: connections.meta }).from(connections).where(eq(connections.userId, c.get('user').id));
+  const db = c.get('db');
+  const rows = await db.select({ id: connections.id, provider: connections.provider, meta: connections.meta, secretEnc: connections.secretEnc }).from(connections).where(eq(connections.userId, c.get('user').id));
+  // Settings that are not secret are shown back. Links saved before this was kept get it filled in once, here.
+  for (const r of rows) {
+    const def = PROVIDERS.find((p) => p.id === r.provider);
+    if (!def?.fields?.some((f) => f.shown) || (r.meta as any)?.values) continue;
+    const secret = await unseal<Record<string, string>>(c.env.ENCRYPTION_KEY, r.secretEnc).catch(() => null);
+    if (!secret) continue;
+    r.meta = { ...r.meta, values: shownValues(def, secret) };
+    await db.update(connections).set({ meta: r.meta }).where(eq(connections.id, r.id));
+  }
   const linked = new Map(rows.map((r) => [r.provider, r.meta]));
   const mine = await c.get('db').select({ app: providerApps.app, hint: providerApps.clientIdHint }).from(providerApps).where(eq(providerApps.userId, c.get('user').id));
   const apps = new Map(mine.map((r) => [r.app, r.hint]));
@@ -77,6 +87,7 @@ app.get('/connections', async (c) => {
       // Sign-in connections need this account's own provider app keys first.
       configured: p.kind !== 'oauth' || (!!p.app && apps.has(p.app)),
       label: (linked.get(p.id) as any)?.label ?? null,
+      values: (linked.get(p.id) as any)?.values ?? null,
       readsGroups: p.id === 'telegram-bot' ? (linked.get(p.id) as any)?.readsGroups ?? null : undefined,
     })),
     apps: APPS.map((a) => ({
@@ -90,6 +101,11 @@ app.get('/connections', async (c) => {
     redirectUrls: oauthRedirects(url),
   });
 });
+
+/** The fields of a link that are safe to show back to its owner (never keys or tokens). */
+function shownValues(def: (typeof PROVIDERS)[number], secret: Record<string, string>): Record<string, string> {
+  return Object.fromEntries((def.fields ?? []).filter((f) => f.shown && f.type !== 'password' && secret[f.key]).map((f) => [f.key, secret[f.key]!]));
+}
 
 // ---------------------------------------------------------------- this account's own provider apps
 // Client IDs and secrets are per account, never server-wide. They are stored encrypted and never sent back.
@@ -105,10 +121,9 @@ app.put('/apps/:app', async (c) => {
     const v = cleanKey(b[f.key]);
     if (!v) { if (f.optional) continue; return c.json({ error: `${f.label} is needed.` }, 400); }
     if (!KEY_OK.test(v)) return c.json({ error: `${f.label} does not look right. Paste it without spaces.` }, 400);
+    const wrong = checkAppKey(def.id, f.key, v);
+    if (wrong) return c.json({ error: wrong }, 400);
     keys[f.key] = v;
-  }
-  if (keys.tenant && !/^(common|organizations|consumers|[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.test(keys.tenant)) {
-    return c.json({ error: 'Directory (tenant) ID should be the ID from the app registration, or left empty.' }, 400);
   }
   const u = c.get('user');
   const db = c.get('db');
@@ -149,7 +164,7 @@ app.post('/connections/:provider', async (c) => {
     if (f.type === 'url' && v && !publicHttpsUrl(v)) return c.json({ error: `${f.label} must be a public https address.` }, 400);
     secret[f.key] = v.slice(0, 2000);
   }
-  const meta: Record<string, unknown> = {};
+  const meta: Record<string, unknown> = { values: shownValues(def, secret) };
   const id = crypto.randomUUID();
   if (def.id === 'telegram-bot') {
     secret.hookSecret = randomToken(24);

@@ -157,7 +157,7 @@ Nothing about Google, Microsoft, Notion or Slack is configured on the server. Ea
 
 What each person does, once per provider:
 
-1. Open **Connections**, press **Connect** on, say, Gmail (or **Add keys** under *Your app keys*). The dialog shows the redirect addresses to register:
+1. Open **Connections** and press **Connect** on, say, Gmail. For Google and Microsoft the dialog walks through the registration step by step, with a link to each console page and **Copy** buttons for the redirect addresses:
 
    ```
    https://niko.sxingxian.com/api/oauth/callback
@@ -168,8 +168,8 @@ What each person does, once per provider:
 
    | Provider | For | Where to register | What to paste |
    | --- | --- | --- | --- |
-   | Google | Gmail, Google Calendar | Google Cloud Console → APIs & Services. Enable the Gmail API and the Calendar API; OAuth consent screen: **External** (so personal Gmail accounts work) and add yourself as a test user; then Credentials → OAuth client ID (Web application) | Client ID, client secret |
-   | Microsoft | Outlook, Outlook Calendar, OneNote | Microsoft Entra admin centre → App registrations → New registration. Supported account types: **Accounts in any organizational directory and personal Microsoft accounts** (so Outlook.com and Hotmail work); platform: Web | Application (client) ID, client secret value. Leave the tenant ID empty unless the app is for one organisation only |
+   | Google | Gmail, Google Calendar | Google Cloud: create a project, turn on the Gmail and Calendar APIs, set up sign-in with audience **External** (so personal Gmail works), then under Audience press **Publish app**. Create a client of type Web application with the redirect addresses | Drop the JSON file from **Download JSON** (shown once, right after creating the client), or paste the client ID and secret |
+   | Microsoft | Outlook, Outlook Calendar, OneNote | Needs a Microsoft directory: a work or school account has one; with only Outlook.com or Hotmail, create a free Azure account first (it asks for a card to confirm identity). Then Entra → App registrations → New registration, supported accounts **Any Entra ID tenant + personal Microsoft accounts**, redirect type Web | Application (client) ID and the client secret **Value** (not the Secret ID). The tenant ID is tucked away; leave it empty unless the app is for one organisation only |
    | Notion | Notion | notion.so/my-integrations → New integration → type Public | OAuth client ID, OAuth client secret |
    | Slack | Slack | api.slack.com/apps → Create New App → OAuth & Permissions. To receive messages, also set the *Event request address* shown in the dialog and subscribe to `message.channels` and `message.im` | Client ID, client secret, signing secret (optional; needed to receive) |
 
@@ -179,8 +179,11 @@ Changing or removing keys removes the links made with them, because sign-ins mad
 
 Things to know before promising this to people:
 
-- Registering an app is a developer task (about 10 minutes each). Less technical people will need a walkthrough.
-- Google keeps a new app in "Testing": only the test users listed in that app can connect, and Google expires their access after about a week, so they sign in again. Leaving Testing with Gmail access needs Google's review.
+- Registering an app takes about five minutes each with the walk-through, but it is still done in Google's and Microsoft's developer consoles.
+- **Publish the Google app.** Left in "Testing", Google expires the sign-in after 7 days and Gmail and Calendar disconnect every week. A published app that Google has not reviewed is fine for personal use (up to 100 people): Google shows an "unverified app" warning once at sign-in (Advanced → Go to Niko).
+- **Microsoft personal accounts can no longer register apps without a directory**, so someone with only Outlook.com or Hotmail needs the free Azure account first. Registering the app itself is free.
+- Google and Microsoft show each client secret only once, when it is made. If it is lost, make a new one and paste it in again.
+- Niko checks pasted keys for the usual mix-ups (client ID in the secret field, Microsoft's Secret ID instead of its Value) before saving.
 
 At sign-in Google and Microsoft both show an account picker, so a person signed in to a work account in the browser can still choose a personal one.
 
