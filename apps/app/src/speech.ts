@@ -179,13 +179,15 @@ export function cleanCommand(raw: string): string {
  * "last page". Returns where to go, or null for anything else.
  */
 export function pageRequest(raw: string): 'next' | 'prev' | 'first' | 'last' | number | null {
-  const p = normTitle(cleanCommand(raw));
-  if (!p || p.length > 50) return null;
-  const go = '(?:(?:go|move|turn|jump|skip|flip|switch|take me)\\s+(?:back\\s+)?(?:to\\s+)?|show(?: me)?\\s+|open\\s+)?(?:the\\s+)?';
-  if (new RegExp(`^${go}(next|following) page$|^page forward$|^(go )?forward a page$`).test(p)) return 'next';
-  if (new RegExp(`^${go}(previous|prior) page$|^page back$|^(go )?back a page$`).test(p)) return 'prev';
-  if (new RegExp(`^${go}(first|1st) page$`).test(p)) return 'first';
-  if (new RegExp(`^${go}(last|final) page$`).test(p)) return 'last';
-  const n = new RegExp(`^${go}page (?:number )?(\\d{1,3})$`).exec(p);
+  // "…of my inbox", "…of emails", "…of the list": which list is clear from the screen, so it is dropped.
+  const p = normTitle(cleanCommand(raw)).replace(/\s+(?:of|in|on|for)\s+(?:the\s+|my\s+|this\s+)?(?:inbox|e ?mails?|mail|messages?|chats?|notes?|calendar|events?|list|results?|items?|screen)$/, '').replace(/\s+(?:of|in)\s+(?:the\s+|my\s+)?(?:inbox|e ?mails?|mail|messages?|chats?|notes?|calendar|events?|list|results?|items?)\s+/, ' ');
+  if (!p || p.length > 60) return null;
+  const go = '(?:(?:go|move|turn|jump|skip|flip|switch|take me|navigate|bring me|head|show(?: me)?|open|display|load|give me|let me see|i want(?: to see)?)\\s+(?:back\\s+)?(?:over\\s+)?(?:to\\s+)?|(?:can i see|see)\\s+)?(?:the\\s+|a\\s+)?';
+  const pg = '(?:page|set|lot|batch)';
+  if (new RegExp(`^${go}(?:next|following|another) ${pg}$|^page forward$|^(?:go )?forward a page$|^next one page$`).test(p)) return 'next';
+  if (new RegExp(`^${go}(?:previous|prior|earlier|last) ${pg} back$|^${go}(?:previous|prior|earlier) ${pg}$|^page back$|^(?:go )?back (?:a|one) page$`).test(p)) return 'prev';
+  if (new RegExp(`^${go}(?:first|1st|opening) ${pg}$`).test(p)) return 'first';
+  if (new RegExp(`^${go}(?:last|final) ${pg}$`).test(p)) return 'last';
+  const n = new RegExp(`^${go}${pg} (?:number |no )?(\\d{1,3})$`).exec(p);
   return n ? Number(n[1]) : null;
 }

@@ -67,7 +67,7 @@ for (const p of ['what is the weather', 'open my calendar', 'make it shorter', '
   ok(scrollRequest(p) === null, `not scrolling: "${p}"`);
 
 // ---- As speech-to-text services write it: capitals, commas, full stops and polite words
-import { cleanCommand, takeMoveTags } from '../apps/app/src/speech.ts';
+import { cleanCommand, takeMoveTags, pageRequest } from '../apps/app/src/speech.ts';
 const written = { 'Scroll down.': 'down', 'Scroll down, please.': 'down', 'Okay Niko, can you scroll down a bit for me, please?': 'down', 'Could you scroll down the page?': 'down',
   'Please scroll up a little.': 'up', 'Scroll up!': 'up', 'Go back to the top, please.': 'top', 'Take me to the bottom of the page.': 'bottom', 'Keep going.': 'down', 'Show me the rest.': 'down', 'Scroll all the way down to the bottom.': 'bottom', 'Scroll the page down.': 'down', 'Move down a little bit.': 'down' };
 for (const [p, want] of Object.entries(written)) ok(scrollRequest(p) === want, `scrolls ${want} as written: "${p}"`);
@@ -78,3 +78,7 @@ for (const p of ['What is the weather like?', 'Who emailed me today?', 'Make it 
 { const m = takeMoveTags('Scrolling down. [[scroll:down]]'); ok(m.text === 'Scrolling down.' && m.scroll === 'down' && m.page === null, 'the AI can ask to scroll'); }
 { const m = takeMoveTags('Here is page 3. [[page:3]]'); ok(m.page === 'page 3' && m.text === 'Here is page 3.', 'the AI can ask for a page'); }
 { const m = takeMoveTags('Going back. [[page:prev]]'); ok(m.page === 'previous page', 'the AI can ask for the previous page'); }
+// ---- Pages, the way people ask for them
+for (const [p, want] of Object.entries({ 'Go to the next page of my inbox.': 'next', 'Navigate to the next page.': 'next', 'Show me the next page of emails, please.': 'next', 'Can I see page 2 of my notes?': 2, 'Take me back to the previous page of the calendar.': 'prev', 'Open page four.': 4, 'Show me the last page of events.': 'last', 'Next page of results.': 'next', 'Go back a page.': 'prev' }))
+  ok(pageRequest(p) === want, `page ${want}: "${p}"`);
+for (const p of ['What is on page six of the report tomorrow?', 'Read me the next email.', 'Open my inbox.']) ok(pageRequest(p) === null, `not a page move: "${p}"`);
