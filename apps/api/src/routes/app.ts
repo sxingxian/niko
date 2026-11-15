@@ -7,7 +7,7 @@ import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
 import { audit, requireUser, tooMany } from '../lib/session';
 import { eventDetail, mailDetail, noteDetail } from '../details';
-import { BrainFail, defaultLabel, keyInfo, loadKeys, saveKeys, testEntry, think } from '../brains';
+import { BrainFail, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveKeys, testEntry, think } from '../brains';
 import { cleanWhere, forecastText, geocode, stripWeatherTags, weatherTags } from '../weather';
 import { icalCheck, normalizeLink } from '../calendarlink';
 import { IMAP_PROVIDERS, imapCheck, isImapProvider } from '../mailbox';
@@ -407,6 +407,7 @@ When the user asks about the weather in a place whose forecast is not given, rep
 
 // ---------------------------------------------------------------- the Engine screen: brains and AI keys
 const clip = (v: unknown, n: number) => (typeof v === 'string' ? v.trim().slice(0, n) : '');
+const sameOrigin = (a: string, b: string) => { try { return new URL(a).origin === new URL(b).origin; } catch { return false; } };
 
 app.get('/engine/keys', async (c) => {
   const keys = await loadKeys(c.env, c.get('db'), c.get('user').id);
@@ -424,6 +425,9 @@ app.post('/engine/keys', async (c) => {
   const prior = typeof b.id === 'string' ? keys.find((k) => k.id === b.id) : undefined;
   if (b.id && !prior) return c.json({ error: 'That key is no longer saved.' }, 404);
   if (!prior && !apiKey) return c.json({ error: 'Paste the API key.' }, 400);
+  // A saved key is only ever sent to the address it was saved with: changing the address needs the key typed again.
+  if (prior && !apiKey && !sameOrigin(prior.baseUrl, baseUrl)) return c.json({ error: 'Paste the API key again when you change the base URL.' }, 400);
+  if (NOT_CHAT.test(model)) return c.json({ error: `“${model}” is not a chat model, so it can’t answer as Niko. Pick a chat model from the list.` }, 400);
   if (!prior && keys.length >= MAX_AI_KEYS) return c.json({ error: `Up to ${MAX_AI_KEYS} keys can be saved.` }, 400);
   let id = prior?.id ?? '';
   while (!id || (!prior && keys.some((k) => k.id === id))) id = Array.from(crypto.getRandomValues(new Uint8Array(8)), (n) => 'abcdefghijklmnopqrstuvwxyz0123456789'[n % 36]).join('');
@@ -449,6 +453,25 @@ app.delete('/engine/keys/:id', async (c) => {
   return c.json({ ok: true });
 });
 
+// The chat models a key can use, for the Engine screen's model list. A saved key is used only with its own address.
+app.post('/engine/models', async (c) => {
+  const u = c.get('user');
+  if (await tooMany(c, 'models:' + u.id, 30, 15)) return c.json({ error: 'Too many lookups just now. Try again in a few minutes.' }, 429);
+  const b = await c.req.json<{ id?: string; baseUrl?: string; apiKey?: string }>().catch(() => ({} as any));
+  const baseUrl = clip(b.baseUrl, 500);
+  let apiKey = clip(b.apiKey, 4000);
+  if (!apiKey && typeof b.id === 'string') {
+    const k = (await loadKeys(c.env, c.get('db'), u.id)).find((x) => x.id === b.id);
+    if (k && sameOrigin(k.baseUrl, baseUrl)) apiKey = k.apiKey;
+  }
+  if (!apiKey) return c.json({ error: 'Paste the API key to list its models.' }, 400);
+  try { return c.json({ models: await listModels({ baseUrl, apiKey }) }); }
+  catch (e) {
+    const f = e instanceof BrainFail ? e : null;
+    return c.json({ error: f?.why === 'refused' ? `It refused the key${f.detail ? `: ${f.detail}` : '.'}` : `The model list could not be read${f?.detail ? `: ${f.detail}` : '.'}` }, 502);
+  }
+});
+
 // "Test connection" sends one short prompt to one brain, with what is saved.
 app.post('/engine/test', async (c) => {
   const b = await c.req.json<{ entry?: string; model?: 'fast' | 'large' }>().catch(() => ({} as any));
@@ -458,10 +481,12 @@ app.post('/engine/test', async (c) => {
     return c.json({ ok: true, ms });
   } catch (e) {
     const why = e instanceof BrainFail ? e.why : 'down';
+    // The owner sees the provider's own short message (keys removed), which usually names the exact problem.
+    const said = e instanceof BrainFail && e.detail ? ` It said: “${e.detail}”` : '';
     console.warn(`engine test ${entry}: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
-    return c.json({ error: why === 'limit' ? 'It answered that its usage limit is reached. Niko will use the next brain until it resets.'
-      : why === 'refused' ? 'It refused the request. Check the address, key and model name.'
-      : 'It did not answer. Check the address and model name, or try again.' }, 502);
+    return c.json({ error: (why === 'limit' ? 'It answered that its usage limit is reached. Niko will use the next brain until it resets.'
+      : why === 'refused' ? 'It refused the request. Check the key and the model name.'
+      : 'It did not answer. Check the address and model name, or try again.') + said }, 502);
   }
 });
 

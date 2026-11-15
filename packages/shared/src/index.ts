@@ -185,6 +185,23 @@ export interface BrainRest { until: number; why: 'limit' | 'refused' | 'down' }
 /** A saved AI key as the Engine screen sees it: everything except the key itself. */
 export interface AiKeyInfo { id: string; label: string; provider: 'openai' | 'anthropic' | 'google'; baseUrl: string; model: string }
 export const MAX_AI_KEYS = 10;
+/** Model names that are not chat models (safety checkers, speech, embeddings, images), which can't answer as Niko. */
+export const NOT_CHAT = /(guard|safeguard|whisper|tts|speech|embed|moderation|playai|orpheus|dall-e|image|imagen|audio|transcri|realtime|rerank|veo)/i;
+/** Providers offered on the Engine screen. All but Anthropic and Google speak the OpenAI chat format. */
+export const AI_PRESETS: { id: string; name: string; baseUrl: string; example: string }[] = [
+  { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', example: 'gpt-4.1-mini' },
+  { id: 'google', name: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', example: 'gemini-2.5-flash' },
+  { id: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', example: 'claude-haiku-4-5' },
+  { id: 'groq', name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', example: 'llama-3.3-70b-versatile' },
+  { id: 'openrouter', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', example: 'meta-llama/llama-3.3-70b-instruct' },
+  { id: 'mistral', name: 'Mistral', baseUrl: 'https://api.mistral.ai/v1', example: 'mistral-small-latest' },
+  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', example: 'deepseek-chat' },
+  { id: 'other', name: 'Other (OpenAI-compatible)', baseUrl: '', example: '' },
+];
+export function presetOf(baseUrl: string): string {
+  const clean = (u: string) => u.trim().replace(/\/+$/, '').toLowerCase();
+  return AI_PRESETS.find((p) => p.baseUrl && clean(p.baseUrl) === clean(baseUrl))?.id ?? 'other';
+}
 export const BRAIN_ENTRY = /^(workers-ai|self-hosted-ai|key:[a-z0-9]{1,16})$/;
 
 export interface EnginePrefs {

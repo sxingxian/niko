@@ -1,6 +1,6 @@
 // The brain order: a brain that reaches its usage limit is skipped for a while and the next one answers.
 import assert from 'node:assert/strict';
-import { think, testEntry } from '../apps/api/src/brains.ts';
+import { think, testEntry, listModels, providerMessage, customAi } from '../apps/api/src/brains.ts';
 import { store, fakeDb } from './brains-stubs.mjs';
 
 let pass = 0;
@@ -99,5 +99,31 @@ await ok('a successful test clears that brain’s rest', async () => {
   behaviour = {}; store.engineWrites = [];
   await testEntry(workersOk, fakeDb, user({ brains: ['key:aaaa'], rest: { 'key:aaaa': { until: Date.now() + 60_000, why: 'limit' } } }), 'key:aaaa', 'fast');
   assert.deepEqual(store.engineWrites.at(-1).rest, {});
+});
+await ok('a model the provider rejects is a setting to fix, and its own message is kept for the owner', async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: 'The model `meta-llama/llama-prompt-guard-2-22m` does not support chat completions', type: 'invalid_request_error' } }), { status: 400 });
+  await assert.rejects(() => customAi({ baseUrl: 'https://api.groq.com/openai/v1', apiKey: 'gsk_x', model: 'meta-llama/llama-prompt-guard-2-22m' }, msgs), (e) => e.why === 'refused' && /does not support chat/.test(e.detail));
+  globalThis.fetch = saved;
+});
+await ok('keys are removed from provider messages', () => {
+  const m = providerMessage(JSON.stringify({ error: { message: 'Incorrect API key provided: gsk_abcdefghijklmnop1234. You can find your key at https://console.groq.com' } }));
+  assert.ok(!m.includes('gsk_abcdefghijklmnop1234') && m.includes('[key]'));
+  assert.ok(!providerMessage('x'.repeat(10) + ' ' + 'A'.repeat(40)).includes('A'.repeat(40)));
+});
+await ok('the model list keeps chat models and leaves out safety, speech and embedding models', async () => {
+  const saved = globalThis.fetch; let asked = '';
+  globalThis.fetch = async (url, init) => { asked = String(url) + ' ' + init.headers.authorization; return Response.json({ data: [
+    { id: 'llama-3.3-70b-versatile' }, { id: 'meta-llama/llama-prompt-guard-2-22m' }, { id: 'whisper-large-v3' }, { id: 'playai-tts' }, { id: 'openai/gpt-oss-120b' }, { id: 'openai/gpt-oss-safeguard-20b' }] }); };
+  const list = await listModels({ baseUrl: 'https://api.groq.com/openai/v1', apiKey: 'gsk_x' });
+  assert.deepEqual(list, ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b']);
+  assert.equal(asked, 'https://api.groq.com/openai/v1/models Bearer gsk_x');
+  globalThis.fetch = saved;
+});
+await ok('Google model names lose their "models/" prefix', async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ data: [{ id: 'models/gemini-2.5-flash' }, { id: 'models/text-embedding-004' }] });
+  assert.deepEqual(await listModels({ baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', apiKey: 'k' }), ['gemini-2.5-flash']);
+  globalThis.fetch = saved;
 });
 console.log(`${pass} brain checks passed`);

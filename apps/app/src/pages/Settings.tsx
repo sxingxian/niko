@@ -4,7 +4,7 @@ import { passkeyError } from '../passkeyError';
 import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSpeak, kokoroSpeed, kokoroSupported, kokoroTooSlow } from '../kokoro';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { aiProviderOf, brainOrder, MAX_AI_KEYS, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
+import { AI_PRESETS, aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, presetOf, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
 import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, VOICE_NAMES, VOICE_SOURCES, voiceOrder, WORKERS_VOICES, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
 import { api, Field, Icon, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
@@ -419,6 +419,7 @@ export function Engine() {
   const [busy, setBusy] = useState('');
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
   const [confirm, setConfirm] = useState('');
+  const [models, setModels] = useState<Record<string, { list: string[]; err: string; busy: boolean }>>({});
   const loadKeys = useCallback(async () => {
     const r = await api<{ keys: AiKeyInfo[] }>('/engine/keys');
     setKeys((cur) => [...(r.keys ?? []).map((k) => ({ ...k, apiKey: '', saved: true })), ...cur.filter((k) => isNew(k.id))]);
@@ -443,6 +444,15 @@ export function Engine() {
     const i = order.indexOf(b), j = i + by;
     if (i < 0 || j < 0 || j >= order.length) return;
     const next = [...order]; [next[i], next[j]] = [next[j]!, next[i]!]; setOrder(next);
+  };
+  // The provider's own list of chat models for a key: from the key being typed, or the saved one (with its saved address).
+  const listModels = async (k: KeyDraft) => {
+    if (!k.apiKey.trim() && !k.saved) return;
+    setModels((m) => ({ ...m, [k.id]: { list: m[k.id]?.list ?? [], err: '', busy: true } }));
+    try {
+      const r = await api<{ models: string[] }>('/engine/models', { body: { id: isNew(k.id) ? undefined : k.id, baseUrl: k.baseUrl, apiKey: k.apiKey || undefined } });
+      setModels((m) => ({ ...m, [k.id]: { list: r.models, err: r.models.length ? '' : 'No chat models were listed for this key.', busy: false } }));
+    } catch (x: any) { setModels((m) => ({ ...m, [k.id]: { list: [], err: x.message, busy: false } })); }
   };
   const addKey = () => {
     const id = 'new-' + Math.random().toString(36).slice(2, 8);
@@ -499,7 +509,7 @@ export function Engine() {
     if (b === 'workers-ai') return 'Open models on Cloudflare’s network. Free up to a daily limit, shared with the Cloudflare voice.';
     if (b === 'self-hosted-ai') return 'A model server you run, such as on a NAS, at a public https address.';
     const k = keyOf(b);
-    return k ? [PROVIDER_LABEL[k.provider], k.model || 'model not set'].join(' · ') + (k.saved ? '' : ' · not saved yet') : '';
+    return k ? [AI_PRESETS.find((x) => x.id === presetOf(k.baseUrl) && x.id !== 'other')?.name ?? PROVIDER_LABEL[k.provider], k.model || 'model not set'].join(' · ') + (k.saved ? '' : ' · not saved yet') : '';
   };
   const tag = (b: BrainEntry) => (b === 'workers-ai' ? 'Free tier' : b === 'self-hosted-ai' ? 'Your server' : 'Your key');
 
@@ -522,21 +532,38 @@ export function Engine() {
     );
     const k = keyOf(b);
     if (!k) return null;
+    const preset = presetOf(k.baseUrl), ex = AI_PRESETS.find((x) => x.id === preset)?.example;
+    const ml = models[k.id], notChat = !!k.model && NOT_CHAT.test(k.model);
     return (
       <div className="eng-fields col">
         <div className="eng-fields">
-          <label className="fld"><span className="k">Provider</span><select className="in" value={k.provider} onChange={(x) => { const p = x.target.value as AiKeyInfo['provider']; editKey(k.id, { provider: p, baseUrl: AI_BASES[p] }); }}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="google">Google</option></select></label>
+          <label className="fld"><span className="k">Provider</span>
+            <select className="in" value={preset} onChange={(x) => { const p = AI_PRESETS.find((y) => y.id === x.target.value)!; editKey(k.id, { baseUrl: p.baseUrl || (preset === 'other' ? k.baseUrl : ''), provider: aiProviderOf(p.baseUrl), model: '' }); setModels((m) => ({ ...m, [k.id]: { list: [], err: '', busy: false } })); }}>
+              {AI_PRESETS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </label>
           <label className="fld"><span className="k">Name · optional</span><input className="in" type="text" maxLength={40} placeholder="Work OpenAI, Spare Gemini…" value={k.label} onChange={(x) => editKey(k.id, { label: x.target.value })} /></label>
         </div>
         <div className="eng-fields">
-          <label className="fld"><span className="k">Model name</span><input className="in" type="text" placeholder="As listed by your provider" value={k.model} onChange={(x) => editKey(k.id, { model: x.target.value })} /></label>
-          <label className="fld"><span className="k">Base URL</span><input className="in" type="url" placeholder="https://" value={k.baseUrl} onChange={(x) => editKey(k.id, { baseUrl: x.target.value, provider: aiProviderOf(x.target.value) })} /></label>
+          <label className="fld"><span className="k">API key</span><input className="in" type="password" autoComplete="off" placeholder={k.saved ? 'Saved · type to replace' : 'Paste key'} value={k.apiKey} onChange={(x) => editKey(k.id, { apiKey: x.target.value })} onBlur={() => k.apiKey.trim() && listModels(k)} /></label>
+          {preset === 'other' && <label className="fld"><span className="k">Base URL</span><input className="in" type="url" placeholder="https://" value={k.baseUrl} onChange={(x) => editKey(k.id, { baseUrl: x.target.value, provider: aiProviderOf(x.target.value) })} /></label>}
         </div>
         <div className="eng-fields">
-          <label className="fld"><span className="k">API key</span><input className="in" type="password" autoComplete="off" placeholder={k.saved ? 'Saved · type to replace' : 'Paste key'} value={k.apiKey} onChange={(x) => editKey(k.id, { apiKey: x.target.value })} /></label>
+          <label className="fld"><span className="k">Model</span>
+            {ml?.list.length
+              ? <select className="in" value={ml.list.includes(k.model) ? k.model : ''} onChange={(x) => editKey(k.id, { model: x.target.value })}>
+                  {!ml.list.includes(k.model) && <option value="">{k.model ? `${k.model} · not in this key’s list` : 'Choose a chat model'}</option>}
+                  {ml.list.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              : <input className="in" type="text" placeholder={ex ? `Such as ${ex}` : 'As listed by your provider'} value={k.model} onChange={(x) => editKey(k.id, { model: x.target.value })} />}
+          </label>
+          <button type="button" className="bt" onClick={() => listModels(k)} disabled={!!ml?.busy || (!k.apiKey.trim() && !k.saved)} title={!k.apiKey.trim() && !k.saved ? 'Paste the key first' : undefined}>{ml?.busy ? 'Listing…' : 'List models'}</button>
           {testBtn(b, k.saved)}
           <button type="button" className={'bt' + (confirm === k.id ? ' danger' : '')} onClick={() => removeKey(k)} onBlur={() => confirm === k.id && setConfirm('')}>{confirm === k.id ? 'Tap again to remove' : 'Remove'}</button>
         </div>
+        {notChat && <p className="hint vrow-warn">“{k.model}” is not a chat model (it checks or converts text rather than answering), so it can’t answer as Niko. Choose a chat model{ex ? `, such as ${ex}` : ''}.</p>}
+        {ml?.err && <p className="hint vrow-warn">{ml.err}</p>}
+        {!ml?.list.length && !ml?.err && <p className="hint">Paste the key, then List models to choose from the chat models it can use.</p>}
       </div>
     );
   };
@@ -546,7 +573,7 @@ export function Engine() {
       <li key={b} className={'vrow' + (on ? ' on' : '')}>
         <div className="vrow-head">
           <span className="n" aria-hidden="true">{on ? i + 1 : '–'}</span>
-          <button type="button" className="vrow-title" aria-expanded={open === b} onClick={() => setOpen(open === b ? null : b)}>
+          <button type="button" className="vrow-title" aria-expanded={open === b} onClick={() => { const k = keyOf(b); if (open !== b && k?.saved && !models[k.id]) void listModels(k); setOpen(open === b ? null : b); }}>
             <b>{name(b)}</b><span className="sub">{sub(b)}</span>
             {resting && <span className="sub vrow-warn">{resting}</span>}
           </button>

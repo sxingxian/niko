@@ -294,7 +294,7 @@ select.in option { color: #04070c; }
 .vrow-title.static { cursor: default; }
 .vrow-title b { font-size: 17px; font-weight: 500; }
 .vrow-title .sub { font-size: 13px; line-height: 1.35; }
-.vrow-title .vrow-warn, .hint.vrow-warn { color: #ffe0a6; }
+.vrow-title .vrow-warn, .hint.vrow-warn, .eng-card .hint.vrow-warn { color: #ffe0a6; }
 .vrow:not(.on) .vrow-title b { color: #c8d0db; }
 .vrow .tag { border: 1px solid rgba(255,255,255,.3); border-radius: 999px; padding: 5px 10px; white-space: nowrap; }
 .add-key { align-self: flex-start; margin-top: 12px; display: inline-flex; align-items: center; gap: 8px; padding: 0 18px; font-weight: 400; }

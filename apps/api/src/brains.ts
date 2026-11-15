@@ -3,7 +3,7 @@
 // for a while and the next one answers; it is tried again once its rest is over.
 import { and, eq } from 'drizzle-orm';
 import { connections, users, type Db } from '@niko/db';
-import { aiProviderOf, brainOrder, MAX_AI_KEYS, WORKERS_MODELS, type AiKeyInfo, type BrainEntry, type BrainRest, type EnginePrefs } from '@niko/shared';
+import { aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, WORKERS_MODELS, type AiKeyInfo, type BrainEntry, type BrainRest, type EnginePrefs } from '@niko/shared';
 import type { Env } from './env';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
@@ -13,8 +13,22 @@ interface AiKey extends AiKeyInfo { apiKey: string }
 
 /** Why a brain did not answer, sorted into what to do about it. */
 export class BrainFail extends Error {
-  constructor(message: string, readonly why: BrainRest['why'], readonly restMs: number) { super(message); }
+  /** `detail`: the provider's own short message, with anything like a key removed. Shown only to the key's owner on Test. */
+  constructor(message: string, readonly why: BrainRest['why'], readonly restMs: number, readonly detail = '') { super(message); }
 }
+
+/** The provider's error message, short, with anything that looks like a key or token removed. */
+export function providerMessage(body: string): string {
+  let m = '';
+  try { const j = JSON.parse(body); m = String(j?.error?.message ?? j?.error ?? j?.message ?? j?.detail ?? ''); } catch { m = body; }
+  if (typeof m !== 'string') m = '';
+  return m.replace(/<[^>]*>/g, ' ')
+    .replace(/\b(sk|gsk|xai|pk|rk|AIza)[-_A-Za-z0-9*]{6,}/g, '[key]')
+    .replace(/[A-Za-z0-9_\-*]{32,}/g, '[key]')
+    .replace(/\s+/g, ' ').trim().slice(0, 220);
+}
+
+export { NOT_CHAT } from '@niko/shared';
 const MIN = 60_000, HOUR = 60 * MIN;
 const nextUtcMidnight = (now: number) => { const d = new Date(now); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) - now + 30_000; };
 
@@ -24,10 +38,13 @@ function classify(status: number, body: string, retryAfter: string | null): Brai
   const quota = /insufficient_quota|quota|billing|credit balance|credits|exceeded your|resource_exhausted|payment|spend limit|usage limit/.test(text);
   const after = Number(retryAfter);
   const wait = Number.isFinite(after) && after > 0 ? Math.min(Math.max(after * 1000, 15_000), HOUR) : 0;
-  if (status === 402 || (quota && (status === 429 || status === 403 || status === 400))) return new BrainFail(`limit ${status}`, 'limit', wait || HOUR);
-  if (status === 429) return new BrainFail(`rate ${status}`, 'limit', wait || MIN);
-  if (status === 401 || status === 403) return new BrainFail(`refused ${status}`, 'refused', 6 * HOUR);
-  return new BrainFail(`down ${status}`, 'down', wait || MIN);
+  const detail = providerMessage(body);
+  if (status === 402 || (quota && (status === 429 || status === 403 || status === 400))) return new BrainFail(`limit ${status}`, 'limit', wait || HOUR, detail);
+  if (status === 429) return new BrainFail(`rate ${status}`, 'limit', wait || MIN, detail);
+  if (status === 401 || status === 403) return new BrainFail(`refused ${status}`, 'refused', 6 * HOUR, detail);
+  // A wrong model name, or a model that can't chat, is a setting to fix rather than a passing fault.
+  if (status === 400 || status === 404 || status === 422) return new BrainFail(`rejected ${status}`, 'refused', 30 * MIN, detail);
+  return new BrainFail(`down ${status}`, 'down', wait || MIN, detail);
 }
 
 /** Workers AI models to try, in order. Cloudflare retires models from time to time; with more than one listed,
@@ -85,13 +102,35 @@ export async function customAi(secret: { baseUrl?: string; apiKey?: string; mode
         body: JSON.stringify({ ...(secret.model ? { model: secret.model } : {}), max_tokens: 400, messages: msgs }),
       });
   } catch (e) {
-    throw new BrainFail(`unreachable: ${String((e as Error)?.message ?? e).slice(0, 120)}`, 'down', MIN);
+    const timeout = (e as Error)?.name === 'TimeoutError';
+    throw new BrainFail(`unreachable: ${String((e as Error)?.message ?? e).slice(0, 120)}`, 'down', MIN, timeout ? 'It took longer than 30 seconds to answer.' : 'Its address could not be reached.');
   }
   if (!res.ok) throw classify(res.status, (await res.text().catch(() => '')).slice(0, 2000), res.headers.get('retry-after'));
   const j: any = await res.json().catch(() => null);
   const text = String((anthropic ? j?.content?.[0]?.text : j?.choices?.[0]?.message?.content) ?? '').trim();
-  if (!text) throw new BrainFail('empty answer', 'down', MIN);
+  if (!text) throw new BrainFail('empty answer', 'down', MIN, 'It answered with nothing. Check that the model is a chat model.');
   return text;
+}
+
+/** The chat models a key can use, from the provider's own list (safety, speech and embedding models left out). */
+export async function listModels(secret: { baseUrl?: string; apiKey?: string }): Promise<string[]> {
+  const base = publicHttpsUrl(secret.baseUrl);
+  if (!base) throw new BrainFail('address not valid', 'refused', 0, 'The base URL must be a public https address.');
+  const root = base.toString().replace(/\/+$/, '');
+  const anthropic = base.hostname.endsWith('anthropic.com');
+  let res: Response;
+  try {
+    res = await fetch(anthropic ? `${root.replace(/\/v1$/, '')}/v1/models?limit=100` : `${root}/models`, {
+      signal: AbortSignal.timeout(15_000),
+      headers: anthropic ? { 'x-api-key': secret.apiKey ?? '', 'anthropic-version': '2023-06-01' } : { ...(secret.apiKey ? { authorization: `Bearer ${secret.apiKey}` } : {}) },
+    });
+  } catch { throw new BrainFail('unreachable', 'down', 0, 'Its address could not be reached.'); }
+  if (!res.ok) throw classify(res.status, (await res.text().catch(() => '')).slice(0, 2000), null);
+  const j: any = await res.json().catch(() => null);
+  const ids: string[] = (Array.isArray(j?.data) ? j.data : Array.isArray(j?.models) ? j.models : [])
+    .map((m: any) => String(m?.id ?? m?.name ?? '').replace(/^models\//, ''))
+    .filter((id: string) => id && id.length <= 200 && !NOT_CHAT.test(id));
+  return [...new Set(ids)].sort().slice(0, 300);
 }
 
 // ---------------------------------------------------------------- the saved keys
@@ -102,7 +141,8 @@ export const defaultLabel = (k: { baseUrl: string; model: string }) => {
   const p = aiProviderOf(k.baseUrl);
   let host = '';
   try { host = new URL(k.baseUrl).hostname.replace(/^api\./, ''); } catch { /* shown as the provider */ }
-  return p === 'openai' ? (host === 'openai.com' ? 'OpenAI' : host || PROVIDER_NAMES.openai) : PROVIDER_NAMES[p];
+  const known: Record<string, string> = { 'openai.com': 'OpenAI', 'groq.com': 'Groq', 'openrouter.ai': 'OpenRouter', 'mistral.ai': 'Mistral', 'deepseek.com': 'DeepSeek', 'together.xyz': 'Together AI', 'x.ai': 'xAI' };
+  return p === 'openai' ? (known[host] ?? (host || PROVIDER_NAMES.openai)) : PROVIDER_NAMES[p];
 };
 
 export async function loadKeys(env: Env, db: Db, userId: string): Promise<AiKey[]> {
