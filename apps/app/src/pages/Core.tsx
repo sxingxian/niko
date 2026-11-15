@@ -4,6 +4,8 @@ import { Link, NavLink, useLocation } from 'react-router-dom';
 import { SEND_COUNTDOWN_SECONDS, VOICE_NAMES, voiceOrder } from '@niko/shared';
 import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
 import { useNiko } from '../niko';
+import { pickItem, screenFor } from '../speech';
+import { isStacked } from '../flow';
 import type { Brief, BriefPart, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
 
 // The mockups' rail: Home, Inbox, Calendar, Notes, Connections. Settings (appearance, engine, account) sit behind the last button.
@@ -297,7 +299,24 @@ export function Workspace() {
     ...brief.chats.map((c) => ({ kind: 'chat' as const, provider: c.provider, chatId: c.chatId, title: c.title, source: c.source })),
     ...brief.mail.map((m) => ({ kind: 'mail' as const, provider: m.provider, id: m.id, title: m.from, source: m.source, subject: m.subject })),
   ] : [];
-  useEffect(() => { if (!sel && items[0]) setSel(items[0]); /* first item opens by default */ }, [items.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The first item opens by default, unless the AI was just asked to open a particular one here.
+  const openingAsked = !!n.pendingOpen && n.pendingOpen.view === view;
+  useEffect(() => { if (!sel && items[0] && !openingAsked) setSel(items[0]); }, [items.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  // This screen's list as titles (for opening by voice), which one is open, and opening one.
+  const listTitles: string[] = view === 'inbox' ? items.map((it) => (it.kind === 'mail' ? `${it.title} ${it.subject}` : it.title))
+    : view === 'calendar' ? (brief?.events ?? []).map((e) => e.title) : (brief?.notes ?? []).map((e) => e.title);
+  const listIndex = view === 'inbox'
+    ? items.findIndex((it) => !!sel && it.kind === sel.kind && it.provider === sel.provider && (it.kind === 'chat' ? sel.kind === 'chat' && it.chatId === sel.chatId : sel.kind === 'mail' && it.id === sel.id))
+    : view === 'calendar' ? (brief?.events ?? []).findIndex((e) => e.id === eventSel?.id && e.provider === eventSel?.provider)
+    : (brief?.notes ?? []).findIndex((e) => e.id === noteSel?.id && e.provider === noteSel?.provider);
+  const openAt = (i: number, spoken: boolean) => {
+    const title = view === 'inbox' ? items[i]?.title : view === 'calendar' ? brief?.events[i]?.title : brief?.notes[i]?.title;
+    if (title === undefined) return;
+    if (view === 'inbox') setSel(items[i]!); else if (view === 'calendar') setEventSel(brief!.events[i]!); else setNoteSel(brief!.notes[i]!);
+    if (spoken) { n.setStatus('Heard', `Opening ${title}.`, 'speaking'); window.setTimeout(n.carryOn, 1200); }
+    // On a phone the open item is below the list: bring it into view.
+    if (isStacked()) requestAnimationFrame(() => document.querySelector('.ws .thread')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  };
   const selKey = sel ? (sel.kind === 'chat' ? `c:${sel.provider}:${sel.chatId}` : `m:${sel.provider}:${sel.id}`) : null;
   const loadThread = useCallback(() => {
     if (sel?.kind !== 'chat' || view !== 'inbox') return;
@@ -368,10 +387,25 @@ export function Workspace() {
     n.setCommandHandler((p) => {
       if (/^(send|send it|send that)\b/.test(p) && view === 'inbox') { void start('voice'); return true; }
       if (/^(cancel|stop|don't send)\b/.test(p) && send.phase === 'counting') { void cancel(); return true; }
-      return false;
+      // "Open Testing 123021", "open the second one", "next": an item in this screen's list. A screen's name
+      // ("open calendar") still means the screen.
+      if (screenFor(p)) return false;
+      const i = pickItem(p, listTitles, listIndex);
+      if (i === null) return false;
+      openAt(i, true);
+      return true;
     });
     return () => n.setCommandHandler(null);
-  }, [n, start, cancel, send.phase, view]);
+  }, [n, start, cancel, send.phase, view, listTitles.join('\u0001'), listIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // An item the AI was asked to open ("[[item:notes:…]]"), once this screen's list has arrived.
+  useEffect(() => {
+    const want = n.pendingOpen;
+    if (!want || want.view !== view || !ready || Date.now() - want.at > 30_000) return;
+    n.clearPendingOpen();
+    const i = pickItem('open ' + want.title, listTitles, listIndex);
+    openAt(i ?? 0, false); // not found: the first item, as usual
+  }, [n.pendingOpen, view, ready, listTitles.length]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => window.clearInterval(timer.current), []);
 
   // "Draft replies" (Connections → What Niko may do): Niko prepares a reply as soon as a conversation opens, for you to review.
@@ -399,7 +433,7 @@ export function Workspace() {
   const title = view[0]!.toUpperCase() + view.slice(1);
   const count = brief ? (view === 'inbox' ? items.length : view === 'calendar' ? brief.events.length : brief.notes.length) : 0;
   // The first note or event opens by default, like the first conversation does.
-  useEffect(() => { if (view === 'notes' && !noteSel && brief?.notes[0]) setNoteSel(brief.notes[0]); if (view === 'calendar' && !eventSel && brief?.events[0]) setEventSel(brief.events[0]); }, [view, brief]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (openingAsked) return; if (view === 'notes' && !noteSel && brief?.notes[0]) setNoteSel(brief.notes[0]); if (view === 'calendar' && !eventSel && brief?.events[0]) setEventSel(brief.events[0]); }, [view, brief]); // eslint-disable-line react-hooks/exhaustive-deps
   const canFile = sel?.kind === 'chat' && n.me?.permissions.files !== false && ['telegram-bot', 'discord'].includes(sel.provider);
 
   return (

@@ -61,3 +61,55 @@ export function takeScreenTag(reply: string): { text: string; path: string | nul
   const want = m[1]!.toLowerCase();
   return { text, path: SCREENS.find((s) => s.name.toLowerCase() === want || s.words.test(want))?.path ?? null };
 }
+
+// ---- Opening an item in the list on screen ("open Testing 123021", "open the second one", "next")
+const NUM: Record<string, string> = { zero: '0', oh: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', eleven: '11', twelve: '12' };
+const ORD: Record<string, number> = { first: 0, second: 1, third: 2, fourth: 3, fifth: 4, sixth: 5, seventh: 6, eighth: 7, ninth: 8, tenth: 9, '1st': 0, '2nd': 1, '3rd': 2, '4th': 3, '5th': 4, '6th': 5, '7th': 6, '8th': 7, '9th': 8, '10th': 9 };
+/** Lower case, no punctuation, spoken digits as digits, and digit runs joined ("one two three" / "1 2 3" → "123"). */
+export function normTitle(t: string): string {
+  const toks = t.toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean).map((w) => NUM[w] ?? w);
+  const out: string[] = [];
+  for (const w of toks) { if (/^\d+$/.test(w) && out.length && /^\d+$/.test(out[out.length - 1]!)) out[out.length - 1] += w; else out.push(w); }
+  return out.join(' ');
+}
+const OPEN = /^(?:(?:hey|ok|okay|so|now|and|please|niko)\s+)*(?:(?:can|could|would) you\s+|i(?:'d| would) like to\s+|i want to\s+|let me\s+|let'?s\s+)?(?:please\s+)?(?:open( up)?|show( me)?|read( me)?|select|pick|choose|view|display|bring up|pull up|go to|look at|see|check|play)\s+/;
+const KIND = /^(?:the\s+|my\s+|that\s+|this\s+)?(?:(?:note|page|event|meeting|appointment|email|e mail|mail|message|chat|conversation|item|entry)\s+)?(?:(?:called|named|titled|about|from|with)\s+)?/;
+
+/** Which item a phrase asks for: an index into titles, or null. `current` is the selected index (for next/previous). */
+export function pickItem(raw: string, titles: string[], current = -1): number | null {
+  if (!titles.length) return null;
+  let t = normTitle(raw).replace(/\b(please|now|for me|thanks|thank you)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  if (/^(?:(?:go to|open|show( me)?|select)\s+)?(?:the\s+)?next( one| 1| item| note| event| message)?$/.test(t)) return current + 1 < titles.length ? current + 1 : null;
+  if (/^(?:(?:go to|open|show( me)?|select)\s+)?(?:the\s+)?(previous|prior)( one| 1| item| note| event| message)?$/.test(t)) return current > 0 ? current - 1 : null;
+  const opened = OPEN.exec(t);
+  if (!opened) return null; // only "open/show/read/select … " asks for an item; anything else stays with the AI
+  t = t.slice(opened[0].length).replace(KIND, '').trim();
+  // "the second one", "number 3", "item 2", "the last one"
+  const ord = /^(?:the\s+)?(\w+)(?:\s+(?:one|1|item|note|event|message|email|chat|page|entry))?$/.exec(t); // "one" reads as 1
+  if (ord && ORD[ord[1]!] !== undefined) return ORD[ord[1]!]! < titles.length ? ORD[ord[1]!]! : null;
+  if (/^(?:the\s+)?last(\s+(one|1|item|note|event|message))?$/.test(t)) return titles.length - 1;
+  const n = /^(?:number|no|item|#)\s*(\d+)$/.exec(t);
+  if (n) { const i = Number(n[1]) - 1; return i >= 0 && i < titles.length ? i : null; }
+  if (!t) return null;
+  // By title: exact, then contains, then most words in common. Digits must match when the phrase has any.
+  const q = t, qWords = q.split(' '), qDigits: string[] = q.match(/\d+/g) ?? [];
+  let best = -1, bestScore = 0;
+  titles.forEach((title, i) => {
+    const tt = normTitle(title);
+    if (!tt) return;
+    const tDigits: string[] = tt.match(/\d+/g) ?? [];
+    if (qDigits.length && !qDigits.every((d) => tDigits.includes(d))) return;
+    const tWords = new Set(tt.split(' '));
+    const shared = qWords.filter((w) => tWords.has(w)).length;
+    const score = tt === q ? 3 : tt.includes(q) || q.includes(tt) ? 2 + shared / 100 : shared / Math.max(qWords.length, tWords.size) >= 0.6 ? 1 + shared / 100 : 0;
+    if (score > bestScore) { best = i; bestScore = score; } // ties keep the first (the list's order)
+  });
+  return best >= 0 ? best : null;
+}
+
+/** The AI can name an item for Niko to open: [[item:notes:Testing 123021]] (inbox, calendar or notes). */
+export function takeItemTag(reply: string): { text: string; item: { view: 'inbox' | 'calendar' | 'notes'; title: string } | null } {
+  const m = /\[\[\s*item\s*:\s*(inbox|calendar|notes)\s*:\s*([^\]]{1,200})\]\]/i.exec(reply);
+  const text = reply.replace(/\s*\[\[\s*item\s*:[^\]]*\]\]\s*/gi, ' ').trim();
+  return { text, item: m ? { view: m[1]!.toLowerCase() as 'inbox' | 'calendar' | 'notes', title: m[2]!.trim() } : null };
+}

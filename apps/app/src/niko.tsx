@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
-import { isEcho, matchWake, screenFor, screenName, takeScreenTag } from './speech';
+import { isEcho, matchWake, screenFor, screenName, takeItemTag, takeScreenTag } from './speech';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, setAppearance, type CoreMode } from '@niko/ui';
 
@@ -28,8 +28,13 @@ interface NikoState {
   setStatus: (label: string, line: string, mode?: CoreMode) => void;
   /** Back to the resting label and line ("Standing by"). */
   rest: () => void;
+  /** After an action by voice: keep listening a few seconds for the next request (or rest if the mic is off). */
+  carryOn: () => void;
   /** Why ElevenLabs could not speak, when Niko fell back to the device voice. */
   voiceProblem: string | null;
+  /** An item the AI was asked to open (on Inbox, Calendar or Notes); the workspace opens it and clears it. */
+  pendingOpen: { view: 'inbox' | 'calendar' | 'notes'; title: string; at: number } | null;
+  clearPendingOpen: () => void;
 }
 
 const Ctx = createContext<NikoState>(null as never);
@@ -88,6 +93,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const muteMic = () => { try { rec.current?.abort(); } catch { /* not running */ } rec.current = null; };
   const unmuteMic = () => { if (wantRec.current && !rec.current) startRecRef.current(); };
   const [voiceProblem, setVoiceProblem] = useState<string | null>(null);
+  const [pendingOpen, setPendingOpen] = useState<NikoState['pendingOpen']>(null);
   const SR: any = typeof window !== 'undefined' ? (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition : null;
 
   const refreshMe = useCallback(async () => {
@@ -210,9 +216,12 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     try {
       const r = await api<{ reply: string; brief: Brief }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset() } });
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
-      const { text: answer, path: asked } = takeScreenTag(r.reply);
+      // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
+      const { text: noScreen, path: asked } = takeScreenTag(r.reply);
+      const { text: answer, item } = takeItemTag(noScreen);
       setBrief(r.brief); setReply(answer); say(answer);
-      if (asked) navigate(asked);
+      if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) navigate('/' + item.view); }
+      else if (asked) navigate(asked);
     } catch (e: any) {
       if (e?.data?.brief) setBrief(e.data.brief);
       setReply(e.message); setMode('idle'); setLabel('Problem'); setLine(e.message);
@@ -285,8 +294,11 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     say,
     setStatus: (l, t, m) => { setLabel(l); setLine(t); if (m) setMode(m); },
     rest: idle,
+    carryOn: () => (SR && wantRec.current ? listenForFollowUp() : idle()),
     voiceProblem,
-  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle]);
+    pendingOpen,
+    clearPendingOpen: () => setPendingOpen(null),
+  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
