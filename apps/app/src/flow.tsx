@@ -11,19 +11,29 @@ export const LEAVE_MS = 280;
 
 type Sphere = { x: number; y: number; R: number };
 
+/** When the workspace is one column (phones, and tall narrow screens such as a phone showing the desktop site
+ * upright). Must match the stacked media query in app.css. */
+export const STACKED = '(max-width: 900px), (max-width: 1180px) and (max-aspect-ratio: 4/5)';
+export const isStacked = () => typeof window !== 'undefined' && window.matchMedia(STACKED).matches;
+const clamp = (lo: number, v: number, hi: number) => Math.max(lo, Math.min(v, hi));
+
 /** Where Home's core will be, before Home is on screen (mirrors the .home layout in app.css). */
 function homeEstimate(): Sphere {
   const vw = window.innerWidth, vh = window.innerHeight;
   if (vw <= 900) { const s = Math.min(350, vw * 0.9); return { x: vw / 2, y: 100 + s / 2, R: s * 0.29 }; }
-  const s = Math.min(720, vh * 0.8, vw * 0.92), top = Math.max(20, vh / 2 - 430);
+  let s = Math.min(720, vh * 0.8, vw * 0.92);
+  if (vh <= 640) s = Math.min(s, vh - 230);
+  const top = Math.max(20, vh / 2 - 430);
   return { x: vw / 2, y: top + s / 2, R: s * 0.29 };
 }
 /** Where the workspace ring will be, before the workspace is on screen (mirrors the .ws layout in app.css). */
 function ringEstimate(): { core: Sphere; ring: number } {
-  const vw = window.innerWidth;
-  if (vw <= 900) { const size = 220; return { core: { x: vw / 2, y: 84 + 14 + size / 2, R: size * 0.867 * 0.29 }, ring: size * 292 / 600 }; }
-  const gap = Math.max(14, Math.min(66, vw * 0.046)), cols = vw - 32 - 40 - 72 - 2 * gap;
-  const size = Math.min(600, cols / 2), x = 32 + 72 + gap + size / 2, y = 96 + 14 + size / 2;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  if (isStacked()) { const size = 220; return { core: { x: vw / 2, y: 84 + 14 + size / 2, R: size * 0.867 * 0.29 }, ring: size * 292 / 600 }; }
+  const short = vh <= 560;
+  const gap = clamp(14, vw * 0.046, 66);
+  const size = short ? clamp(150, Math.min(vw * 0.42, vh - 250), 600) : clamp(160, Math.min(vw * 0.42, vh - 300), 600);
+  const x = 32 + 72 + gap + size / 2, y = (short ? 70 + 6 : 96 + 14) + size / 2;
   return { core: { x, y, R: size * 0.867 * 0.29 }, ring: size * 292 / 600 };
 }
 function ringNow(): { core: Sphere; ring: number } | null {
@@ -42,7 +52,7 @@ export function FlowLayer({ dir, loose, startedAt, onDone }: { dir: 'in' | 'out'
     let W = 0, H = 0;
     const size = () => { W = window.innerWidth; H = window.innerHeight; cv.width = W * dpr; cv.height = H * dpr; };
     size();
-    const phone = W <= 900;
+    const phone = isStacked();
     const N = phone ? 700 : 1000, rnd = Math.random;
     const pts = Array.from({ length: N }, (_, i) => {
       const y = 1 - (2 * (i + 0.5)) / N, r = Math.sqrt(1 - y * y), a = i * 2.399963, j = 0.9 + rnd() * 0.2;

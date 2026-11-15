@@ -35,6 +35,8 @@
 .home .caption p { font-size: 26px; line-height: 1.25; letter-spacing: -.01em; max-width: 720px; text-wrap: balance; }
 .home .controls { position: absolute; left: 0; right: 0; bottom: 36px; display: flex; align-items: center; justify-content: center; gap: 14px; z-index: 2; }
 .home .controls .ib.g, .home .top .ib.g { box-shadow: none; }
+/* Short, wide screens: the core shrinks so the caption stays clear of the mic (flow.tsx homeEstimate() mirrors this). */
+@media (min-width: 901px) and (max-height: 640px) { .home { --s: min(720px, 80vh, 92vw, 100vh - 230px); } .home .controls { bottom: 20px; } }
 .micbtn { width: 68px; height: 68px; border-radius: 50%; border: 0; cursor: pointer; display: flex; align-items: center; justify-content: center; flex: none;
   background: hsl(var(--h) 100% 75%); color: #05060a; box-shadow: 0 0 40px hsl(var(--h) 100% 73% / .35); }
 .typebar { position: absolute; left: 50%; bottom: 122px; transform: translateX(-50%); width: min(560px, calc(100% - 32px)); display: flex; gap: 8px; padding: 6px; border-radius: 999px; z-index: 3; }
@@ -120,13 +122,15 @@
 }
 
 /* ---- workspace (Nav-Workspace-Niko mockup): rail at 32px, a 600px ring at 170px, content from 836px to 40px off the right edge. */
-.ws { position: relative; z-index: 1; height: 100%; display: grid; grid-template-columns: 72px minmax(0, 600px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); column-gap: clamp(14px, 4.6vw, 66px); padding: 96px 40px 44px 32px; }
+/* The ring is 600px on a 1440×900 screen, as drawn, and shrinks with the width (so the content column keeps room)
+   and the height (so the status line and mic stay on screen). flow.tsx ringEstimate() mirrors this formula. */
+.ws { --core: clamp(160px, min(42vw, 100vh - 300px), 600px); position: relative; z-index: 1; height: 100%; display: grid; grid-template-columns: 72px var(--core) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); column-gap: clamp(14px, 4.6vw, 66px); padding: 96px 40px 44px 32px; }
 .ws .head { position: absolute; left: 36px; top: 34px; display: flex; align-items: baseline; gap: 22px; }
 .ws .head h1 { font: 500 12px 'JetBrains Mono', monospace; letter-spacing: .16em; text-transform: uppercase; color: #fff; }
 .ws .head .k { letter-spacing: .16em; }
 .rail { align-self: start; margin-top: 156px; border-radius: 999px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
 .corewrap { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 16px; min-width: 0; padding-top: 14px; }
-.ringbox { position: relative; width: min(600px, 100%); aspect-ratio: 1; }
+.ringbox { position: relative; width: min(600px, 100%); aspect-ratio: 1; flex: none; }
 .ringbox svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 .ringbox .ticks { animation: spin 90s linear infinite; transform-origin: 50% 50%; }
 .ringbox .count { transform: rotate(-90deg); transition: opacity .4s; }
@@ -142,7 +146,7 @@
 .item { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 52px; flex: none; padding: 0 18px; border-radius: 14px; border: 0; background: transparent; color: #fff; cursor: pointer; text-align: left; width: 100%; }
 .item b { font-size: 17px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item.on { background: rgba(255,255,255,.14); }
-.thread { flex: 1; border-radius: 26px; padding: 24px 26px; display: flex; flex-direction: column; gap: 14px; min-height: 280px; }
+.thread { flex: 1 0 auto; border-radius: 26px; padding: 24px 26px; display: flex; flex-direction: column; gap: 14px; min-height: 280px; }
 .bubble { max-width: 80%; padding: 12px 16px; border-radius: 18px 18px 18px 6px; background: rgba(255,255,255,.1); font: 400 16px/1.4 system-ui, sans-serif; align-self: flex-start; white-space: pre-wrap; overflow-wrap: anywhere; }
 .bubble.out { align-self: flex-end; border-radius: 18px 18px 6px 18px; background: transparent; border: 1px solid rgba(255,255,255,.55); }
 .draft { align-self: flex-end; width: 80%; max-width: 80%; display: flex; flex-direction: column; gap: 6px; padding: 12px 16px; border-radius: 18px 18px 6px 18px; border: 1px dashed rgba(255,255,255,.55); }
@@ -183,9 +187,11 @@
 .item.ev { justify-content: flex-start; }
 .item.ev .t { font: 500 15px 'JetBrains Mono', monospace; flex: none; width: 56px; }
 .item.ev b { flex: 1; min-width: 0; }
-@media (max-width: 900px) { .doc, .letter-body { max-height: none; overflow: visible; } }
-@media (max-width: 900px) {
-  .ws { grid-template-columns: 1fr; grid-template-rows: none; height: auto; min-height: 100%; padding: 84px 14px 96px; }
+/* Stacked (one column): phones, and tall narrow screens such as a phone showing the desktop site upright.
+   Keep in step with STACKED in flow.tsx. */
+@media (max-width: 900px), (max-width: 1180px) and (max-aspect-ratio: 4/5) { .doc, .letter-body { max-height: none; overflow: visible; } }
+@media (max-width: 900px), (max-width: 1180px) and (max-aspect-ratio: 4/5) {
+  .ws { grid-template-columns: 1fr; grid-template-rows: none; align-content: start; height: auto; min-height: 100%; padding: 84px 14px 96px; }
   .ws .head { left: 16px; }
   .rail { margin-top: 0; }
   .content { overflow: visible; }
@@ -195,9 +201,20 @@
   .status span:last-child { font-size: 18px; }
 }
 
+/* Short, wide screens (a phone on its side): smaller ring, status and mic, and a compact rail, so nothing is cut off. */
+@media (min-width: 901px) and (max-height: 560px) {
+  .ws { --core: clamp(150px, min(42vw, 100vh - 250px), 600px); padding-top: 70px; padding-bottom: 16px; }
+  .ws .head { top: 24px; }
+  .corewrap { gap: 10px; padding-top: 6px; }
+  .status { min-height: 0; gap: 4px; }
+  .status span:last-child { font-size: 17px; min-height: 0; }
+  .rail { margin-top: 0; align-self: center; padding: 6px; gap: 2px; }
+  .rail .ib { width: 42px; height: 42px; }
+}
 /* Workspace mic: the status line says "tap the mic", so the mic is always there. */
 .ws-mic { display: flex; align-items: center; gap: 12px; }
 .ws-mic .micbtn { width: 60px; height: 60px; }
+@media (min-width: 901px) and (max-height: 560px) { .ws-mic .micbtn { width: 48px; height: 48px; } }
 .micbtn.live { animation: micpulse 1.6s ease-in-out infinite; }
 @keyframes micpulse { 50% { box-shadow: 0 0 0 10px hsl(var(--h) 100% 75% / .12), 0 0 40px hsl(var(--h) 100% 73% / .45); } }
 @media (prefers-reduced-motion: reduce) { .micbtn.live { animation: none; } }
@@ -444,7 +461,7 @@ dialog.sheet.wide { width: min(580px, calc(100% - 24px)); }
 .route.flow-out .home canvas[data-core] { animation: fadeIn calc(var(--D) * .12) ease calc(var(--D) * .9 - var(--el)) both; }
 .route.flow-out .home .top, .route.flow-out .home .caption, .route.flow-out .home .controls { animation: riseIn calc(var(--D) * .2) cubic-bezier(.2,.8,.2,1) calc(var(--D) * .78 - var(--el)) both; }
 
-@media (max-width: 900px) {
+@media (max-width: 900px), (max-width: 1180px) and (max-aspect-ratio: 4/5) {
   /* Phone: the workspace cards sit below the ring, so they slide up instead of swinging. */
   .route.flow-in .ws .content > * { animation-name: slideUp; transform-origin: center; }
   .route.leaving .ws .content > * { animation-name: slideDown; }
