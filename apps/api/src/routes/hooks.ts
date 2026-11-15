@@ -15,10 +15,24 @@ hooks.post('/telegram/:connId', async (c) => {
   const given = c.req.header('x-telegram-bot-api-secret-token') ?? '';
   if (!conn || conn.provider !== 'telegram-bot' || !secret?.hookSecret || !safeEqual(given, secret.hookSecret)) return c.json({ ok: false }, 403);
   const update = await c.req.json<any>().catch(() => null);
-  const m = update?.message;
+  // The bot was added to (or removed from) a group or channel: record it so the chat appears in the inbox straight away.
+  const member = update?.my_chat_member;
+  if (member?.chat?.id && member.chat.type !== 'private') {
+    const status = String(member.new_chat_member?.status ?? '');
+    const joined = ['member', 'administrator', 'creator'].includes(status);
+    const left = ['left', 'kicked'].includes(status);
+    if (joined || left) {
+      await db.insert(messages).values({
+        userId: conn.userId, provider: 'telegram-bot', chatId: String(member.chat.id), chatTitle: String(member.chat.title ?? 'Group').slice(0, 200), sender: 'Telegram',
+        body: joined ? 'Your bot was added to this group.' : 'Your bot was removed from this group.', direction: 'in',
+      });
+    }
+    return c.json({ ok: true });
+  }
+  const m = update?.message ?? update?.edited_message ?? update?.channel_post;
   if (m?.chat?.id) {
     const file = m.document ?? (Array.isArray(m.photo) ? m.photo[m.photo.length - 1] : null);
-    const who = [m.from?.first_name, m.from?.last_name].filter(Boolean).join(' ') || m.from?.username || 'Someone';
+    const who = [m.from?.first_name, m.from?.last_name].filter(Boolean).join(' ') || m.from?.username || m.author_signature || m.chat?.title || 'Someone';
     await db.insert(messages).values({
       userId: conn.userId, provider: 'telegram-bot', chatId: String(m.chat.id), chatTitle: m.chat.title ?? who, sender: who,
       body: String(m.text ?? m.caption ?? '').slice(0, 4000), direction: 'in',

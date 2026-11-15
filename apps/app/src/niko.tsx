@@ -30,6 +30,8 @@ interface NikoState {
   setCommandHandler: (fn: ((phrase: string) => boolean) | null) => void;
   say: (text: string) => void;
   setStatus: (label: string, line: string, mode?: CoreMode) => void;
+  /** Why ElevenLabs could not speak, when Niko fell back to the device voice. */
+  voiceProblem: string | null;
 }
 
 const Ctx = createContext<NikoState>(null as never);
@@ -37,7 +39,7 @@ export const useNiko = () => useContext(Ctx);
 
 const NAV: [RegExp, string][] = [
   [/\b(inbox|mail|messages?)\b/, '/inbox'], [/\bcalendar\b/, '/calendar'], [/\bnotes?\b/, '/notes'], [/\bconnections?\b/, '/connections'],
-  [/\bengine\b/, '/engine'], [/\b(appearance|colou?rs?)\b/, '/appearance'], [/\baccount\b/, '/account'], [/\bhome\b/, '/'],
+  [/\bengine\b/, '/engine'], [/\b(voice|speech)\b/, '/voice'], [/\bsettings\b/, '/appearance'], [/\b(appearance|colou?rs?)\b/, '/appearance'], [/\baccount\b/, '/account'], [/\bhome\b/, '/'],
 ];
 
 /** "Niko" as speech recognisers write it: Niko, Nico, Nikko, Nicko, Neko, Neeko, Nicco, optionally after "hey"/"ok".
@@ -62,6 +64,10 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const active = useRef(false); // true after the mic button: the next phrase is a command even without "Niko"
   const meRef = useRef<Me | null>(null);
   const audio = useRef<HTMLAudioElement | null>(null);
+  const wantRec = useRef(false); // keep the recogniser running (wake word on, or the mic was tapped)
+  const speaking = useRef(false); // while Niko talks, what the mic hears is Niko itself, so it is ignored
+  const followUp = useRef<number | undefined>(undefined);
+  const [voiceProblem, setVoiceProblem] = useState<string | null>(null);
   const SR: any = typeof window !== 'undefined' ? (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition : null;
 
   const refreshMe = useCallback(async () => {
@@ -77,35 +83,53 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, [SR]);
   useEffect(() => { if (me) idle(); }, [me, idle]);
 
-  const stopSpeech = () => { window.speechSynthesis?.cancel(); audio.current?.pause(); audio.current = null; };
+  const stopSpeech = () => { speaking.current = false; window.speechSynthesis?.cancel(); audio.current?.pause(); audio.current = null; };
+  const endFollowUp = () => { window.clearTimeout(followUp.current); followUp.current = undefined; };
+
+  /** After Niko answers, keep listening for a few seconds so the conversation can carry on without saying "Niko" again. */
+  const FOLLOW_UP_MS = 9000;
+  const listenForFollowUp = useCallback(() => {
+    speaking.current = false;
+    if (!SR || !wantRec.current) return idle();
+    active.current = true;
+    setMode('listening'); setLabel('Listening'); setLine('Go on, or say “that’s all”.');
+    endFollowUp();
+    followUp.current = window.setTimeout(() => { active.current = false; followUp.current = undefined; idle(); }, FOLLOW_UP_MS);
+  }, [SR, idle]);
 
   const say = useCallback((text: string) => {
     const engine = meRef.current?.engine as EnginePrefs | undefined;
-    const done = () => idle();
+    const done = () => listenForFollowUp();
     const device = () => {
       if (!window.speechSynthesis) return done();
       const u = new SpeechSynthesisUtterance(text);
       u.onend = done; u.onerror = done;
       window.speechSynthesis.speak(u);
     };
-    stopSpeech();
+    stopSpeech(); endFollowUp();
+    speaking.current = true;
     setMode('speaking'); setLabel('Speaking'); setLine(text.length > 160 ? text.slice(0, 157) + '…' : text);
     if (engine?.voice === 'elevenlabs') {
       fetch('/api/voice/tts', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) })
         .then(async (r) => {
-          if (!r.ok) throw new Error('tts');
-          const a = new Audio(URL.createObjectURL(await r.blob()));
-          audio.current = a; a.onended = done; a.onerror = done;
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? 'ElevenLabs could not speak.');
+          setVoiceProblem(null);
+          const url = URL.createObjectURL(await r.blob());
+          const a = new Audio(url);
+          audio.current = a; a.onended = () => { URL.revokeObjectURL(url); done(); }; a.onerror = done;
           await a.play();
         })
-        .catch(device); // free device voice is the fallback
+        .catch((e: Error) => { setVoiceProblem(e.message); device(); }); // free device voice is the fallback
     } else device();
-  }, [idle]);
+  }, [listenForFollowUp]);
 
   const ask = useCallback(async (raw: string) => {
     const text = raw.trim();
     if (!text) return;
     const lower = text.toLowerCase();
+    endFollowUp();
+    // Ending the conversation.
+    if (/^(that'?s all|that is all|thanks?( you)?|thank you niko|stop|never ?mind|cancel that|bye)\b[.!]?$/.test(lower)) { active.current = false; stopSpeech(); idle(); return; }
     setReply(null);
     // 1. Phrases a page has claimed (send it / cancel).
     if (handler.current?.(lower)) return;
@@ -134,6 +158,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     r.onresult = (ev: any) => {
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const res = ev.results[i];
+      if (speaking.current) continue; // Niko's own voice
         // Recognisers often spell the name differently in their first guess, so check every alternative.
         const alts: string[] = Array.from({ length: res.length }, (_, k) => String(res[k]?.transcript ?? '').trim());
         const hit = alts.map(matchWake).find(Boolean);
@@ -144,7 +169,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         if (hit) {
           if (hit.command) { active.current = false; void ask(hit.command); }
           else { active.current = true; setMode('listening'); setLabel('Listening'); setLine('Go ahead.'); }
-        } else if (active.current && alts[0]) { active.current = false; void ask(alts[0]); }
+        } else if (active.current && alts[0]) { active.current = false; endFollowUp(); void ask(alts[0]); }
       }
     };
     r.onend = () => { rec.current = null; if (wantRec.current) setTimeout(startRec, 300); else setMicOn(false); };
@@ -157,7 +182,6 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     };
     try { r.start(); rec.current = r; setMicOn(true); } catch { /* already started */ }
   }, [SR, ask]);
-  const wantRec = useRef(false);
 
   useEffect(() => {
     // Wake word listening starts only if the user enabled it, and only after sign-in.
@@ -170,11 +194,12 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const toggleMic = useCallback(() => {
     stopSpeech();
     if (!SR) { setLabel('No microphone'); setLine('This browser cannot listen. Type instead.'); return; }
+    endFollowUp();
     wantRec.current = true; startRec();
     active.current = true; setMode('listening'); setLabel('Listening'); setLine('Go ahead.');
   }, [SR, startRec]);
 
-  const stop = useCallback(() => { stopSpeech(); active.current = false; idle(); }, [idle]);
+  const stop = useCallback(() => { stopSpeech(); endFollowUp(); active.current = false; idle(); }, [idle]);
 
   const value = useMemo<NikoState>(() => ({
     me, refreshMe, mode, label, line, reply, brief, micOn, voiceSupported: !!SR, toggleMic, stop, ask,
@@ -182,7 +207,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     setCommandHandler: (fn) => { handler.current = fn; },
     say,
     setStatus: (l, t, m) => { setLabel(l); setLine(t); if (m) setMode(m); },
-  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say]);
+    voiceProblem,
+  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

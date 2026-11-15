@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import { chatTurns, connections, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
 import { APPS, MAX_RELAY_BYTES, PROVIDERS, SEND_COUNTDOWN_SECONDS, WORKERS_MODELS, type Appearance, type Brain, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
-import { hmacSha256Hex, randomToken, seal } from '../lib/crypto';
+import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
 import { audit, requireUser } from '../lib/session';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
@@ -77,6 +77,7 @@ app.get('/connections', async (c) => {
       // Sign-in connections need this account's own provider app keys first.
       configured: p.kind !== 'oauth' || (!!p.app && apps.has(p.app)),
       label: (linked.get(p.id) as any)?.label ?? null,
+      readsGroups: p.id === 'telegram-bot' ? (linked.get(p.id) as any)?.readsGroups ?? null : undefined,
     })),
     apps: APPS.map((a) => ({
       ...a,
@@ -155,6 +156,7 @@ app.post('/connections/:provider', async (c) => {
     const r = await telegramSetWebhook(secret.token!, `${new URL(c.req.url).origin}/api/hooks/telegram/${id}`, secret.hookSecret);
     if (!r.ok) return c.json({ error: 'Telegram did not accept that bot token.' }, 400);
     meta.label = '@' + r.username;
+    meta.readsGroups = r.readsGroups;
   }
   if (def.kind === 'webhook') {
     secret.signingSecret = randomToken(24);
@@ -166,6 +168,20 @@ app.post('/connections/:provider', async (c) => {
   await audit(c, 'connection.linked', { provider: def.id }, u.id);
   // The signing secret is shown once so the user can paste it into their automation tool.
   return c.json({ ok: true, inboundUrl: meta.inboundUrl ?? null, signingSecret: secret.signingSecret ?? null });
+});
+
+// Telegram: re-point the bot at Niko (picks up new update types) and re-check its group privacy setting.
+app.post('/connections/telegram-bot/refresh', async (c) => {
+  const u = c.get('user');
+  const db = c.get('db');
+  const row = (await db.select().from(connections).where(and(eq(connections.userId, u.id), eq(connections.provider, 'telegram-bot'))).limit(1))[0];
+  const secret = row ? await unseal<Record<string, string>>(c.env.ENCRYPTION_KEY, row.secretEnc) : null;
+  if (!row || !secret?.token || !secret.hookSecret) return c.json({ error: 'The Telegram bot is not linked.' }, 404);
+  const r = await telegramSetWebhook(secret.token, `${new URL(c.req.url).origin}/api/hooks/telegram/${row.id}`, secret.hookSecret);
+  if (!r.ok) return c.json({ error: 'Telegram did not accept the saved bot token. Remove the bot and connect it again.' }, 400);
+  const meta = { ...(row.meta as Record<string, unknown>), label: '@' + r.username, readsGroups: r.readsGroups };
+  await db.update(connections).set({ meta }).where(eq(connections.id, row.id));
+  return c.json({ ok: true, readsGroups: r.readsGroups });
 });
 
 app.delete('/connections/:provider', async (c) => {
@@ -343,8 +359,10 @@ app.post('/engine/test', async (c) => {
 });
 
 app.post('/chat', async (c) => {
-  const b = await c.req.json<{ message?: string; tz?: number }>();
+  const b = await c.req.json<{ message?: string; tz?: number; purpose?: string }>();
   const text = String(b.message ?? '').trim().slice(0, 2000);
+  // A draft for the workspace is a one-off: it neither sees nor joins the spoken conversation.
+  const oneOff = b.purpose === 'draft';
   if (!text) return c.json({ error: 'Say or type something first.' }, 400);
   const u = c.get('user');
   const db = c.get('db');
@@ -355,7 +373,7 @@ app.post('/chat', async (c) => {
     'RECENT NOTES:', ...brief.notes.map((n) => `- ${n.title} (${n.source})`),
     'CHATS:', ...brief.chats.map((m) => `- ${m.title}: ${m.last} (${m.source})`),
   ].join('\n').slice(0, 6000);
-  const history = (await db.select().from(chatTurns).where(eq(chatTurns.userId, u.id)).orderBy(desc(chatTurns.createdAt)).limit(8)).reverse();
+  const history = oneOff ? [] : (await db.select().from(chatTurns).where(eq(chatTurns.userId, u.id)).orderBy(desc(chatTurns.createdAt)).limit(8)).reverse();
   const msgs = [
     { role: 'system', content: `${SYSTEM}\nThe user's name is ${u.name || 'not given'}.\n<DATA>\n${data}\n</DATA>` },
     ...history.map((h) => ({ role: h.role, content: h.content })),
@@ -379,7 +397,7 @@ app.post('/chat', async (c) => {
         : 'Niko couldn’t reach its AI engine just now. Try again in a moment.', brief }, 502);
     }
   }
-  await db.insert(chatTurns).values([{ userId: u.id, role: 'user', content: text }, { userId: u.id, role: 'assistant', content: reply }]);
+  if (!oneOff) await db.insert(chatTurns).values([{ userId: u.id, role: 'user', content: text }, { userId: u.id, role: 'assistant', content: reply }]);
   return c.json({ reply, engine: used, brief });
 });
 
@@ -484,6 +502,23 @@ app.post('/automations/:provider/run', async (c) => {
   return c.json({ ok: res.ok, status: res.status });
 });
 
+/** ElevenLabs' error, in words a person can act on. ElevenLabs puts a status code in `detail.status`. */
+async function elevenLabsProblem(res: Response): Promise<{ code: string; message: string }> {
+  const j: any = await res.json().catch(() => null);
+  const code = String(j?.detail?.status ?? j?.detail?.code ?? res.status);
+  const text = String(j?.detail?.message ?? '');
+  if (code === 'detected_unusual_activity' || /unusual activity|free tier usage disabled/i.test(text))
+    return { code, message: 'ElevenLabs refused: its free plan blocks requests that come from cloud servers, which is where Niko runs. A paid ElevenLabs plan (Starter or above) works. Until then Niko uses the device voice.' };
+  if (code === 'missing_permissions' || /permission/i.test(text))
+    return { code, message: 'Your ElevenLabs key is missing the Text to Speech permission (and Voices: Read, to list voices). Edit the key in ElevenLabs → API keys, or make a new one.' };
+  if (code === 'invalid_api_key' || res.status === 401) return { code, message: 'ElevenLabs did not accept that key. Check it was copied in full.' };
+  if (code === 'paid_plan_required' || code === 'payment_required' || res.status === 402)
+    return { code, message: 'That voice needs a paid ElevenLabs plan. Pick one of your own voices or a default voice.' };
+  if (code === 'voice_not_found' || res.status === 404) return { code, message: 'ElevenLabs could not find that voice. Pick another one under Voice.' };
+  if (code === 'quota_exceeded' || res.status === 429) return { code, message: 'Your ElevenLabs character allowance is used up for now.' };
+  return { code, message: `ElevenLabs could not speak that (${res.status}).` };
+}
+
 // Engine screen: the voices in the user's ElevenLabs library. A key typed but not saved yet may be passed; it is only sent to ElevenLabs.
 const VOICE_ID = /^[A-Za-z0-9]{1,64}$/;
 app.post('/voice/voices', async (c) => {
@@ -491,7 +526,7 @@ app.post('/voice/voices', async (c) => {
   const key = (typeof b.apiKey === 'string' && b.apiKey.trim()) || (await credentials(c.env, c.get('db'), c.get('user').id, 'elevenlabs'))?.apiKey;
   if (!key) return c.json({ voices: [] });
   const res = await fetch('https://api.elevenlabs.io/v1/voices', { headers: { 'xi-api-key': String(key).slice(0, 200), accept: 'application/json' } });
-  if (!res.ok) return c.json({ error: res.status === 401 ? 'ElevenLabs did not accept that key.' : 'ElevenLabs answered ' + res.status }, 502);
+  if (!res.ok) return c.json({ error: (await elevenLabsProblem(res)).message }, 502);
   const j: any = await res.json();
   const voices = (Array.isArray(j.voices) ? j.voices : []).slice(0, 200).map((v: any) => ({ id: String(v.voice_id), name: String(v.name ?? 'Voice').slice(0, 80), cloned: v.category === 'cloned' || v.category === 'professional' }));
   return c.json({ voices: voices.filter((v: { id: string }) => VOICE_ID.test(v.id)) });
@@ -506,9 +541,13 @@ app.post('/voice/tts', async (c) => {
   if (!s.apiKey || !s.voiceId || !text) return c.json({ error: 'ElevenLabs is not linked.' }, 404);
   const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(s.voiceId)}/stream`, {
     method: 'POST', headers: { 'xi-api-key': String(s.apiKey).slice(0, 200), 'content-type': 'application/json', accept: 'audio/mpeg' },
-    body: JSON.stringify({ text, model_id: 'eleven_turbo_v2_5' }),
+    body: JSON.stringify({ text, model_id: 'eleven_flash_v2_5' }),
   });
-  if (!res.ok) return c.json({ error: 'ElevenLabs answered ' + res.status }, 502);
+  if (!res.ok) {
+    const why = await elevenLabsProblem(res);
+    console.error(`elevenlabs tts ${res.status} ${why.code}`);
+    return c.json({ error: why.message, code: why.code }, 502);
+  }
   return new Response(res.body, { headers: { 'content-type': 'audio/mpeg', 'cache-control': 'no-store' } });
 });
 

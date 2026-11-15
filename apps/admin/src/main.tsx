@@ -136,7 +136,7 @@ function Users({ onSignedOut }: { onSignedOut: () => void }) {
         </nav>
         <div className="who"><span className="sub" style={{ fontSize: 13 }}>Signed in as {me?.name || me?.email || '…'}</span><button className="nv line" onClick={signOut}>Sign out</button></div>
       </aside>
-      <main>
+      <main key={tab} className="hud-in">
         {tab === 'users' ? <>
           <header><h1>Users</h1><p className="sub" style={{ fontSize: 15 }}>{active} active · {invites.length} invited · {reg === 'invite' ? 'invite only' : 'open registration'}</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}

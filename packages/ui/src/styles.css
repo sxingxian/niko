@@ -86,3 +86,56 @@ h1, h2, h3, p { margin: 0; }
 
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* ---- screen transitions: holographic, in the spirit of a heads-up display ------------------------- */
+.route { height: 100%; }
+.hud-in { animation: hudScreen .62s cubic-bezier(.2,.8,.2,1) backwards; }
+@keyframes hudScreen {
+  0% { opacity: 0; clip-path: circle(0% at 50% 46%); transform: scale(1.025); }
+  55% { opacity: 1; }
+  100% { opacity: 1; clip-path: circle(150% at 50% 46%); transform: none; }
+}
+/* Panels assemble one after another, with a brief flicker as they lock in. */
+.hud-in section.g, .hud-in .set-card, .hud-in .item, .hud-in .rail, .hud-in .thread { animation: hudPanel .5s cubic-bezier(.2,.8,.2,1) backwards; }
+.hud-in :is(section.g, .set-card, .item):nth-child(2) { animation-delay: .06s; }
+.hud-in :is(section.g, .set-card, .item):nth-child(3) { animation-delay: .12s; }
+.hud-in :is(section.g, .set-card, .item):nth-child(4) { animation-delay: .18s; }
+.hud-in :is(section.g, .set-card, .item):nth-child(n+5) { animation-delay: .24s; }
+.hud-in .stack:nth-child(2) section.g { animation-delay: .1s; }
+.hud-in .stack:nth-child(3) section.g { animation-delay: .18s; }
+@keyframes hudPanel {
+  0% { opacity: 0; transform: translateY(14px) scale(.985); }
+  60% { opacity: .9; }
+  70% { opacity: .55; }
+  80% { opacity: 1; transform: none; }
+  100% { opacity: 1; transform: none; }
+}
+/* The core powers up. */
+.hud-in canvas { animation: hudCore .9s cubic-bezier(.2,.8,.2,1) backwards; }
+@keyframes hudCore { 0% { opacity: 0; transform: scale(.82); } 100% { opacity: 1; transform: none; } }
+/* Titles resolve from wide tracking. */
+.hud-in h1 { animation: hudTitle .6s cubic-bezier(.2,.8,.2,1) backwards .05s; }
+@keyframes hudTitle { 0% { opacity: 0; letter-spacing: .28em; } 100% { opacity: 1; } }
+
+.hud-sweep { position: fixed; inset: 0; z-index: 60; pointer-events: none; overflow: hidden; }
+.hud-ring { position: absolute; left: 50%; top: 46%; width: 120px; height: 120px; margin: -60px 0 0 -60px; border-radius: 50%;
+  border: 1.5px solid hsl(var(--h) 100% 75% / .85); box-shadow: 0 0 24px hsl(var(--h) 100% 70% / .45), inset 0 0 24px hsl(var(--h) 100% 70% / .25);
+  animation: hudRing .7s cubic-bezier(.2,.7,.2,1) forwards; }
+.hud-ring.two { border-style: dashed; border-width: 1px; animation: hudRing2 .8s cubic-bezier(.2,.7,.2,1) forwards; }
+@keyframes hudRing { 0% { transform: scale(.2); opacity: 0; } 25% { opacity: 1; } 100% { transform: scale(18); opacity: 0; } }
+@keyframes hudRing2 { 0% { transform: scale(.3) rotate(0); opacity: 0; } 30% { opacity: .8; } 100% { transform: scale(11) rotate(90deg); opacity: 0; } }
+.hud-scan { position: absolute; left: 0; right: 0; top: 0; height: 120px;
+  background: linear-gradient(180deg, transparent, hsl(var(--h) 100% 75% / .10) 70%, hsl(var(--h) 100% 80% / .55) 98%, transparent);
+  animation: hudScan .65s cubic-bezier(.4,0,.2,1) forwards; }
+@keyframes hudScan { 0% { transform: translateY(-120px); opacity: 1; } 100% { transform: translateY(100vh); opacity: 0; } }
+.hud-corner { position: absolute; width: 34px; height: 34px; border: 0 solid hsl(var(--h) 100% 75% / .9); animation: hudCorner .7s ease forwards; }
+.hud-corner.tl { left: 18px; top: 18px; border-left-width: 1.5px; border-top-width: 1.5px; }
+.hud-corner.tr { right: 18px; top: 18px; border-right-width: 1.5px; border-top-width: 1.5px; }
+.hud-corner.bl { left: 18px; bottom: 18px; border-left-width: 1.5px; border-bottom-width: 1.5px; }
+.hud-corner.br { right: 18px; bottom: 18px; border-right-width: 1.5px; border-bottom-width: 1.5px; }
+@keyframes hudCorner { 0% { opacity: 0; transform: scale(1.6); } 30% { opacity: 1; transform: none; } 60% { opacity: .4; } 70% { opacity: 1; } 100% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-in, .hud-in *, .hud-sweep { animation: none !important; }
+  .hud-sweep { display: none; }
+}

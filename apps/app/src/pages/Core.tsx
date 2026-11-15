@@ -34,6 +34,7 @@ export function Home() {
         <div className="caption">
           <span className="k accent" role="status">{n.label}</span>
           <p>{n.line}</p>
+          {n.voiceProblem && n.me?.engine.voice === 'elevenlabs' && <Link to="/voice" className="voice-note">Using the device voice. {n.voiceProblem}</Link>}
         </div>
       </div>
       <div className="top">
@@ -169,7 +170,7 @@ export function Workspace() {
     drafted.current = key;
     const about = sel.kind === 'mail' ? `the email from ${sel.title} with subject "${sel.subject}"` : `the last message from ${sel.title}: "${lastIn}"`;
     setDrafting(true);
-    api<{ reply: string }>('/chat', { body: { message: `Write only the text of a short, friendly reply to ${about}. No preamble.`, tz: new Date().getTimezoneOffset() } })
+    api<{ reply: string }>('/chat', { body: { message: `Write only the text of a short, friendly reply to ${about}. No preamble.`, tz: new Date().getTimezoneOffset(), purpose: 'draft' } })
       .then((r) => setDraft((d) => d || (typeof r.reply === 'string' ? r.reply : ''))).catch(() => undefined).finally(() => setDrafting(false));
   }, [sel, thread, view, n.me?.permissions.draft]);
 
@@ -195,9 +196,13 @@ export function Workspace() {
           {counting && <div className="num" role="status">{send.left}</div>}
         </div>
         <div className="status"><span className="k accent" role="status">{n.label}</span><span>{n.line}</span></div>
+        <div className="ws-mic">
+          <button className={'micbtn' + (n.mode === 'listening' ? ' live' : '')} onClick={n.toggleMic} aria-label="Talk to Niko"><Icon name="mic" /></button>
+          {(n.mode === 'speaking' || n.mode === 'listening') && <button className="ib g" onClick={n.stop} aria-label="Stop"><Icon name="stop" /></button>}
+        </div>
       </div>
 
-      <div className="content">
+      <div key={view} className="content hud-in">
         {err && <p className="err" role="alert">{err}</p>}
         {brief?.problems.map((p) => <p key={p} className="sub">{p}</p>)}
         {view === 'inbox' && <>

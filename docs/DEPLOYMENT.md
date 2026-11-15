@@ -168,8 +168,8 @@ What each person does, once per provider:
 
    | Provider | For | Where to register | What to paste |
    | --- | --- | --- | --- |
-   | Google | Gmail, Google Calendar | Google Cloud Console → APIs & Services → Credentials → OAuth client ID (Web application). Enable the Gmail API and the Calendar API | Client ID, client secret |
-   | Microsoft | Outlook, Outlook Calendar, OneNote | Microsoft Entra admin centre → App registrations → New registration (platform: Web) | Application (client) ID, client secret value, and the Directory (tenant) ID if the app is for one organisation only (leave empty for "any account") |
+   | Google | Gmail, Google Calendar | Google Cloud Console → APIs & Services. Enable the Gmail API and the Calendar API; OAuth consent screen: **External** (so personal Gmail accounts work) and add yourself as a test user; then Credentials → OAuth client ID (Web application) | Client ID, client secret |
+   | Microsoft | Outlook, Outlook Calendar, OneNote | Microsoft Entra admin centre → App registrations → New registration. Supported account types: **Accounts in any organizational directory and personal Microsoft accounts** (so Outlook.com and Hotmail work); platform: Web | Application (client) ID, client secret value. Leave the tenant ID empty unless the app is for one organisation only |
    | Notion | Notion | notion.so/my-integrations → New integration → type Public | OAuth client ID, OAuth client secret |
    | Slack | Slack | api.slack.com/apps → Create New App → OAuth & Permissions. To receive messages, also set the *Event request address* shown in the dialog and subscribe to `message.channels` and `message.im` | Client ID, client secret, signing secret (optional; needed to receive) |
 
@@ -182,7 +182,12 @@ Things to know before promising this to people:
 - Registering an app is a developer task (about 10 minutes each). Less technical people will need a walkthrough.
 - Google keeps a new app in "Testing": only the test users listed in that app can connect, and Google expires their access after about a week, so they sign in again. Leaving Testing with Gmail access needs Google's review.
 
-These need no app registration. Each person pastes their own key on the Connections screen: Telegram bot (token from @BotFather; Niko points the bot at its own webhook), Discord (bot token and channel ID), ElevenLabs (API key and voice ID), other AI systems (base URL, key, model), Make.com / n8n / Power Automate (webhook URL).
+At sign-in Google and Microsoft both show an account picker, so a person signed in to a work account in the browser can still choose a personal one.
+
+These need no app registration. Each person pastes their own key: on **Connections**, Telegram bot (token from @BotFather), Discord (bot token and channel ID) and Make.com / n8n / Power Automate (webhook URL); on **Voice**, ElevenLabs (API key and voice); on **Engine**, their own AI key or self-hosted model.
+
+- **Telegram groups:** a bot can't list the chats it is in or see messages from before it joined. A group appears in the inbox when the bot is added to it or someone writes there. Bots start with *group privacy* on, which hides ordinary group messages: @BotFather → `/setprivacy` → the bot → **Disable**, then remove and re-add the bot to each group. Connections → Telegram bot → Manage shows the current setting and has **Check again**. Bots connected before this change need **Check again** once so Telegram starts sending group joins.
+- **ElevenLabs:** the free plan refuses requests from cloud servers (Niko runs on Cloudflare), so it needs a paid plan, and the key needs the *Text to Speech* and *Voices* permissions. Until then Niko speaks with the device voice and says why on the home screen.
 
 Incoming addresses the Worker listens on:
 

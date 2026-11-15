@@ -120,6 +120,15 @@
   .status span:last-child { font-size: 18px; }
 }
 
+/* Workspace mic: the status line says "tap the mic", so the mic is always there. */
+.ws-mic { display: flex; align-items: center; gap: 12px; }
+.ws-mic .micbtn { width: 60px; height: 60px; }
+.micbtn.live { animation: micpulse 1.6s ease-in-out infinite; }
+@keyframes micpulse { 50% { box-shadow: 0 0 0 10px hsl(var(--h) 100% 75% / .12), 0 0 40px hsl(var(--h) 100% 73% / .45); } }
+@media (prefers-reduced-motion: reduce) { .micbtn.live { animation: none; } }
+.voice-note { max-width: 520px; font: 400 13px/1.45 system-ui, sans-serif; color: #e8b9a0; text-decoration: none; }
+.voice-note:hover { text-decoration: underline; }
+
 /* ---- connections (Connections-Niko mockup): three equal columns that fill the screen, 12px descriptions. */
 .cols.conn { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; flex: 1; }
 .cols.conn .sub { font-size: 12px; line-height: 1.35; }
@@ -182,7 +191,22 @@ select.in option { color: #04070c; }
 .eng-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; font: 400 14px system-ui, sans-serif; }
 .eng-line .soon { margin-left: 8px; font-size: 10px; }
 .eng-keys { margin: 0; border-radius: 22px; padding: 16px 20px; display: flex; align-items: center; gap: 12px; font: 400 14px/1.45 system-ui, sans-serif; box-shadow: none; }
-@media (max-width: 1000px) { .page.engine { height: auto; } .eng-grid { grid-template-columns: 1fr; } .eng-side { overflow: visible; } .eng-fields { flex-wrap: wrap; padding-left: 0; } .eng-fields .fld { flex-basis: 100%; } }
+@media (max-width: 1000px) { .page.engine { height: auto; } .eng-grid { grid-template-columns: 1fr; } .eng-side { overflow: visible; } .eng-fields { flex-wrap: wrap; padding-left: 0; } .eng-fields:not(.col) > .fld { flex-basis: 100%; } .eng-fields.col { flex-wrap: nowrap; } .set-head { flex-wrap: wrap; align-items: flex-start; } }
+
+/* ---- settings shell (Admin-Appearance mockup), shared by Appearance, Voice, Connections, Engine and Account */
+.set-back { display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 14px; margin-bottom: 10px; border-radius: 12px; color: #fff; text-decoration: none; font: 500 12px 'JetBrains Mono', monospace; letter-spacing: .14em; text-transform: uppercase; border: 1px solid rgba(255,255,255,.18); align-self: flex-start; }
+.set-back:hover { background: rgba(255,255,255,.08); color: #fff; }
+.set-main .cols.conn { flex: 1; }
+.set-main .eng-card.wide { flex: none; }
+.eng-card .hint { font: 400 13px/1.45 system-ui, sans-serif; color: var(--muted); }
+.conn-count { display: flex; align-items: baseline; gap: 10px; }
+.conn-count .accent { font-size: 32px; font-weight: 500; line-height: 1; }
+.sheet-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.sheet-actions > * { flex: 1; min-width: 120px; }
+.tg-note { border-radius: 16px; padding: 14px 16px; background: rgba(255,190,120,.08); border: 1px solid rgba(255,190,120,.3); display: flex; flex-direction: column; gap: 10px; font: 400 14px/1.5 system-ui, sans-serif; color: #e6eaf1; }
+.tg-note.ok { background: rgba(120,220,255,.06); border-color: rgba(120,220,255,.25); }
+.tg-note .bt { align-self: flex-start; }
+@media (max-width: 900px) { .set-back { margin-bottom: 4px; } }
 
 /* ---- settings shell (Admin-Appearance mockup) */
 .set { position: relative; z-index: 1; min-height: 100%; display: grid; grid-template-columns: 250px minmax(0, 1fr); background: #07090d; }

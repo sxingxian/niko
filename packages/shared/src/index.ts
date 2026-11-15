@@ -63,11 +63,11 @@ const clientId: ProviderField = { key: 'clientId', label: 'Client ID', type: 'te
 const clientSecret: ProviderField = { key: 'clientSecret', label: 'Client secret', type: 'password' };
 
 export const APPS: AppDef[] = [
-  { id: 'google', name: 'Google', where: 'Google Cloud Console → APIs & Services → Credentials → OAuth client ID (Web application). Enable the Gmail API and the Calendar API.', fields: [clientId, clientSecret] },
-  { id: 'microsoft', name: 'Microsoft', where: 'Microsoft Entra admin centre → App registrations → New registration (platform: Web).', fields: [
+  { id: 'google', name: 'Google', where: 'In Google Cloud Console → APIs & Services: enable the Gmail API and the Calendar API; on the OAuth consent screen choose External (so personal Gmail accounts work) and add your Google address as a test user; then Credentials → Create OAuth client ID → Web application. When you sign in you can pick any of your Google accounts.', fields: [clientId, clientSecret] },
+  { id: 'microsoft', name: 'Microsoft', where: 'In the Microsoft Entra admin centre (entra.microsoft.com; a free personal Microsoft account works) → App registrations → New registration. Under Supported account types choose “Accounts in any organizational directory and personal Microsoft accounts”, so Outlook.com, Hotmail and work accounts can all sign in. Platform: Web. Then Certificates & secrets → New client secret. When you sign in you can pick which account to use.', fields: [
     { ...clientId, label: 'Application (client) ID' },
     { ...clientSecret, label: 'Client secret value' },
-    { key: 'tenant', label: 'Directory (tenant) ID', type: 'text', placeholder: 'common', optional: true },
+    { key: 'tenant', label: 'Directory (tenant) ID · leave empty for personal and work accounts', type: 'text', placeholder: 'Leave empty', optional: true },
   ] },
   { id: 'notion', name: 'Notion', where: 'notion.so/my-integrations → New integration → type Public.', fields: [{ ...clientId, label: 'OAuth client ID' }, { ...clientSecret, label: 'OAuth client secret' }] },
   { id: 'slack', name: 'Slack', where: 'api.slack.com/apps → Create New App → OAuth & Permissions.', fields: [clientId, clientSecret, { key: 'signingSecret', label: 'Signing secret (to receive messages)', type: 'password', optional: true }] },

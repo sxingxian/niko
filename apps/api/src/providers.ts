@@ -11,7 +11,7 @@ export type Secret = OAuthSecret & Record<string, any>;
 
 interface OAuthCfg { authUrl: string; tokenUrl: string; scopes: string; clientId?: string; clientSecret?: string; extraAuth?: Record<string, string>; basicAuth?: boolean; scopeParam?: string }
 
-const GOOGLE = { authUrl: 'https://accounts.google.com/o/oauth2/v2/auth', tokenUrl: 'https://oauth2.googleapis.com/token', extraAuth: { access_type: 'offline', prompt: 'consent' } };
+const GOOGLE = { authUrl: 'https://accounts.google.com/o/oauth2/v2/auth', tokenUrl: 'https://oauth2.googleapis.com/token', extraAuth: { access_type: 'offline', prompt: 'consent select_account' } };
 
 /** One account's own keys for a provider app. Never sent back to the browser. */
 export interface AppKeys { clientId: string; clientSecret: string; tenant?: string; signingSecret?: string }
@@ -28,7 +28,9 @@ export function oauthConfig(provider: string, keys: AppKeys): OAuthCfg | null {
   const g = { clientId: keys.clientId, clientSecret: keys.clientSecret };
   const m = g;
   const tenant = /^(common|organizations|consumers|[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.test(keys.tenant ?? '') ? keys.tenant! : 'common';
-  const MS = { authUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`, tokenUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token` };
+  // "common" accepts personal (Outlook.com, Hotmail) and work accounts; prompt=select_account lets the person pick
+  // instead of being signed in silently with whatever work account the browser already has.
+  const MS = { authUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`, tokenUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`, extraAuth: { prompt: 'select_account' } };
   switch (provider) {
     case 'gmail': return { ...GOOGLE, ...g, scopes: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send' };
     case 'google-calendar': return { ...GOOGLE, ...g, scopes: 'https://www.googleapis.com/auth/calendar.readonly' };
@@ -242,12 +244,15 @@ export async function relayFile(env: Env, db: Db, userId: string, provider: stri
   throw new Error('Sending files is not available for this connection yet.');
 }
 
-export async function telegramSetWebhook(token: string, url: string, secret: string): Promise<{ ok: boolean; username?: string }> {
+/** Points the bot at Niko. `readsGroups` is false while the bot's group privacy is on: then, in groups,
+ * Telegram only delivers messages that mention the bot, commands and replies to it. */
+export async function telegramSetWebhook(token: string, url: string, secret: string): Promise<{ ok: boolean; username?: string; readsGroups?: boolean }> {
   const me = await (await fetch(`https://api.telegram.org/bot${token}/getMe`)).json<any>();
   if (!me.ok) return { ok: false };
   const r = await (await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ url, secret_token: secret, allowed_updates: ['message'] }),
+    // my_chat_member tells Niko when the bot is added to a group, so the group shows up before anyone writes.
+    body: JSON.stringify({ url, secret_token: secret, allowed_updates: ['message', 'edited_message', 'channel_post', 'my_chat_member'] }),
   })).json<any>();
-  return { ok: !!r.ok, username: me.result?.username };
+  return { ok: !!r.ok, username: me.result?.username, readsGroups: !!me.result?.can_read_all_group_messages };
 }
