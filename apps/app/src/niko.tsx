@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { hearOrder, isWeatherQuestion, voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
-import { isEcho, matchWake, screenFor, screenName, scrollRequest, takeItemTag, takeScreenTag } from './speech';
+import { isEcho, matchWake, screenFor, screenName, scrollRequest, takeItemTag, takeMoveTags, takeScreenTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
@@ -25,7 +25,7 @@ interface NikoState {
   ask: (text: string) => Promise<void>;
   dismissReply: () => void;
   /** A page (the workspace) can claim "send it" / "cancel". Returns true when it handled the phrase. */
-  setCommandHandler: (fn: ((phrase: string) => boolean) | null) => void;
+  setCommandHandler: (fn: ((phrase: string, quiet?: boolean) => boolean) | null) => void;
   say: (text: string) => void;
   setStatus: (label: string, line: string, mode?: CoreMode) => void;
   /** Back to the resting label and line ("Standing by"). */
@@ -101,7 +101,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [brief, setBrief] = useState<Brief | null>(null);
   const [micOn, setMicOn] = useState(false);
   const navigate = useNavigate();
-  const handler = useRef<((p: string) => boolean) | null>(null);
+  const handler = useRef<((p: string, quiet?: boolean) => boolean) | null>(null);
   const rec = useRef<any>(null);
   const active = useRef(false); // true after the mic button: the next phrase is a command even without "Niko"
   const meRef = useRef<Me | null>(null);
@@ -258,13 +258,14 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       setMode('speaking'); setLabel('Heard');
       if (here.current === screen) setLine(`You’re on ${name}.`); else { setLine(`Opening ${name}.`); navigate(screen); }
     }
-    window.setTimeout(() => (SR && wantRec.current ? listenForFollowUp() : idle()), 1200);
+    window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 1200);
   }, [navigate, idle, listenForFollowUp, SR]);
 
   const ask = useCallback(async (raw: string) => {
     const text = raw.trim();
     if (!text) return;
-    const lower = text.toLowerCase();
+    // Lower case without punctuation: speech-to-text services write "Send it." or "Okay, next page."
+    const lower = text.toLowerCase().replace(/[.,!?;:"“”…]+/g, ' ').replace(/\s+/g, ' ').trim();
     endFollowUp();
     // Ending the conversation.
     if (/^(that'?s all|that is all|thanks?( you)?|thank you niko|stop|never ?mind|cancel that|bye)\b[.!]?$/.test(lower)) { active.current = false; stopSpeech(); idle(); return; }
@@ -278,7 +279,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       setMode('speaking'); setLabel('Heard');
       setLine(moved ? { down: 'Scrolling down.', up: 'Scrolling up.', top: 'Back to the top.', bottom: 'Down to the bottom.' }[way]
         : way === 'down' || way === 'bottom' ? 'That’s the bottom of the page.' : 'That’s the top of the page.');
-      window.setTimeout(() => (SR && wantRec.current ? listenForFollowUp() : idle()), 900);
+      window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 900);
       return;
     }
     // 3. Changing screen by voice: "switch to calendar", "can you open my notes", "back to home", "go back".
@@ -293,10 +294,14 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
       // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
       const { text: noScreen, path: asked } = takeScreenTag(r.reply);
-      const { text: answer, item } = takeItemTag(noScreen);
+      const { text: noItem, item } = takeItemTag(noScreen);
+      // …or to scroll ([[scroll:down]]) or turn the list's page ([[page:next]]), which this screen then does.
+      const { text: answer, scroll, page } = takeMoveTags(noItem);
       setBrief(r.brief); setReply(answer); say(answer);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) navigate('/' + item.view); }
       else if (asked) navigate(asked);
+      else if (page && handler.current?.(page, true)) { /* the list on screen turned its page, quietly: Niko is speaking */ }
+      else if (scroll || page) scrollScreen(scroll ?? (page === 'previous page' || page === 'first page' ? 'up' : 'down'));
     } catch (e: any) {
       if (e?.data?.brief) setBrief(e.data.brief);
       setReply(e.message); setMode('idle'); setLabel('Problem'); setLine(e.message);
@@ -372,7 +377,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     say,
     setStatus: (l, t, m) => { setLabel(l); setLine(t); if (m) setMode(m); },
     rest: idle,
-    carryOn: () => (SR && wantRec.current ? listenForFollowUp() : idle()),
+    carryOn: () => (wantRec.current ? listenForFollowUp() : idle()),
     voiceProblem,
     pendingOpen,
     clearPendingOpen: () => setPendingOpen(null),

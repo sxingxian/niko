@@ -53,6 +53,15 @@ export function screenFor(raw: string): string | null {
 }
 export const screenName = (path: string) => SCREENS.find((s) => s.path === path)?.name ?? path;
 
+/** The AI can also scroll ([[scroll:down]]) or turn the list's page ([[page:next]], [[page:3]]), for phrasings the
+ * matching here doesn't know. Returns the reply without the tags, and what was asked. */
+export function takeMoveTags(reply: string): { text: string; scroll: 'down' | 'up' | 'top' | 'bottom' | null; page: string | null } {
+  const s = /\[\[\s*scroll\s*:\s*(down|up|top|bottom)\s*\]\]/i.exec(reply)?.[1]?.toLowerCase() as 'down' | 'up' | 'top' | 'bottom' | undefined;
+  const p = /\[\[\s*page\s*:\s*(next|prev|previous|first|last|\d{1,3})\s*\]\]/i.exec(reply)?.[1]?.toLowerCase();
+  const text = reply.replace(/\s*\[\[\s*(scroll|page)\s*:[^\]]*\]\]\s*/gi, ' ').trim();
+  return { text, scroll: s ?? null, page: p ? (/^\d+$/.test(p) ? `page ${p}` : p === 'prev' || p === 'previous' ? 'previous page' : `${p} page`) : null };
+}
+
 /** The AI can ask for a screen by ending its reply with [[open:calendar]]. Only Niko's own screens are accepted. */
 export function takeScreenTag(reply: string): { text: string; path: string | null } {
   const m = /\[\[\s*open\s*:\s*([a-z ]+?)\s*\]\]/i.exec(reply);
@@ -140,14 +149,29 @@ export function rewriteRequest(raw: string): string | null {
  * bottom", "keep scrolling", "show me more". Returns which way, or null for anything else.
  */
 export function scrollRequest(raw: string): 'down' | 'up' | 'top' | 'bottom' | null {
-  const p = raw.toLowerCase().replace(/^(niko|nico|hey niko)[,\s]+/, '').replace(/^(please|can you|could you|would you)\s+/, '').replace(/[.!?]+$/, '').replace(/\s+please$/, '').trim();
+  const p = cleanCommand(raw);
   if (!p || p.length > 60) return null;
-  const tail = '(\\s+(a bit|a little|some|more|again|further|the page|the list|the screen|this|it))*';
-  if (new RegExp(`^((scroll|go|jump|take me|move)\\s+)?(back\\s+)?(up\\s+)?to the (very\\s+)?(top|start|beginning)${tail}$`).test(p)) return 'top';
-  if (new RegExp(`^((scroll|go|jump|take me|move)\\s+)?(down\\s+)?to the (very\\s+)?(bottom|end)${tail}$`).test(p)) return 'bottom';
-  if (new RegExp(`^(scroll|page|go|move)\\s+(the page\\s+|the list\\s+|it\\s+)?(down|downwards)${tail}$|^(down|further down|scroll|keep scrolling|scroll more|show( me)? more|next page|more please)${tail}$`).test(p)) return 'down';
-  if (new RegExp(`^(scroll|page|go|move)\\s+(the page\\s+|the list\\s+|it\\s+)?(back\\s+)?(up|upwards)${tail}$|^(up|back up|further up|previous page)${tail}$`).test(p)) return 'up';
+  const obj = '(?:\\s+(?:the\\s+)?(?:page|list|screen|this|it|view|content|window))?';
+  const tail = '(?:\\s+(?:some|more|again|further))*';
+  if (new RegExp(`^(?:(?:scroll|go|jump|take me|move|bring me|skip)\\s+)?(?:all the way\\s+)?(?:back\\s+)?(?:up\\s+)?(?:to\\s+)?(?:the\\s+)?(?:very\\s+)?(?:top|start|beginning)(?:\\s+of${obj})?$`).test(p)) return 'top';
+  if (new RegExp(`^(?:(?:scroll|go|jump|take me|move|bring me|skip)\\s+)?(?:all the way\\s+)?(?:down\\s+)?(?:to\\s+)?(?:the\\s+)?(?:very\\s+)?(?:bottom|end)(?:\\s+of${obj})?$`).test(p)) return 'bottom';
+  if (new RegExp(`^(?:scroll|page|go|move|swipe)${obj}\\s+(?:further\\s+|more\\s+|back\\s+)?(?:down|downwards|lower)${obj}${tail}$|^(?:down|further down|lower|scroll|keep scrolling|keep going|scroll more|continue scrolling|show(?: me)? (?:more|the rest)|see more|next page|more)${obj}${tail}$`).test(p)) return 'down';
+  if (new RegExp(`^(?:scroll|page|go|move|swipe)${obj}\\s+(?:further\\s+|more\\s+|back\\s+)?(?:up|upwards|higher)${obj}${tail}$|^(?:up|back up|further up|higher|scroll back|previous page)${obj}${tail}$`).test(p)) return 'up';
   return null;
+}
+
+/**
+ * What was said, tidied for matching commands: lower case, no punctuation (speech-to-text services add commas and
+ * full stops), and without the polite words around a command ("Okay Niko, can you scroll down a bit for me, please?"
+ * → "scroll down").
+ */
+export function cleanCommand(raw: string): string {
+  let t = raw.toLowerCase().replace(/[’']/g, "'").replace(/[.,!?;:"“”()…]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const lead = /^(?:(?:okay|ok|alright|all right|right|so|um|uh|erm|hey|hi|hello|now|and|then|just|please|niko|nico|nikko)\s+|(?:can|could|would|will) you(?: please)?\s+|i (?:want|need) you to\s+|i'd like you to\s+|i would like you to\s+|go ahead and\s+|try to\s+)/;
+  const trail = /\s+(?:please|now|for me|thanks|thank you|a bit|a little(?: bit)?|a tiny bit|slightly|niko|ok|okay|right now|again)$/;
+  for (let i = 0; i < 8; i++) { const n = t.replace(lead, ''); if (n === t) break; t = n; }
+  for (let i = 0; i < 8; i++) { const n = t.replace(trail, ''); if (n === t) break; t = n; }
+  return t.trim();
 }
 
 /**
@@ -155,7 +179,7 @@ export function scrollRequest(raw: string): 'down' | 'up' | 'top' | 'bottom' | n
  * "last page". Returns where to go, or null for anything else.
  */
 export function pageRequest(raw: string): 'next' | 'prev' | 'first' | 'last' | number | null {
-  const p = normTitle(raw.replace(/^(niko|nico|hey niko)[,\s]+/i, '')).replace(/^(please|can you|could you)\s+/, '').replace(/\s+please$/, '').trim();
+  const p = normTitle(cleanCommand(raw));
   if (!p || p.length > 50) return null;
   const go = '(?:(?:go|move|turn|jump|skip|flip|switch|take me)\\s+(?:back\\s+)?(?:to\\s+)?|show(?: me)?\\s+|open\\s+)?(?:the\\s+)?';
   if (new RegExp(`^${go}(next|following) page$|^page forward$|^(go )?forward a page$`).test(p)) return 'next';

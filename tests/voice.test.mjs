@@ -65,3 +65,16 @@ const sc = { 'scroll down': 'down', 'Niko, scroll down a bit': 'down', 'please s
 for (const [p, want] of Object.entries(sc)) ok(scrollRequest(p) === want, `scrolls ${want}: "${p}"`);
 for (const p of ['what is the weather', 'open my calendar', 'make it shorter', 'send it', 'open the second one', 'what is up', 'go to calendar', 'next'])
   ok(scrollRequest(p) === null, `not scrolling: "${p}"`);
+
+// ---- As speech-to-text services write it: capitals, commas, full stops and polite words
+import { cleanCommand, takeMoveTags } from '../apps/app/src/speech.ts';
+const written = { 'Scroll down.': 'down', 'Scroll down, please.': 'down', 'Okay Niko, can you scroll down a bit for me, please?': 'down', 'Could you scroll down the page?': 'down',
+  'Please scroll up a little.': 'up', 'Scroll up!': 'up', 'Go back to the top, please.': 'top', 'Take me to the bottom of the page.': 'bottom', 'Keep going.': 'down', 'Show me the rest.': 'down', 'Scroll all the way down to the bottom.': 'bottom', 'Scroll the page down.': 'down', 'Move down a little bit.': 'down' };
+for (const [p, want] of Object.entries(written)) ok(scrollRequest(p) === want, `scrolls ${want} as written: "${p}"`);
+const writtenPages = { 'Next page.': 'next', 'Okay, next page please.': 'next', 'Can you go to the next page?': 'next', 'Go to page three.': 3, 'Page 2, please.': 2, 'Previous page.': 'prev', 'Last page!': 'last' };
+for (const [p, want] of Object.entries(writtenPages)) ok(pageRequest(p) === want, `page ${want} as written: "${p}"`);
+ok(cleanCommand('Okay Niko, could you please open my notes for me?') === 'open my notes', 'polite words are dropped around a command');
+for (const p of ['What is the weather like?', 'Who emailed me today?', 'Make it shorter, please.']) ok(scrollRequest(p) === null && pageRequest(p) === null, `not scrolling or paging: "${p}"`);
+{ const m = takeMoveTags('Scrolling down. [[scroll:down]]'); ok(m.text === 'Scrolling down.' && m.scroll === 'down' && m.page === null, 'the AI can ask to scroll'); }
+{ const m = takeMoveTags('Here is page 3. [[page:3]]'); ok(m.page === 'page 3' && m.text === 'Here is page 3.', 'the AI can ask for a page'); }
+{ const m = takeMoveTags('Going back. [[page:prev]]'); ok(m.page === 'previous page', 'the AI can ask for the previous page'); }

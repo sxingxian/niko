@@ -432,19 +432,21 @@ export function Workspace() {
   // Voice: "send it" starts the countdown, "cancel" stops it, "make it shorter" and the like rewrite the draft.
   // Anything else falls through to Niko.
   useEffect(() => {
-    n.setCommandHandler((p) => {
+    n.setCommandHandler((p, quiet) => {
       if (/^(send|send it|send that)\b/.test(p) && view === 'inbox') { void start('voice'); return true; }
       if (/^(cancel|stop|don't send)\b/.test(p) && send.phase === 'counting') { void cancel(); return true; }
       // "Next page", "page 3", "last page": the list's pages, when it has more than one.
       const pr = pageRequest(p);
       if (pr !== null && pages > 1) {
         const to = pr === 'next' ? page + 1 : pr === 'prev' ? page - 1 : pr === 'first' ? 0 : pr === 'last' ? pages - 1 : pr - 1;
-        if (to < 0 || to >= pages) n.setStatus('Heard', to < 0 ? 'This is the first page.' : `There are only ${pages} pages.`, 'speaking');
-        else { goPage(to); n.setStatus('Heard', `Page ${to + 1} of ${pages}.`, 'speaking'); }
+        if (to >= 0 && to < pages) goPage(to);
+        if (quiet) return true; // asked for by the AI's reply, which Niko is already saying
+        n.setStatus('Heard', to < 0 ? 'This is the first page.' : to >= pages ? `There are only ${pages} pages.` : `Page ${to + 1} of ${pages}.`, 'speaking');
         window.setTimeout(n.carryOn, 1000);
         return true;
       }
-      if (typeof pr === 'number' || pr === 'first' || pr === 'last') { n.setStatus('Heard', 'Everything fits on one page.', 'speaking'); window.setTimeout(n.carryOn, 1000); return true; }
+      if (typeof pr === 'number' || pr === 'first' || pr === 'last') { if (!quiet) { n.setStatus('Heard', 'Everything fits on one page.', 'speaking'); window.setTimeout(n.carryOn, 1000); } return true; }
+      if (quiet) return false; // the AI's reply asked only for a page; anything else is not for here
       if (scrollRequest(p)) return false; // "scroll down", "show me more", "next page" on a one-page list: scrolling, handled by Niko
       const ask = view === 'inbox' && sel && send.phase === 'draft' ? rewriteRequest(p) : null;
       if (ask) { void rewrite(ask, true); return true; }
