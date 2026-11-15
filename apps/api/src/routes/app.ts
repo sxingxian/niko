@@ -810,13 +810,16 @@ app.post('/voice/stt', async (c) => {
   const source = String(form!.get('source') ?? '');
   let only: { entry: HearSource; key?: HearKey } | undefined;
   if (source) {
-    if (!HEAR_ENTRY.test(source)) return c.json({ error: 'Unknown service.' }, 400);
+    if (!HEAR_ENTRY.test(source)) return c.json({ error: 'That service isn’t one Niko knows. Reload the page and try again.' }, 400);
     only = { entry: source as HearSource };
     const draft = form!.get('key');
     if (source.startsWith('skey:') && typeof draft === 'string' && draft) {
       // A key on the screen, saved or not: a typed key, or the saved one where it is still for the same service and address.
-      const k = hearKeyFrom(JSON.parse(draft.slice(0, 6000) || '{}'));
-      const prior = (await loadHearKeys(c.env, db, u.id)).find((x) => `skey:${x.id}` === source);
+      let parsed: unknown = {};
+      try { parsed = JSON.parse(draft.slice(0, 6000)); } catch { return c.json({ error: 'Those settings could not be read. Reload the page and try again.' }, 400); }
+      const k = hearKeyFrom(parsed);
+      // "skey:draft" is a key not saved yet: only what was typed is used.
+      const prior = source === 'skey:draft' ? undefined : (await loadHearKeys(c.env, db, u.id)).find((x) => `skey:${x.id}` === source);
       const apiKey = k.apiKey || savedHearKey(prior, k);
       if (!apiKey) return c.json({ error: 'Paste the API key to test it.' }, 400);
       only.key = { ...k, id: 'test', apiKey };

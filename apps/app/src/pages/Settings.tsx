@@ -813,7 +813,8 @@ export function Voice() {
       if (!wav) { setNote({ ok: false, text: 'Nothing was heard. Check the microphone and try again.' }); return; }
       setNote({ ok: true, text: 'Turning that into words…' });
       const k = hKeyOf(v);
-      const r = await transcribe(wav, { source: v, key: k ? { ...k, apiKey: k.apiKey || undefined } : undefined });
+      // A key not saved yet has only a temporary id on this page, so it is sent as "skey:draft" with its settings.
+      const r = await transcribe(wav, { source: k && isNew(k.id) ? 'skey:draft' : v, key: k ? { ...k, id: undefined, apiKey: k.apiKey || undefined } : undefined });
       setNote({ ok: true, text: r.text ? `It heard: “${r.text}”` : 'It answered, but heard no words.' });
     } catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setTesting(null); }
   };
