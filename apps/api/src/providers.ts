@@ -2,7 +2,8 @@
 // None of this has been exercised against live accounts yet: treat each adapter as untested until you link one.
 import { and, eq } from 'drizzle-orm';
 import { connections, providerApps, type Db } from '@niko/db';
-import { PROVIDERS, type AppId } from '@niko/shared';
+import { PROVIDERS, type AppId, type EventItem, type MailItem, type NoteItem } from '@niko/shared';
+import { notionDeleted, notionTitle } from './details';
 import type { Env } from './env';
 import { seal, unseal } from './lib/crypto';
 
@@ -114,15 +115,12 @@ export function publicHttpsUrl(raw: unknown): URL | null {
   return u;
 }
 
-async function api(url: string, token: string, init: RequestInit = {}, scheme = 'Bearer'): Promise<any> {
+export async function api(url: string, token: string, init: RequestInit = {}, scheme = 'Bearer'): Promise<any> {
   const res = await fetch(url, { ...init, headers: { authorization: `${scheme} ${token}`, accept: 'application/json', ...(init.headers as Record<string, string> | undefined) } });
   if (!res.ok) throw new Error(`${new URL(url).hostname} answered ${res.status}`);
   return res.status === 204 ? null : res.json();
 }
 
-export interface MailItem { id: string; from: string; subject: string; source: string; provider: string }
-export interface EventItem { time: string; title: string; source: string; start: number }
-export interface NoteItem { title: string; source: string }
 
 export async function listMail(env: Env, db: Db, userId: string, provider: string): Promise<MailItem[]> {
   const s = await credentials(env, db, userId, provider);
@@ -153,12 +151,12 @@ export async function listEvents(env: Env, db: Db, userId: string, provider: str
     u.searchParams.set('timeMin', dayStart.toISOString()); u.searchParams.set('timeMax', dayEnd.toISOString());
     u.searchParams.set('singleEvents', 'true'); u.searchParams.set('orderBy', 'startTime'); u.searchParams.set('maxResults', '12');
     const j = await api(u.toString(), s.accessToken);
-    return (j.items ?? []).map((e: any) => ({ title: e.summary ?? '(no title)', source: 'Google', start: Date.parse(e.start?.dateTime ?? e.start?.date), time: '' }));
+    return (j.items ?? []).filter((e: any) => e.status !== 'cancelled').map((e: any) => ({ id: String(e.id), provider, title: e.summary ?? '(no title)', source: 'Google', start: Date.parse(e.start?.dateTime ?? e.start?.date), time: '' }));
   }
   if (provider === 'outlook-calendar') {
-    const u = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${dayStart.toISOString()}&endDateTime=${dayEnd.toISOString()}&$top=12&$select=subject,start&$orderby=start/dateTime`;
+    const u = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${dayStart.toISOString()}&endDateTime=${dayEnd.toISOString()}&$top=12&$select=id,subject,start,isCancelled&$orderby=start/dateTime`;
     const j = await api(u, s.accessToken, { headers: { prefer: 'outlook.timezone="UTC"' } });
-    return (j.value ?? []).map((e: any) => ({ title: e.subject ?? '(no title)', source: 'Outlook', start: Date.parse(e.start?.dateTime + 'Z'), time: '' }));
+    return (j.value ?? []).filter((e: any) => !e.isCancelled).map((e: any) => ({ id: String(e.id), provider, title: e.subject ?? '(no title)', source: 'Outlook', start: Date.parse(e.start?.dateTime + 'Z'), time: '' }));
   }
   return [];
 }
@@ -167,18 +165,17 @@ export async function listNotes(env: Env, db: Db, userId: string, provider: stri
   const s = await credentials(env, db, userId, provider);
   if (!s) return [];
   if (provider === 'notion') {
+    // Search can return pages that are in the trash; those are left out. More are asked for, so there are still enough.
     const j = await api('https://api.notion.com/v1/search', s.accessToken, {
       method: 'POST', headers: { 'content-type': 'application/json', 'notion-version': '2022-06-28' },
-      body: JSON.stringify({ page_size: 6, sort: { direction: 'descending', timestamp: 'last_edited_time' }, filter: { property: 'object', value: 'page' } }),
+      body: JSON.stringify({ page_size: 25, sort: { direction: 'descending', timestamp: 'last_edited_time' }, filter: { property: 'object', value: 'page' } }),
     });
-    return (j.results ?? []).map((p: any) => {
-      const titleProp: any = Object.values(p.properties ?? {}).find((v: any) => v?.type === 'title');
-      return { title: titleProp?.title?.map((t: any) => t.plain_text).join('') || 'Untitled', source: 'Notion' };
-    });
+    return (j.results ?? []).filter((p: any) => !notionDeleted(p)).slice(0, 8)
+      .map((p: any) => ({ id: String(p.id), provider, title: notionTitle(p), source: 'Notion', edited: Date.parse(p.last_edited_time) || undefined }));
   }
   if (provider === 'onenote') {
-    const j = await api('https://graph.microsoft.com/v1.0/me/onenote/pages?$top=6&$select=title&$orderby=lastModifiedDateTime desc', s.accessToken);
-    return (j.value ?? []).map((p: any) => ({ title: p.title || 'Untitled', source: 'OneNote' }));
+    const j = await api('https://graph.microsoft.com/v1.0/me/onenote/pages?$top=8&$select=id,title,lastModifiedDateTime&$orderby=lastModifiedDateTime desc', s.accessToken);
+    return (j.value ?? []).map((p: any) => ({ id: String(p.id), provider, title: p.title || 'Untitled', source: 'OneNote', edited: Date.parse(p.lastModifiedDateTime) || undefined }));
   }
   return [];
 }

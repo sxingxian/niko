@@ -1,13 +1,14 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
-import { APPS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, VOICE_SOURCES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, WORKERS_MODELS, type Appearance, type Brain, type EnginePrefs, type Permissions } from '@niko/shared';
+import { APPS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, VOICE_SOURCES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, WORKERS_MODELS, type Appearance, type Brief, type Brain, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
 import { audit, requireUser, tooMany } from '../lib/session';
+import { eventDetail, mailDetail, noteDetail } from '../details';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
-  telegramSetWebhook, type AppKeys, type EventItem, type MailItem, type NoteItem,
+  telegramSetWebhook, type AppKeys,
 } from '../providers';
 
 export const app = new Hono<AppEnv>();
@@ -250,7 +251,6 @@ export async function oauthCallback(c: import('hono').Context<AppEnv>) {
 }
 
 // ---------------------------------------------------------------- data for the workspace and the brief
-interface Brief { mail: MailItem[]; events: EventItem[]; notes: NoteItem[]; chats: { provider: string; chatId: string; title: string; last: string; source: string }[]; problems: string[] }
 
 async function buildBrief(c: import('hono').Context<AppEnv>, tzOffsetMin: number): Promise<Brief> {
   const db = c.get('db');
@@ -281,12 +281,23 @@ async function buildBrief(c: import('hono').Context<AppEnv>, tzOffsetMin: number
     const key = m.provider + ':' + m.chatId;
     if (seen.has(key)) continue;
     seen.add(key);
-    chats.push({ provider: m.provider, chatId: m.chatId, title: m.chatTitle || m.sender, last: m.body.slice(0, 140), source: PROVIDERS.find((p) => p.id === m.provider)?.name.replace(' bot', '') ?? m.provider });
+    chats.push({ provider: m.provider, chatId: m.chatId, title: m.chatTitle || m.sender, last: m.body.slice(0, 140), lastAt: m.createdAt.getTime(), source: PROVIDERS.find((p) => p.id === m.provider)?.name.replace(' bot', '') ?? m.provider });
   }
   return { mail: mailLists.flat(), events, notes: noteLists.flat(), chats: chats.slice(0, 8), problems };
 }
 
 app.get('/brief', async (c) => c.json(await buildBrief(c, clampNum(Number(c.req.query('tz')), -840, 840, 0))));
+
+// What opens from the workspace: one note, one email or one event, as plain text.
+const opened = (fn: typeof noteDetail, group: string) => async (c: import('hono').Context<AppEnv>) => {
+  const provider = c.req.param('provider')!, id = c.req.param('id')!;
+  if (PROVIDERS.find((p) => p.id === provider)?.group !== group) return c.json({ error: 'Unknown connection.' }, 404);
+  try { return c.json(await fn(c.env, c.get('db'), c.get('user').id, provider, id)); }
+  catch (e) { return c.json({ error: (e as Error).message }, 502); }
+};
+app.get('/notes/:provider/:id', opened(noteDetail, 'notes'));
+app.get('/mail/:provider/:id', opened(mailDetail as unknown as typeof noteDetail, 'mail'));
+app.get('/events/:provider/:id', opened(eventDetail as unknown as typeof noteDetail, 'calendar'));
 
 app.get('/threads/:provider/:chatId', async (c) => {
   const rows = await c.get('db').select().from(messages)

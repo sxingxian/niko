@@ -202,3 +202,16 @@ export function passwordProblem(v: unknown, email = ''): string | null {
   if (local.length >= 4 && lower.includes(local)) return 'Don’t include your email address in the password.';
   return null;
 }
+
+// ---------------------------------------------------------------- the brief, and what opens from it
+export interface MailItem { id: string; from: string; subject: string; source: string; provider: string }
+export interface EventItem { id: string; provider: string; time: string; title: string; source: string; start: number }
+export interface NoteItem { id: string; provider: string; title: string; source: string; edited?: number }
+export interface ChatItem { provider: string; chatId: string; title: string; last: string; source: string; lastAt?: number }
+export interface Brief { mail: MailItem[]; events: EventItem[]; notes: NoteItem[]; chats: ChatItem[]; problems: string[] }
+
+/** One block of a note's content, as plain text: Niko never renders a provider's HTML. */
+export interface DocBlock { kind: 'h1' | 'h2' | 'h3' | 'p' | 'li' | 'ol' | 'todo' | 'quote' | 'code' | 'hr' | 'prop'; text: string; done?: boolean; depth?: number; label?: string }
+export interface NoteDetail { title: string; source: string; url?: string; edited?: number; blocks: DocBlock[]; more?: boolean }
+export interface MailDetail { from: string; to: string; subject: string; date?: number; text: string; url?: string }
+export interface EventDetail { title: string; source: string; start: number; end?: number; allDay?: boolean; location?: string; description?: string; attendees?: string[]; url?: string }

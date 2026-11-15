@@ -1,17 +1,11 @@
 // Shared Niko state: who is signed in, and the voice loop (wake word, commands, speech).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { voiceOrder, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
+import { voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroWarm, type Speech } from './kokoro';
 import { api, setAppearance, type CoreMode } from '@niko/ui';
 
-export interface Brief {
-  mail: { id: string; from: string; subject: string; source: string; provider: string }[];
-  events: { time: string; title: string; source: string }[];
-  notes: { title: string; source: string }[];
-  chats: { provider: string; chatId: string; title: string; last: string; source: string }[];
-  problems: string[];
-}
+export type { Brief } from '@niko/shared';
 
 interface NikoState {
   me: Me | null | undefined; // undefined while loading
@@ -31,6 +25,8 @@ interface NikoState {
   setCommandHandler: (fn: ((phrase: string) => boolean) | null) => void;
   say: (text: string) => void;
   setStatus: (label: string, line: string, mode?: CoreMode) => void;
+  /** Back to the resting label and line ("Standing by"). */
+  rest: () => void;
   /** Why ElevenLabs could not speak, when Niko fell back to the device voice. */
   voiceProblem: string | null;
 }
@@ -258,8 +254,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     setCommandHandler: (fn) => { handler.current = fn; },
     say,
     setStatus: (l, t, m) => { setLabel(l); setLine(t); if (m) setMode(m); },
+    rest: idle,
     voiceProblem,
-  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem]);
+  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

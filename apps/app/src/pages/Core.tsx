@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { SEND_COUNTDOWN_SECONDS, VOICE_NAMES, voiceOrder } from '@niko/shared';
 import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
-import { useNiko, type Brief } from '../niko';
+import { useNiko } from '../niko';
+import type { Brief, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
 
 // The mockups' rail: Home, Inbox, Calendar, Notes, Connections. Settings (appearance, engine, account) sit behind the last button.
 const NAVS: [string, string, string][] = [['/', 'spark', 'Home'], ['/inbox', 'mail', 'Inbox'], ['/calendar', 'calendar', 'Calendar'], ['/notes', 'note', 'Notes'], ['/connections', 'plug', 'Connections'], ['/appearance', 'user', 'Settings']];
@@ -182,6 +183,51 @@ function Outline() {
 }
 
 type Sel = { kind: 'chat'; provider: string; chatId: string; title: string; source: string } | { kind: 'mail'; provider: string; id: string; title: string; source: string; subject: string };
+/** Loads one detail (a note, an email or an event) when its address changes; earlier answers are kept for this visit. */
+const detailCache = new Map<string, unknown>();
+function useDetail<T>(path: string | null): { data: T | null; loading: boolean; error: string } {
+  const [st, setSt] = useState<{ path: string | null; data: T | null; loading: boolean; error: string }>({ path: null, data: null, loading: false, error: '' });
+  useEffect(() => {
+    if (!path) { setSt({ path, data: null, loading: false, error: '' }); return; }
+    const hit = detailCache.get(path) as T | undefined;
+    if (hit) { setSt({ path, data: hit, loading: false, error: '' }); return; }
+    let live = true;
+    setSt({ path, data: null, loading: true, error: '' });
+    api<T>(path).then((d) => { detailCache.set(path, d); if (live) setSt({ path, data: d, loading: false, error: '' }); })
+      .catch((e: Error) => { if (live) setSt({ path, data: null, loading: false, error: e.message }); });
+    return () => { live = false; };
+  }, [path]);
+  return st.path === path ? st : { data: null, loading: !!path, error: '' };
+}
+const when = (t: number) => new Date(t).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const clock = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+/** A note's content, as plain text blocks (never the provider's HTML). */
+function Blocks({ blocks }: { blocks: DocBlock[] }) {
+  let n = 0;
+  return (
+    <div className="doc">
+      {blocks.map((b, i) => {
+        n = b.kind === 'ol' ? n + 1 : 0;
+        const style = b.depth ? { marginLeft: 22 * b.depth } : undefined;
+        switch (b.kind) {
+          case 'h1': return <h3 key={i} className="d-h1" style={style}>{b.text}</h3>;
+          case 'h2': return <h4 key={i} className="d-h2" style={style}>{b.text}</h4>;
+          case 'h3': return <h5 key={i} className="d-h3" style={style}>{b.text}</h5>;
+          case 'li': return <p key={i} className="d-li" style={style}>{b.text}</p>;
+          case 'ol': return <p key={i} className="d-ol" style={style} data-n={n + '.'}>{b.text}</p>;
+          case 'todo': return <p key={i} className={'d-todo' + (b.done ? ' done' : '')} style={style}><span className="box" aria-hidden="true">{b.done ? '✓' : ''}</span><span className="sr">{b.done ? 'Done: ' : 'To do: '}</span>{b.text}</p>;
+          case 'quote': return <blockquote key={i} style={style}>{b.text}</blockquote>;
+          case 'code': return <pre key={i} style={style}>{b.text}</pre>;
+          case 'hr': return <hr key={i} />;
+          case 'prop': return <p key={i} className="d-prop"><span className="k">{b.label}</span><span>{b.text}</span></p>;
+          default: return <p key={i} style={style}>{b.label && <span className="k tagk">{b.label}</span>}{b.text}</p>;
+        }
+      })}
+    </div>
+  );
+}
+
 type SendState = { phase: 'draft' } | { phase: 'counting'; id: string; left: number } | { phase: 'sent' } | { phase: 'busy' };
 
 export function Workspace() {
@@ -195,20 +241,53 @@ export function Workspace() {
   const [draft, setDraft] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [send, setSend] = useState<SendState>({ phase: 'draft' });
+  const sendNow = useRef(send);
+  sendNow.current = send;
   const [err, setErr] = useState('');
   const fileInput = useRef<HTMLInputElement>(null);
   const timer = useRef<number>(0);
+  // Replies sent to an email in this visit, shown under it (mail has no stored thread).
+  const [mailSent, setMailSent] = useState<string[]>([]);
+  const [noteSel, setNoteSel] = useState<NoteItem | null>(null);
+  const [eventSel, setEventSel] = useState<EventItem | null>(null);
+  const mail = useDetail<MailDetail>(sel?.kind === 'mail' ? `/mail/${sel.provider}/${encodeURIComponent(sel.id)}` : null);
+  const note = useDetail<NoteDetail>(noteSel ? `/notes/${noteSel.provider}/${encodeURIComponent(noteSel.id)}` : null);
+  const event = useDetail<EventDetail>(eventSel ? `/events/${eventSel.provider}/${encodeURIComponent(eventSel.id)}` : null);
 
-  useEffect(() => { api<Brief>(`/brief?tz=${new Date().getTimezoneOffset()}`).then(setBrief).catch((e) => setErr(e.message)); }, []);
+  // The brief is fetched on arrival and again every 30 s while the page is in view, so new chats and mail appear.
+  const loadBrief = useCallback(() => api<Brief>(`/brief?tz=${new Date().getTimezoneOffset()}`).then(setBrief).catch((e) => setErr(e.message)), []);
+  useEffect(() => { void loadBrief(); }, [loadBrief]);
+  useEffect(() => {
+    const t = window.setInterval(() => { if (!document.hidden) void loadBrief(); }, 30_000);
+    const onShow = () => { if (!document.hidden) void loadBrief(); };
+    document.addEventListener('visibilitychange', onShow);
+    return () => { window.clearInterval(t); document.removeEventListener('visibilitychange', onShow); };
+  }, [loadBrief]);
   const items: Sel[] = brief ? [
     ...brief.chats.map((c) => ({ kind: 'chat' as const, provider: c.provider, chatId: c.chatId, title: c.title, source: c.source })),
     ...brief.mail.map((m) => ({ kind: 'mail' as const, provider: m.provider, id: m.id, title: m.from, source: m.source, subject: m.subject })),
   ] : [];
   useEffect(() => { if (!sel && items[0]) setSel(items[0]); /* first item opens by default */ }, [items.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  const selKey = sel ? (sel.kind === 'chat' ? `c:${sel.provider}:${sel.chatId}` : `m:${sel.provider}:${sel.id}`) : null;
+  const loadThread = useCallback(() => {
+    if (sel?.kind !== 'chat') return;
+    const key = selKey;
+    api<{ messages: typeof thread }>(`/threads/${sel.provider}/${encodeURIComponent(sel.chatId)}`)
+      .then((r) => { if (key === selKeyNow.current) setThread((t) => (t.length === r.messages.length && t.every((m, i) => m.id === r.messages[i]!.id) ? t : r.messages)); })
+      .catch(() => undefined);
+  }, [selKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const selKeyNow = useRef(selKey);
+  selKeyNow.current = selKey;
   useEffect(() => {
-    setDraft(''); setFile(null); setSend({ phase: 'draft' }); setErr(''); setThread([]);
-    if (sel?.kind === 'chat') api(`/threads/${sel.provider}/${encodeURIComponent(sel.chatId)}`).then((r) => setThread(r.messages)).catch(() => undefined);
-  }, [sel?.kind === 'chat' ? sel.chatId : sel?.kind === 'mail' ? sel.id : null]); // eslint-disable-line react-hooks/exhaustive-deps
+    setDraft(''); setFile(null); setSend({ phase: 'draft' }); setErr(''); setThread([]); setMailSent([]);
+    loadThread();
+  }, [selKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // An open conversation keeps itself up to date, so new messages appear and can be answered in turn.
+  useEffect(() => {
+    if (sel?.kind !== 'chat' || view !== 'inbox') return;
+    const t = window.setInterval(() => { if (!document.hidden) loadThread(); }, 6000);
+    return () => window.clearInterval(t);
+  }, [selKey, view, loadThread]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const target = sel ? { provider: sel.provider, chatId: sel.kind === 'chat' ? sel.chatId : sel.id } : null;
 
@@ -223,9 +302,13 @@ export function Workspace() {
         await api('/relay', { form });
       }
       setSend({ phase: 'sent' }); n.setStatus('Sent', '', 'idle');
-      if (sel?.kind === 'chat') setThread((t) => [...t, { id: 'new', direction: 'out', sender: 'Niko', body: draft, fileName: file?.name ?? null }]);
+      if (sel?.kind === 'chat') { setThread((t) => [...t, { id: 'new-' + Date.now(), direction: 'out', sender: 'Niko', body: draft, fileName: file?.name ?? null }]); window.setTimeout(loadThread, 800); }
+      else setMailSent((l) => [...l, draft]);
+      // "Sent" shows briefly, then an empty reply box returns, so the conversation can carry on.
+      setDraft(''); setFile(null);
+      window.setTimeout(() => { if (sendNow.current.phase !== 'sent') return; setSend({ phase: 'draft' }); n.rest(); }, 1600);
     } catch (e: any) { setErr(e.message); setSend({ phase: 'draft' }); n.setStatus('Problem', e.message, 'idle'); }
-  }, [file, target, draft, sel, n]);
+  }, [file, target, draft, sel, n, loadThread]);
 
   const start = useCallback(async (via: 'voice' | 'tap') => {
     if (!target || !draft.trim() || send.phase !== 'draft') return;
@@ -266,20 +349,24 @@ export function Workspace() {
   const drafted = useRef('');
   useEffect(() => {
     if (!sel || view !== 'inbox' || n.me?.permissions.draft === false) return;
-    const key = sel.kind === 'chat' ? 'c:' + sel.chatId : 'm:' + sel.id;
-    const lastIn = thread.filter((m) => m.direction === 'in').slice(-1)[0]?.body;
-    if (drafted.current === key || (sel.kind === 'chat' && !lastIn)) return;
+    const lastInMsg = thread.filter((m) => m.direction === 'in').slice(-1)[0];
+    const lastIn = lastInMsg?.body;
+    // Each new message from them gets its own draft (once), so a back-and-forth keeps going.
+    const key = sel.kind === 'chat' ? `c:${sel.chatId}:${lastInMsg?.id ?? ''}` : 'm:' + sel.id;
+    if (drafted.current === key || (sel.kind === 'chat' && !lastIn) || send.phase !== 'draft' || draft.trim()) return;
     drafted.current = key;
     const about = sel.kind === 'mail' ? `the email from ${sel.title} with subject "${sel.subject}"` : `the last message from ${sel.title}: "${lastIn}"`;
     setDrafting(true);
     api<{ reply: string }>('/chat', { body: { message: `Write only the text of a short, friendly reply to ${about}. No preamble.`, tz: new Date().getTimezoneOffset(), purpose: 'draft' } })
       .then((r) => setDraft((d) => d || (typeof r.reply === 'string' ? r.reply : ''))).catch(() => undefined).finally(() => setDrafting(false));
-  }, [sel, thread, view, n.me?.permissions.draft]);
+  }, [sel, thread, view, n.me?.permissions.draft, send.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const counting = send.phase === 'counting';
   const C = 1646.2;
   const title = view[0]!.toUpperCase() + view.slice(1);
   const count = brief ? (view === 'inbox' ? items.length : view === 'calendar' ? brief.events.length : brief.notes.length) : 0;
+  // The first note or event opens by default, like the first conversation does.
+  useEffect(() => { if (view === 'notes' && !noteSel && brief?.notes[0]) setNoteSel(brief.notes[0]); if (view === 'calendar' && !eventSel && brief?.events[0]) setEventSel(brief.events[0]); }, [view, brief]); // eslint-disable-line react-hooks/exhaustive-deps
   const canFile = sel?.kind === 'chat' && n.me?.permissions.files !== false && ['telegram-bot', 'discord'].includes(sel.provider);
 
   return (
@@ -319,7 +406,17 @@ export function Workspace() {
           {sel && (
             <section className="g thread" aria-label={`Conversation with ${sel.title}`}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}><h2 style={{ fontWeight: 500, fontSize: 20 }}>{sel.title}</h2><span className="k">{sel.source}</span></div>
-              {sel.kind === 'mail' && <p className="bubble">{sel.subject}</p>}
+              {sel.kind === 'mail' && (
+                <article className="letter" aria-label="Email">
+                  <div className="letter-head"><b>{sel.subject || '(no subject)'}</b>{mail.data?.date && <span className="k">{when(mail.data.date)}</span>}</div>
+                  {mail.data && <span className="sub">From {mail.data.from}{mail.data.to ? ` · to ${mail.data.to}` : ''}</span>}
+                  {mail.loading && <p className="sub">Opening…</p>}
+                  {mail.error && <p className="err" role="alert">{mail.error}</p>}
+                  {mail.data && <div className="letter-body">{mail.data.text || '(This email has no text.)'}</div>}
+                  {mail.data?.url && <a className="bt ext" href={mail.data.url} target="_blank" rel="noopener noreferrer">Open in {sel.source} <Icon name="external" size={16} /></a>}
+                </article>
+              )}
+              {sel.kind === 'mail' && mailSent.map((b, i) => <div key={i} className="bubble out">{b}</div>)}
               {thread.slice(-6).map((m, i) => (
                 <div key={m.id + i} className={'bubble' + (m.direction === 'out' ? ' out' : '')}>
                   {m.body}
@@ -354,18 +451,51 @@ export function Workspace() {
             </section>
           )}
         </>}
-        {view === 'calendar' && (
-          <section className="g" aria-label="Today" style={{ padding: '8px 28px' }}>
-            {brief && brief.events.length === 0 && <p className="sub" style={{ padding: '18px 0' }}>No events today, or no calendar is linked yet.</p>}
-            {brief?.events.map((e, i) => <div key={i} className="big" style={{ gridTemplateColumns: '96px minmax(0,1fr) auto' }}><span style={{ font: "500 20px 'JetBrains Mono', monospace" }}>{e.time}</span><span style={{ fontSize: 24, fontWeight: 500 }}>{e.title}</span><span className="k">{e.source}</span></div>)}
+        {view === 'calendar' && <>
+          <section className="g list" aria-label="Today">
+            {brief && brief.events.length === 0 && <p className="sub" style={{ padding: 14 }}>No events today, or no calendar is linked yet.</p>}
+            {!brief && <p className="sub" style={{ padding: 14 }}>Loading…</p>}
+            {brief?.events.map((e) => {
+              const on = eventSel?.id === e.id && eventSel.provider === e.provider;
+              return <button key={e.provider + e.id} className={'item ev' + (on ? ' on' : '')} onClick={() => setEventSel(e)} aria-pressed={on}><span className="t">{e.time}</span><b>{e.title}</b><span className="k">{e.source}</span></button>;
+            })}
           </section>
-        )}
-        {view === 'notes' && (
-          <section className="g" aria-label="Recent notes" style={{ padding: '8px 28px' }}>
-            {brief && brief.notes.length === 0 && <p className="sub" style={{ padding: '18px 0' }}>No notes yet. Link Notion or OneNote in Connections.</p>}
-            {brief?.notes.map((e, i) => <div key={i} className="big" style={{ gridTemplateColumns: 'minmax(0,1fr) auto' }}><span style={{ fontSize: 24, fontWeight: 500 }}>{e.title}</span><span className="k">{e.source}</span></div>)}
+          {eventSel && (
+            <section className="g thread" aria-label={eventSel.title}>
+              <div className="doc-head"><h2>{event.data?.title ?? eventSel.title}</h2><span className="k">{eventSel.source}</span></div>
+              {event.loading && <p className="sub">Opening…</p>}
+              {event.error && <p className="err" role="alert">{event.error}</p>}
+              {event.data && <dl className="facts">
+                <dt className="k">When</dt><dd>{event.data.allDay ? 'All day' : `${when(event.data.start)}${event.data.end ? ' – ' + clock(event.data.end) : ''}`}</dd>
+                {event.data.location && <><dt className="k">Where</dt><dd>{event.data.location}</dd></>}
+                {!!event.data.attendees?.length && <><dt className="k">With</dt><dd>{event.data.attendees.join(', ')}</dd></>}
+              </dl>}
+              {event.data?.description && <div className="letter-body">{event.data.description}</div>}
+              {event.data?.url && <a className="bt ext" href={event.data.url} target="_blank" rel="noopener noreferrer">Open in {eventSel.source} <Icon name="external" size={16} /></a>}
+            </section>
+          )}
+        </>}
+        {view === 'notes' && <>
+          <section className="g list" aria-label="Recent notes">
+            {brief && brief.notes.length === 0 && <p className="sub" style={{ padding: 14 }}>No notes yet. Link Notion or OneNote in Connections.</p>}
+            {!brief && <p className="sub" style={{ padding: 14 }}>Loading…</p>}
+            {brief?.notes.map((e) => {
+              const on = noteSel?.id === e.id && noteSel.provider === e.provider;
+              return <button key={e.provider + e.id} className={'item' + (on ? ' on' : '')} onClick={() => setNoteSel(e)} aria-pressed={on}><b>{e.title}</b><span className="k">{e.source}</span></button>;
+            })}
           </section>
-        )}
+          {noteSel && (
+            <section className="g thread" aria-label={noteSel.title}>
+              <div className="doc-head"><h2>{note.data?.title ?? noteSel.title}</h2><span className="k">{noteSel.source}</span></div>
+              {(note.data?.edited ?? noteSel.edited) && <span className="sub">Edited {when((note.data?.edited ?? noteSel.edited)!)}</span>}
+              {note.loading && <p className="sub">Opening…</p>}
+              {note.error && <p className="err" role="alert">{note.error}</p>}
+              {note.data && (note.data.blocks.length ? <Blocks blocks={note.data.blocks} /> : <p className="sub">This page is empty.</p>)}
+              {note.data?.more && <p className="sub">The page continues; open it to read the rest.</p>}
+              {note.data?.url && <a className="bt ext" href={note.data.url} target="_blank" rel="noopener noreferrer">Open in {noteSel.source} <Icon name="external" size={16} /></a>}
+            </section>
+          )}
+        </>}
       </div>
     </div>
   );
