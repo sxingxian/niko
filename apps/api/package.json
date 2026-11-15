@@ -12,7 +12,7 @@
     "@niko/db": "*",
     "@niko/shared": "*",
     "@simplewebauthn/server": "^13.0.0",
-    "drizzle-orm": "^0.44.0",
+    "drizzle-orm": "^0.45.4",
     "hono": "^4.6.0",
     "ical.js": "2.2.1",
     "imapflow": "2.11.0",
