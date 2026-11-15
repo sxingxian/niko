@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { spots, startCore, type CoreHandle, type CoreMode } from './core';
+import { spots, startCore, startRing, type CoreHandle, type CoreMode } from './core';
 
 export * from './core';
 
@@ -64,13 +64,17 @@ export function Switch({ on, onChange, label, disabled }: { on: boolean; onChang
 /** The live particle sphere. `shift` slides it sideways (used when panels open). */
 /** The particle sphere. `pad` widens the canvas on both sides so particles can drift sideways (`shift`) without being cut off.
  * `spot` names it for the screen-to-screen transition. */
-export function ParticleCore({ size, mode = 'idle', shift = 0, particles, style, pad = 0, spot }: { size: number | string; mode?: CoreMode; shift?: number; particles?: number; style?: React.CSSProperties; pad?: number; spot?: string }) {
+export function ParticleCore({ size, mode = 'idle', shift = 0, particles, style, pad = 0, spot, ring }: { size: number | string; mode?: CoreMode; shift?: number; particles?: number; style?: React.CSSProperties; pad?: number; spot?: string; ring?: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null);
+  const ringRef = useRef<HTMLCanvasElement>(null);
   const handle = useRef<CoreHandle | null>(null);
   useEffect(() => {
     if (!ref.current) return;
-    handle.current = startCore(ref.current, { particles, mode });
-    return () => handle.current?.stop();
+    const core = startCore(ref.current, { particles, mode });
+    handle.current = core;
+    // The ring of ticks (workspace only) reads the core's state each frame, so the two move together.
+    const r = ring && ringRef.current ? startRing(ringRef.current, core) : null;
+    return () => { r?.stop(); core.stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [particles]);
   useEffect(() => { handle.current?.setMode(mode); }, [mode]);
@@ -82,7 +86,8 @@ export function ParticleCore({ size, mode = 'idle', shift = 0, particles, style,
     return () => { if (spots.get(spot) === el) spots.delete(spot); };
   }, [spot]);
   const w = pad ? `calc(${typeof size === 'number' ? size + 'px' : size} + ${2 * pad}px)` : size;
-  return <canvas ref={ref} data-core="1" role="img" aria-label="Niko particle core" style={{ width: w, height: size, display: 'block', flex: 'none', ...style }} />;
+  const core = <canvas ref={ref} data-core="1" role="img" aria-label="Niko particle core" style={{ width: w, height: size, display: 'block', flex: 'none', ...style }} />;
+  return ring ? <><canvas ref={ringRef} className="ring" aria-hidden="true" />{core}</> : core;
 }
 
 export function PasswordField({ label, value, onChange, autoComplete, meter }: { label: string; value: string; onChange: (v: string) => void; autoComplete: string; meter?: boolean }) {

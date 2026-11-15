@@ -206,7 +206,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     const screen = screenFor(text);
     if (screen) { goTo(screen); return; }
     // 3. Everything else goes to the brain.
-    setMode('listening'); setLabel('Thinking'); setLine(`“${text}”`);
+    setMode('thinking'); setLabel('Thinking'); setLine(`“${text}”`);
     try {
       const r = await api<{ reply: string; brief: Brief }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset() } });
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.

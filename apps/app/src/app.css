@@ -132,7 +132,7 @@
 .corewrap { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 16px; min-width: 0; padding-top: 14px; }
 .ringbox { position: relative; width: min(600px, 100%); aspect-ratio: 1; flex: none; }
 .ringbox svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-.ringbox .ticks { animation: spin 90s linear infinite; transform-origin: 50% 50%; }
+.ringbox canvas.ring { left: -10%; top: -10%; width: 120%; height: 120%; pointer-events: none; }
 .ringbox .count { transform: rotate(-90deg); transition: opacity .4s; }
 .ringbox canvas { position: absolute; left: 6.6%; top: 6.6%; }
 .ringbox .sweep { transform: rotate(-90deg); opacity: 0; }
@@ -439,12 +439,12 @@ dialog.sheet.wide { width: min(580px, calc(100% - 24px)); }
 /* Leaving: the particles are taken over by the flow at once; everything else fades in --el. */
 .route.leaving canvas[data-core] { opacity: 0 !important; }
 .route.leaving .home > :not(.bg):not(.stage), .route.leaving .home .caption { animation: fadeAway var(--el) ease both; }
-.route.leaving .ws .head, .route.leaving .ws .rail, .route.leaving .ws .status, .route.leaving .ws .ws-mic, .route.leaving .ws .ringbox svg { animation: fadeAway var(--el) ease both; }
+.route.leaving .ws .head, .route.leaving .ws .rail, .route.leaving .ws .status, .route.leaving .ws .ws-mic, .route.leaving .ws .ringbox svg, .route.leaving .ws canvas.ring { animation: fadeAway var(--el) ease both; }
 .route.leaving .ws .content > * { transform-origin: left center; animation: swingOut var(--el) cubic-bezier(.4,0,1,1) both; }
 
 /* Arriving in the workspace: the ring is drawn as its particles land, then the cards swing in. */
 .route.flow-in .ws canvas[data-core] { animation: fadeIn calc(var(--D) * .12) ease calc(var(--D) * .9 - var(--el)) both; }
-.route.flow-in .ws .ticks .outer { animation: fadeIn calc(var(--D) * .22) linear calc(var(--D) * .7 - var(--el)) both; }
+.route.flow-in .ws canvas.ring { animation: fadeIn calc(var(--D) * .22) linear calc(var(--D) * .7 - var(--el)) both; }
 .route.flow-in .ws .ticks .inner { stroke-dasharray: 100; animation: drawRing calc(var(--D) * .32) cubic-bezier(.4,0,.2,1) calc(var(--D) * .58 - var(--el)) both; }
 .route.flow-in .ws .sweep { animation: sweepRound calc(var(--D) * .34) cubic-bezier(.4,0,.2,1) calc(var(--D) * .58 - var(--el)) both; }
 .route.flow-in .ws .sweep circle { animation: sweepRound calc(var(--D) * .34) cubic-bezier(.4,0,.2,1) calc(var(--D) * .58 - var(--el)) both; }

@@ -409,19 +409,20 @@ export function Workspace() {
       <Dock className="rail" />
       <div className="corewrap">
         <div className="ringbox" ref={ringRef}>
-          <svg className="ticks" viewBox="0 0 600 600" aria-hidden="true"><circle className="outer" cx="300" cy="300" r="292" fill="none" stroke="rgba(255,255,255,.35)" strokeWidth="6" strokeDasharray="1.5 13.8" /><circle className="inner" cx="300" cy="300" r="276" fill="none" stroke="rgba(255,255,255,.14)" pathLength={100} /></svg>
+          {/* The plain inner line; the ticks and all the ring's movement are drawn by the core's ring canvas. */}
+          <svg className="ticks" viewBox="0 0 600 600" aria-hidden="true"><circle className="inner" cx="300" cy="300" r="276" fill="none" stroke="rgba(255,255,255,.14)" pathLength={100} /></svg>
           <svg className="sweep" viewBox="0 0 600 600" aria-hidden="true"><circle cx="300" cy="300" r="292" fill="none" strokeWidth="2.5" strokeLinecap="round" pathLength={100} /></svg>
           <svg className="count" viewBox="0 0 600 600" aria-hidden="true" style={{ opacity: counting ? 1 : 0 }}>
             <circle cx="300" cy="300" r="262" fill="none" stroke="rgba(255,255,255,.18)" strokeWidth="4" />
             <circle cx="300" cy="300" r="262" fill="none" stroke="#fff" strokeWidth="4" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={counting ? C * (1 - send.left / SEND_COUNTDOWN_SECONDS) : C} style={{ transition: 'stroke-dashoffset 1s linear' }} />
           </svg>
-          <ParticleCore size="86.8%" mode={n.mode} particles={1000} spot="ws" />
+          <ParticleCore size="86.8%" mode={n.mode} particles={1000} spot="ws" ring />
           {counting && <div className="num" role="status">{send.left}</div>}
         </div>
         <div className="status"><span className="k accent" role="status">{n.label}</span><span>{n.line}</span></div>
         <div className="ws-mic">
           <button className={'micbtn' + (n.mode === 'listening' ? ' live' : '')} onClick={n.toggleMic} aria-label="Talk to Niko"><Icon name="mic" /></button>
-          {(n.mode === 'speaking' || n.mode === 'listening') && <button className="ib g" onClick={n.stop} aria-label="Stop"><Icon name="stop" /></button>}
+          {n.mode !== 'idle' && <button className="ib g" onClick={n.stop} aria-label="Stop"><Icon name="stop" /></button>}
         </div>
       </div>
 
