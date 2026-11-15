@@ -195,7 +195,9 @@
   .ws .head { left: 16px; }
   .rail { margin-top: 0; }
   .content { overflow: visible; }
-  .rail { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); flex-direction: row; z-index: 5; background: rgba(12,16,24,.8); }
+  /* Centred with `translate`, not `transform`: entrance animations (hudPanel) animate `transform`, which would
+     otherwise replace the centring and push the bar half off the screen until they finish. */
+  .rail { position: fixed; left: 50%; bottom: 14px; translate: -50% 0; flex-direction: row; z-index: 5; background: rgba(12,16,24,.8); }
   .ringbox { width: 220px; }
   .status { min-height: 50px; }
   .status span:last-child { font-size: 18px; }
