@@ -4,7 +4,7 @@ import { Link, NavLink, useLocation } from 'react-router-dom';
 import { SEND_COUNTDOWN_SECONDS, voiceName, voiceOrder } from '@niko/shared';
 import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
 import { useNiko } from '../niko';
-import { pickItem, rewriteRequest, screenFor } from '../speech';
+import { pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
 import { isStacked } from '../flow';
 import type { Brief, BriefPart, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
 
@@ -419,6 +419,7 @@ export function Workspace() {
     n.setCommandHandler((p) => {
       if (/^(send|send it|send that)\b/.test(p) && view === 'inbox') { void start('voice'); return true; }
       if (/^(cancel|stop|don't send)\b/.test(p) && send.phase === 'counting') { void cancel(); return true; }
+      if (scrollRequest(p)) return false; // "scroll down", "show me more", "next page": scrolling, handled by Niko
       const ask = view === 'inbox' && sel && send.phase === 'draft' ? rewriteRequest(p) : null;
       if (ask) { void rewrite(ask, true); return true; }
       // "Open Testing 123021", "open the second one", "next": an item in this screen's list. A screen's name

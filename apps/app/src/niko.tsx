@@ -2,7 +2,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { isWeatherQuestion, voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
-import { isEcho, matchWake, screenFor, screenName, takeItemTag, takeScreenTag } from './speech';
+import { isEcho, matchWake, screenFor, screenName, scrollRequest, takeItemTag, takeScreenTag } from './speech';
+import { scrollScreen } from './scroll';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, setAppearance, type CoreMode } from '@niko/ui';
 
@@ -232,10 +233,20 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     setReply(null);
     // 1. Phrases a page has claimed (send it / cancel).
     if (handler.current?.(lower)) return;
-    // 2. Changing screen by voice: "switch to calendar", "can you open my notes", "back to home", "go back".
+    // 2. Scrolling: "scroll down", "page up", "back to the top", "keep scrolling".
+    const way = scrollRequest(text);
+    if (way) {
+      const moved = scrollScreen(way);
+      setMode('speaking'); setLabel('Heard');
+      setLine(moved ? { down: 'Scrolling down.', up: 'Scrolling up.', top: 'Back to the top.', bottom: 'Down to the bottom.' }[way]
+        : way === 'down' || way === 'bottom' ? 'That’s the bottom of the page.' : 'That’s the top of the page.');
+      window.setTimeout(() => (SR && wantRec.current ? listenForFollowUp() : idle()), 900);
+      return;
+    }
+    // 3. Changing screen by voice: "switch to calendar", "can you open my notes", "back to home", "go back".
     const screen = screenFor(text);
     if (screen) { goTo(screen); return; }
-    // 3. Everything else goes to the brain.
+    // 4. Everything else goes to the brain.
     setMode('thinking'); setLabel('Thinking'); setLine(`“${text}”`);
     try {
       // A weather question carries where this device is, rounded to about 1 km, when a weather service is connected.
@@ -252,7 +263,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       if (e?.data?.brief) setBrief(e.data.brief);
       setReply(e.message); setMode('idle'); setLabel('Problem'); setLine(e.message);
     }
-  }, [navigate, idle, say, goTo]);
+  }, [navigate, idle, say, goTo, listenForFollowUp, SR]);
 
   // Speech recognition: runs while the app is open and the mic is allowed.
   // Interim results let the core react the moment "Niko" is heard; the command itself is taken from the final text.

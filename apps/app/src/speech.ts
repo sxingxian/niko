@@ -134,3 +134,18 @@ export function rewriteRequest(raw: string): string | null {
   if (/^(please\s+)?(say|tell (him|her|them)|reply (that|saying|with)|answer (that|saying|with)|add (that|a line|something)|mention|include|remove|drop|take out|don't mention)\b/.test(p)) return raw.trim();
   return null;
 }
+
+/**
+ * A request to scroll the screen: "scroll down", "page up", "go down a bit", "back to the top", "scroll to the
+ * bottom", "keep scrolling", "show me more". Returns which way, or null for anything else.
+ */
+export function scrollRequest(raw: string): 'down' | 'up' | 'top' | 'bottom' | null {
+  const p = raw.toLowerCase().replace(/^(niko|nico|hey niko)[,\s]+/, '').replace(/^(please|can you|could you|would you)\s+/, '').replace(/[.!?]+$/, '').replace(/\s+please$/, '').trim();
+  if (!p || p.length > 60) return null;
+  const tail = '(\\s+(a bit|a little|some|more|again|further|the page|the list|the screen|this|it))*';
+  if (new RegExp(`^((scroll|go|jump|take me|move)\\s+)?(back\\s+)?(up\\s+)?to the (very\\s+)?(top|start|beginning)${tail}$`).test(p)) return 'top';
+  if (new RegExp(`^((scroll|go|jump|take me|move)\\s+)?(down\\s+)?to the (very\\s+)?(bottom|end)${tail}$`).test(p)) return 'bottom';
+  if (new RegExp(`^(scroll|page|go|move)\\s+(the page\\s+|the list\\s+|it\\s+)?(down|downwards)${tail}$|^(down|further down|scroll|keep scrolling|scroll more|show( me)? more|next page|more please)${tail}$`).test(p)) return 'down';
+  if (new RegExp(`^(scroll|page|go|move)\\s+(the page\\s+|the list\\s+|it\\s+)?(back\\s+)?(up|upwards)${tail}$|^(up|back up|further up|previous page)${tail}$`).test(p)) return 'up';
+  return null;
+}

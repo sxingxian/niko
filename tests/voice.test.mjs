@@ -56,3 +56,12 @@ for (const p of ['rewrite the draft', 'Niko, rewrite it', 're-write that', 'try 
   ok(rewriteRequest(p) !== null, `asks to change the draft: "${p}"`);
 for (const p of ['what is the weather tomorrow', 'open my calendar', 'change to notes', 'send it', 'cancel', 'what time is my next meeting', 'open the second one', 'switch to inbox', 'more about the weather'])
   ok(rewriteRequest(p) === null, `not a draft change: "${p}"`);
+
+// ---- Scrolling by voice
+import { scrollRequest } from '../apps/app/src/speech.ts';
+const sc = { 'scroll down': 'down', 'Niko, scroll down a bit': 'down', 'please scroll down': 'down', 'page down': 'down', 'go down': 'down', 'keep scrolling': 'down', 'show me more': 'down', 'down': 'down', 'next page': 'down', 'scroll the page down': 'down', 'can you scroll down please': 'down',
+  'scroll up': 'up', 'scroll back up': 'up', 'page up': 'up', 'go up a little': 'up', 'back up': 'up',
+  'back to the top': 'top', 'scroll to the top': 'top', 'go to the top': 'top', 'scroll to the bottom': 'bottom', 'go to the end': 'bottom', 'jump to the bottom': 'bottom' };
+for (const [p, want] of Object.entries(sc)) ok(scrollRequest(p) === want, `scrolls ${want}: "${p}"`);
+for (const p of ['what is the weather', 'open my calendar', 'make it shorter', 'send it', 'open the second one', 'what is up', 'go to calendar', 'next'])
+  ok(scrollRequest(p) === null, `not scrolling: "${p}"`);
