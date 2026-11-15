@@ -1,9 +1,10 @@
 // Shared Niko state: who is signed in, and the voice loop (wake word, commands, speech).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { isWeatherQuestion, voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
+import { hearOrder, isWeatherQuestion, voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
 import { isEcho, matchWake, screenFor, screenName, scrollRequest, takeItemTag, takeScreenTag } from './speech';
 import { scrollScreen } from './scroll';
+import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, setAppearance, type CoreMode } from '@niko/ui';
 
@@ -109,6 +110,10 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const speaking = useRef(false); // while Niko talks, what the mic hears is Niko itself, so it is ignored
   const followUp = useRef<number | undefined>(undefined);
   const startRecRef = useRef<() => void>(() => undefined);
+  // Speech in through a service (Voice → Listening): one request is recorded and sent, instead of the device's own recognition.
+  const capture = useRef<Capture | null>(null);
+  const askRef = useRef<(t: string) => void>(() => undefined);
+  const apiHearing = () => hearOrder(meRef.current?.engine as EnginePrefs | undefined).length > 0 && captureSupported();
   // Niko's last line and when it finished, so its own voice heard late through the mic is never taken as a question.
   const lastSaid = useRef<{ text: string; until: number }>({ text: '', until: 0 });
   const ECHO_MS = 6000;
@@ -137,6 +142,37 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, [SR]);
   useEffect(() => { if (me) idle(); }, [me, idle]);
 
+  /** Records one request and has a speech-to-text service turn it into words. If none of them can, the device's own
+   * recognition takes over for the next try. The device recogniser lets go of the mic meanwhile, and comes back after. */
+  const listenByApi = useCallback((waitMs: number) => {
+    capture.current?.cancel();
+    muteMic();
+    active.current = false;
+    setMode('listening'); setLabel('Listening'); setLine('Go ahead.');
+    const cap = captureUtterance({ waitMs, onSpeech: () => setLine('Listening…') });
+    capture.current = cap;
+    void (async () => {
+      const wav = await cap.done;
+      if (capture.current !== cap) return;
+      capture.current = null;
+      if (!wav) { idle(); unmuteMic(); return; }
+      setMode('thinking'); setLabel('Hearing'); setLine('Turning that into words…');
+      try {
+        const r = await transcribe(wav);
+        unmuteMic();
+        if (!r.text.trim()) { setMode('idle'); setLabel('Didn’t catch that'); setLine('Say it again, or tap the mic.'); return; }
+        askRef.current(r.text.trim());
+      } catch (e) {
+        if (SR) {
+          // None of the services could hear it: the device's own recognition listens for the next try.
+          setVoiceProblem(`Speech in: ${(e as Error).message}`);
+          active.current = true; wantRec.current = true; unmuteMic();
+          setMode('listening'); setLabel('Listening'); setLine('That didn’t come through. Say it again.');
+        } else { unmuteMic(); setMode('idle'); setLabel('Problem'); setLine((e as Error).message); }
+      }
+    })();
+  }, [SR, idle]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Each line Niko says gets a number; anything still arriving for an older line is dropped.
   const speechId = useRef(0);
   const current = useRef<{ stop: () => void } | null>(null);
@@ -153,7 +189,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const FOLLOW_UP_MS = 9000;
   const listenForFollowUp = useCallback(() => {
     speaking.current = false;
-    if (!SR || !wantRec.current) return idle();
+    if (!wantRec.current) return idle();
+    if (apiHearing()) { endFollowUp(); return listenByApi(FOLLOW_UP_MS); }
+    if (!SR) return idle();
     active.current = true;
     setMode('listening'); setLabel('Listening'); setLine('Go on, or say “that’s all”.');
     endFollowUp();
@@ -163,7 +201,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   /** Speaks with the first voice in the user's order that works, ending with the device voice. */
   const say = useCallback((text: string) => {
     const engine = meRef.current?.engine as EnginePrefs | undefined;
-    stopSpeech(); endFollowUp();
+    stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null;
     const id = speechId.current;
     const live = () => id === speechId.current;
     // When Niko has finished: a short pause (the speaker's last sound fades), then the mic comes back for the follow-up.
@@ -264,11 +302,12 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       setReply(e.message); setMode('idle'); setLabel('Problem'); setLine(e.message);
     }
   }, [navigate, idle, say, goTo, listenForFollowUp, SR]);
+  askRef.current = (t: string) => { void ask(t); };
 
   // Speech recognition: runs while the app is open and the mic is allowed.
   // Interim results let the core react the moment "Niko" is heard; the command itself is taken from the final text.
   const startRec = useCallback(() => {
-    if (!SR || rec.current || speaking.current) return;
+    if (!SR || rec.current || speaking.current || capture.current) return;
     const r = new SR();
     r.continuous = true; r.interimResults = true; r.maxAlternatives = 3; r.lang = navigator.language || 'en-US';
     r.onresult = (ev: any) => {
@@ -286,6 +325,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         }
         if (hit) {
           if (hit.command) { active.current = false; void ask(hit.command); }
+          else if (apiHearing()) listenByApi(8000); // the request itself goes to the speech-in service
           else { active.current = true; setMode('listening'); setLabel('Listening'); setLine('Go ahead.'); }
         } else if (active.current && alts[0]) { active.current = false; endFollowUp(); void ask(alts[0]); }
       }
@@ -316,16 +356,17 @@ export function NikoProvider({ children }: { children: ReactNode }) {
 
   const toggleMic = useCallback(() => {
     stopSpeech();
+    if (apiHearing()) { endFollowUp(); wantRec.current = true; listenByApi(8000); return; }
     if (!SR) { setLabel('No microphone'); setLine('This browser cannot listen. Type instead.'); return; }
     endFollowUp();
     wantRec.current = true; startRec();
     active.current = true; setMode('listening'); setLabel('Listening'); setLine('Go ahead.');
   }, [SR, startRec]);
 
-  const stop = useCallback(() => { stopSpeech(); endFollowUp(); active.current = false; idle(); }, [idle]);
+  const stop = useCallback(() => { stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; active.current = false; idle(); unmuteMic(); }, [idle]);
 
   const value = useMemo<NikoState>(() => ({
-    me, refreshMe, mode, label, line, reply, brief, micOn, voiceSupported: !!SR, toggleMic, stop, ask,
+    me, refreshMe, mode, label, line, reply, brief, micOn, voiceSupported: !!SR || (hearOrder(me?.engine as EnginePrefs | undefined).length > 0 && captureSupported()), toggleMic, stop, ask,
     dismissReply: () => setReply(null),
     setCommandHandler: (fn) => { handler.current = fn; },
     say,

@@ -183,6 +183,33 @@ export const VOICE_PROVIDERS: { id: string; provider: VoiceProvider; name: strin
   { id: 'cartesia', provider: 'cartesia', name: 'Cartesia', models: ['sonic-3.5', 'sonic-3', 'sonic-latest'], note: 'Very fast, natural voices, with a free monthly allowance.' },
   { id: 'other', provider: 'openai', name: 'Other (OpenAI-compatible)', note: 'Any speech service with an OpenAI-compatible API, such as Groq or a hosted Kokoro.' },
 ];
+/** Where speech in (your voice, turned into text) can come from: Cloudflare's own, or any number of the user's
+ * speech-to-text keys ("skey:<id>"). The device's own speech recognition is always last, and always listens for "Niko". */
+export type HearSource = 'workers' | `skey:${string}`;
+export const HEAR_ENTRY = /^(workers|skey:[a-z0-9]{1,16})$/;
+export type HearProvider = 'openai' | 'deepgram' | 'elevenlabs' | 'fishaudio' | 'google' | 'azure';
+export interface HearKeyInfo { id: string; label: string; provider: HearProvider; model: string; baseUrl: string; region: string }
+export const HEAR_PROVIDERS: { id: string; provider: HearProvider; name: string; baseUrl?: string; models?: string[]; note: string }[] = [
+  { id: 'openai', provider: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'whisper-1'], note: 'Accurate in many languages, paid per minute.' },
+  { id: 'groq', provider: 'openai', name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], note: 'Very fast Whisper, with a free allowance.' },
+  { id: 'deepgram', provider: 'deepgram', name: 'Deepgram', models: ['nova-3', 'nova-2'], note: 'Fast and accurate, with free credit when you sign up.' },
+  { id: 'elevenlabs', provider: 'elevenlabs', name: 'ElevenLabs', models: ['scribe_v1'], note: 'Scribe, accurate in many languages. Needs a paid plan from cloud servers such as Niko’s.' },
+  { id: 'fishaudio', provider: 'fishaudio', name: 'Fish Audio', note: 'Fish Audio’s speech recognition, with the same key as its voices.' },
+  { id: 'google', provider: 'google', name: 'Google Cloud', models: ['latest_short', 'default'], note: 'Uses an API key with the Cloud Speech-to-Text API enabled; a free monthly allowance applies.' },
+  { id: 'azure', provider: 'azure', name: 'Microsoft Azure', note: 'Uses a Speech resource key and its region; a free monthly allowance applies.' },
+  { id: 'other', provider: 'openai', name: 'Other (OpenAI-compatible)', note: 'Any speech-to-text service with an OpenAI-compatible API.' },
+];
+export function hearPresetOf(k: { provider: HearProvider; baseUrl: string }): string {
+  if (k.provider !== 'openai') return k.provider;
+  const b = k.baseUrl.trim().replace(/\/+$/, '').toLowerCase();
+  return HEAR_PROVIDERS.find((p) => p.baseUrl && p.baseUrl.toLowerCase() === b)?.id ?? 'other';
+}
+export const MAX_HEAR_KEYS = 10;
+/** The speech-in services to try, in order, before the device's own recognition. */
+export function hearOrder(e: Partial<EnginePrefs> | undefined): HearSource[] {
+  return Array.isArray(e?.hears) ? [...new Set(e!.hears.map(String).filter((v) => HEAR_ENTRY.test(v)))] as HearSource[] : [];
+}
+
 export function voicePresetOf(k: { provider: VoiceProvider; baseUrl: string }): string {
   if (k.provider !== 'openai') return k.provider;
   return k.baseUrl.trim().replace(/\/+$/, '').toLowerCase() === 'https://api.openai.com/v1' ? 'openai' : 'other';
@@ -243,6 +270,9 @@ export interface EnginePrefs {
   voices?: VoiceSource[];
   /** Voices being skipped for now (usage limit, refused key, no answer), and until when. Set by the server only. */
   voiceRest?: Record<string, BrainRest>;
+  /** Speech-in services to try, in order; the device's own recognition comes after them. */
+  hears?: HearSource[];
+  hearRest?: Record<string, BrainRest>;
   workersVoice?: string;
   kokoroVoice?: string;
   wake: boolean; onlyMyVoice: boolean; fallback: boolean; listen: 'device';

@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
-import { aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, isWeatherQuestion, PAGE_SIZES, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
+import { aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, isWeatherQuestion, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
 import { APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -9,6 +9,7 @@ import { audit, requireUser, tooMany } from '../lib/session';
 import { eventDetail, mailDetail, noteDetail } from '../details';
 import { BrainFail, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveKeys, testEntry, think } from '../brains';
 import { cleanWhere, forecastText, geocode, stripWeatherTags, weatherTags } from '../weather';
+import { audioProblem, defaultHearLabel, hear, HEAR_PROVIDERS_LIST, hearKeyInfo, hearKeyProblem, loadHearKeys, MAX_AUDIO_BYTES, saveHearKeys, type HearKey } from '../hears';
 import { defaultVoiceLabel, listVoices, loadVoiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
 import { icalCheck, normalizeLink } from '../calendarlink';
 import { IMAP_PROVIDERS, imapCheck, isImapProvider } from '../mailbox';
@@ -56,6 +57,12 @@ app.patch('/me', async (c) => {
       brains = [...new Set(e.brains.map(String).filter((x: string) => BRAIN_ENTRY.test(x) && (!x.startsWith('key:') || saved.has(x))))].slice(0, MAX_AI_KEYS + 2) as BrainEntry[];
       if (!brains.length) return c.json({ error: 'Switch on at least one brain.' }, 400);
     }
+    // The speech-in order may only name Cloudflare and speech-in keys this account has saved.
+    let hears: HearSource[] | null = null;
+    if (Array.isArray(e.hears)) {
+      const saved = new Set((await loadHearKeys(c.env, c.get('db'), u.id)).map((k) => `skey:${k.id}`));
+      hears = hearOrder({ hears: e.hears }).filter((x) => !x.startsWith('skey:') || saved.has(x)).slice(0, MAX_HEAR_KEYS + 1);
+    }
     // The voice order may only name the built-in voices and voice keys this account has saved.
     let voices: VoiceSource[] | null = null;
     if (Array.isArray(e.voices)) {
@@ -69,6 +76,7 @@ app.patch('/me', async (c) => {
       ...(e.model ? { model: e.model === 'large' ? 'large' : 'fast' } : {}),
       ...(e.voice ? { voice: e.voice === 'elevenlabs' ? 'elevenlabs' : 'device' } : {}),
       ...(voices ? { voices } : {}),
+      ...(hears ? { hears } : {}),
       ...(typeof e.workersVoice === 'string' && WORKERS_VOICES.some((v) => v.id === e.workersVoice) ? { workersVoice: e.workersVoice } : {}),
       ...(typeof e.kokoroVoice === 'string' && KOKORO_VOICES.some((v) => v.id === e.kokoroVoice) ? { kokoroVoice: e.kokoroVoice } : {}),
       ...(typeof e.wake === 'boolean' ? { wake: e.wake } : {}),
@@ -734,6 +742,92 @@ app.post('/voice/keys/voices', async (c) => {
   catch (e) {
     const f = e instanceof BrainFail ? e : null;
     return c.json({ error: f?.why === 'refused' ? `It refused the key${f.detail ? `: ${f.detail}` : '.'}` : `The voices could not be listed${f?.detail ? `: ${f.detail}` : '.'}` }, 502);
+  }
+});
+
+// ---------------------------------------------------------------- speech in (the Voice screen's Listening list)
+app.get('/voice/hear-keys', async (c) => {
+  const keys = await loadHearKeys(c.env, c.get('db'), c.get('user').id);
+  return c.json({ keys: keys.map(hearKeyInfo) });
+});
+function hearKeyFrom(b: any): Omit<HearKey, 'id'> {
+  const provider = HEAR_PROVIDERS_LIST.find((p) => p === b?.provider) ?? 'openai';
+  return { provider, label: clip(b?.label, 40), model: clip(b?.model, 80), baseUrl: provider === 'openai' ? clip(b?.baseUrl, 500) : '', region: provider === 'azure' ? clip(b?.region, 30).toLowerCase() : '', apiKey: clip(b?.apiKey, 4000) };
+}
+/** A saved key is used only with the same service and (for OpenAI-compatible ones) the same address. */
+function savedHearKey(prior: HearKey | undefined, k: { provider: string; baseUrl: string }): string {
+  if (!prior || prior.provider !== k.provider) return '';
+  if (k.provider === 'openai' && !sameOrigin(prior.baseUrl, k.baseUrl)) return '';
+  return prior.apiKey;
+}
+app.post('/voice/hear-keys', async (c) => {
+  const b = await c.req.json<any>().catch(() => ({}));
+  const u = c.get('user'), db = c.get('db');
+  const keys = await loadHearKeys(c.env, db, u.id);
+  const k = hearKeyFrom(b);
+  const problem = hearKeyProblem(k);
+  if (problem) return c.json({ error: problem }, 400);
+  const prior = typeof b.id === 'string' ? keys.find((x) => x.id === b.id) : undefined;
+  if (b.id && !prior) return c.json({ error: 'That key is no longer saved.' }, 404);
+  const apiKey = k.apiKey || savedHearKey(prior, k);
+  if (!apiKey) return c.json({ error: prior ? 'Paste the API key again when you change the service or its address.' : 'Paste the API key.' }, 400);
+  if (!prior && keys.length >= MAX_HEAR_KEYS) return c.json({ error: `Up to ${MAX_HEAR_KEYS} speech-in keys can be saved.` }, 400);
+  let id = prior?.id ?? '';
+  while (!id || (!prior && keys.some((x) => x.id === id))) id = Array.from(crypto.getRandomValues(new Uint8Array(8)), (n) => 'abcdefghijklmnopqrstuvwxyz0123456789'[n % 36]).join('');
+  const key: HearKey = { ...k, id, apiKey, label: k.label || defaultHearLabel(k) };
+  await saveHearKeys(c.env, db, u.id, prior ? keys.map((x) => (x.id === id ? key : x)) : [...keys, key]);
+  const engine = u.engine as unknown as EnginePrefs;
+  if (engine.hearRest?.[`skey:${id}`]) { const hearRest = { ...engine.hearRest }; delete hearRest[`skey:${id}`]; await db.update(users).set({ engine: { ...engine, hearRest } as any }).where(eq(users.id, u.id)); }
+  await audit(c, prior ? 'hear-key.changed' : 'hear-key.added', { provider: key.provider }, u.id);
+  return c.json({ ok: true, key: hearKeyInfo(key) });
+});
+app.delete('/voice/hear-keys/:id', async (c) => {
+  const u = c.get('user'), db = c.get('db'), id = c.req.param('id');
+  const keys = await loadHearKeys(c.env, db, u.id);
+  if (!keys.some((k) => k.id === id)) return c.json({ ok: true });
+  await saveHearKeys(c.env, db, u.id, keys.filter((k) => k.id !== id));
+  const engine = u.engine as unknown as EnginePrefs;
+  const hears = hearOrder(engine).filter((x) => x !== `skey:${id}`);
+  const hearRest = { ...(engine.hearRest ?? {}) }; delete hearRest[`skey:${id}`];
+  await db.update(users).set({ engine: { ...engine, hears, hearRest } as any }).where(eq(users.id, u.id));
+  await audit(c, 'hear-key.removed', {}, u.id);
+  return c.json({ ok: true });
+});
+
+// Speech to text: a short WAV recording from the app. The audio is passed straight to the service and never stored.
+// `source` (with an optional unsaved `key`) tries one service, for the Test button; otherwise the saved order is used.
+app.post('/voice/stt', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  if (await tooMany(c, 'stt:' + u.id, 150, 15)) return c.json({ error: 'Niko has listened a lot in the last few minutes. The device’s own recognition is used for now.' }, 429);
+  const form = await c.req.formData().catch(() => null);
+  const file = form?.get('audio') as unknown as File | string | null | undefined;
+  if (!file || typeof file === 'string') return c.json({ error: 'Nothing was recorded.' }, 400);
+  if (file.size > MAX_AUDIO_BYTES) return c.json({ error: 'That recording is too long.' }, 413);
+  const audio = new Uint8Array(await file.arrayBuffer());
+  const problem = audioProblem(audio);
+  if (problem) return c.json({ error: problem }, 400);
+  const lang = /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(String(form!.get('lang') ?? '')) ? String(form!.get('lang')) : 'en';
+  const source = String(form!.get('source') ?? '');
+  let only: { entry: HearSource; key?: HearKey } | undefined;
+  if (source) {
+    if (!HEAR_ENTRY.test(source)) return c.json({ error: 'Unknown service.' }, 400);
+    only = { entry: source as HearSource };
+    const draft = form!.get('key');
+    if (source.startsWith('skey:') && typeof draft === 'string' && draft) {
+      // A key on the screen, saved or not: a typed key, or the saved one where it is still for the same service and address.
+      const k = hearKeyFrom(JSON.parse(draft.slice(0, 6000) || '{}'));
+      const prior = (await loadHearKeys(c.env, db, u.id)).find((x) => `skey:${x.id}` === source);
+      const apiKey = k.apiKey || savedHearKey(prior, k);
+      if (!apiKey) return c.json({ error: 'Paste the API key to test it.' }, 400);
+      only.key = { ...k, id: 'test', apiKey };
+    }
+  }
+  try {
+    const r = await hear(c.env, db, u, audio, lang, only);
+    return c.json({ text: r.text.slice(0, 2000), used: r.used });
+  } catch (e) {
+    const f = e instanceof BrainFail ? e : null;
+    return c.json({ error: (f?.why === 'limit' ? 'Its usage limit is reached.' : f?.why === 'refused' ? 'It refused the request. Check its key and settings.' : 'It did not answer just now.') + (f?.detail ? ` It said: “${f.detail}”` : '') }, 502);
   }
 });
 

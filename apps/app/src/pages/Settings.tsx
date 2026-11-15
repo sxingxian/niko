@@ -5,9 +5,11 @@ import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSp
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { AI_PRESETS, aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, presetOf, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
+import { HEAR_PROVIDERS, hearOrder, hearPresetOf, MAX_HEAR_KEYS, type HearKeyInfo, type HearProvider, type HearSource } from '@niko/shared';
 import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, PAGE_SIZES, VOICE_NAMES, VOICE_PROVIDERS, VOICE_SOURCES, voiceName, voiceOrder, voicePresetOf, WORKERS_VOICES, type VoiceKeyInfo, type VoiceProvider, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
 import { api, Field, Icon, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
+import { captureSupported, captureUtterance, transcribe, type Capture } from '../listen';
 
 function useMedia(q: string) {
   const [on, setOn] = useState(() => typeof window !== 'undefined' && window.matchMedia(q).matches);
@@ -616,6 +618,8 @@ const VOICE_INFO: Record<Builtin, { sub: string; tag: string }> = {
 const PREVIEW_LINE = (name: string) => `Hi ${name || 'there'}, this is how I sound.`;
 /** A voice key being added or changed on this page. `id` is the saved key's id, or a temporary "new-…" one. */
 type VoiceDraft = VoiceKeyInfo & { apiKey: string; saved: boolean };
+type HearDraft = HearKeyInfo & { apiKey: string; saved: boolean };
+const hearInfo = (k: { provider: HearProvider; baseUrl: string }) => HEAR_PROVIDERS.find((p) => p.id === hearPresetOf(k))!;
 /** Services whose voices can be listed from the account. */
 const LISTS_VOICES: VoiceProvider[] = ['elevenlabs', 'google', 'azure', 'cartesia', 'fishaudio'];
 const presetInfo = (k: { provider: VoiceProvider; baseUrl: string }) => VOICE_PROVIDERS.find((p) => p.id === voicePresetOf(k))!;
@@ -641,12 +645,22 @@ export function Voice() {
   const [confirm, setConfirm] = useState('');
   const [kReady, setKReady] = useState(kokoroReady());
   const [kProgress, setKProgress] = useState<number | null>(null);
+  // Speech in: Cloudflare and the user's speech-to-text keys, in order; the device's own recognition is always last.
+  const [hOrder, setHOrder] = useState<HearSource[]>([]);
+  const [hKeys, setHKeys] = useState<HearDraft[]>([]);
+  const [hOpen, setHOpen] = useState<HearSource | null>(null);
+  const [testing, setTesting] = useState<{ entry: string; cap: Capture } | null>(null);
   const playing = useRef<{ stop: () => void } | null>(null);
   const loadKeys = useCallback(async () => {
     const r = await api<{ keys: VoiceKeyInfo[] }>('/voice/keys');
     setKeys((cur) => [...(r.keys ?? []).map((k) => ({ ...k, apiKey: '', saved: true })), ...cur.filter((k) => isNew(k.id))]);
   }, []);
-  useEffect(() => { if (me && !e) { setE({ ...me.engine }); setOrder(voiceOrder(me.engine)); void loadKeys(); } }, [me, e, loadKeys]);
+  const loadHearKeys = useCallback(async () => {
+    const r = await api<{ keys: HearKeyInfo[] }>('/voice/hear-keys');
+    setHKeys((cur) => [...(r.keys ?? []).map((k) => ({ ...k, apiKey: '', saved: true })), ...cur.filter((k) => isNew(k.id))]);
+  }, []);
+  useEffect(() => { if (me && !e) { setE({ ...me.engine }); setOrder(voiceOrder(me.engine)); setHOrder(hearOrder(me.engine)); void loadKeys(); void loadHearKeys(); } }, [me, e, loadKeys, loadHearKeys]);
+  useEffect(() => () => testing?.cap.cancel(), [testing]);
   useEffect(() => () => playing.current?.stop(), []);
   // Saved settings are shown again, so the page reopens as it was left.
   useEffect(() => {
@@ -708,9 +722,21 @@ export function Voice() {
       // Saved keys are kept in the page at once, so a problem further on never saves them twice.
       setKeys(kept); setOrder(next);
       setDirty((d) => Object.fromEntries(Object.entries(d).filter(([id]) => !savedIds.has(id))));
+      // Speech-in keys, the same way.
+      let hNext = [...hOrder];
+      const hKept: HearDraft[] = [], hSaved = new Set<string>();
+      for (const k of hKeys) {
+        if (!dirty['h:' + k.id]) { hKept.push(k); continue; }
+        if (isNew(k.id) && !k.apiKey.trim()) { if (hNext.includes(`skey:${k.id}`)) throw new Error(`Paste the API key for ${k.label || hearInfo(k).name} under Listening, or remove it.`); hKept.push(k); continue; }
+        const r = await api<{ key: HearKeyInfo }>('/voice/hear-keys', { body: { ...k, id: isNew(k.id) ? undefined : k.id } });
+        hNext = hNext.map((v) => (v === `skey:${k.id}` ? `skey:${r.key.id}` as HearSource : v));
+        hKept.push({ ...r.key, apiKey: '', saved: true }); hSaved.add('h:' + k.id);
+      }
+      setHKeys(hKept); setHOrder(hNext);
+      setDirty((d) => Object.fromEntries(Object.entries(d).filter(([id]) => !hSaved.has(id))));
       if (dirty.sh && sh.baseUrl.trim()) await api('/connections/self-hosted-voice', { body: sh });
       if (next.includes('self-hosted') && !linked['self-hosted-voice'] && !sh.baseUrl.trim()) throw new Error('Add your voice server’s address, or switch it off.');
-      await api('/me', { method: 'PATCH', body: { engine: { voices: next, workersVoice: e.workersVoice ?? 'melo', kokoroVoice: e.kokoroVoice ?? 'af_heart', wake: e.wake } } });
+      await api('/me', { method: 'PATCH', body: { engine: { voices: next, hears: hNext, workersVoice: e.workersVoice ?? 'melo', kokoroVoice: e.kokoroVoice ?? 'af_heart', wake: e.wake } } });
       await Promise.all([refreshMe(), reload()]);
       setSh((v) => ({ ...v, apiKey: '' })); setDirty({});
       setNote({ ok: true, text: next.includes('kokoro') && !kReady ? 'Saved. The on-device voice is skipped on this device until it is downloaded here.' : 'Saved.' });
@@ -747,6 +773,112 @@ export function Voice() {
   };
   const removeKokoro = async () => { await kokoroRemove(); setKReady(false); setNote({ ok: true, text: 'Removed the on-device voice from this device.' }); };
   const previewBtn = (v: VoiceSource | 'device', disabled = false) => <button type="button" className="bt" onClick={() => preview(v)} disabled={!!busy || disabled}>{busy === 'preview-' + v ? 'Playing…' : 'Preview'}</button>;
+
+  // ---- speech in
+  const editHKey = (id: string, p: Partial<HearDraft>) => { setDirty((d) => ({ ...d, ['h:' + id]: true })); setHKeys(hKeys.map((k) => (k.id === id ? { ...k, ...p } : k))); };
+  const hKeyOf = (v: HearSource) => hKeys.find((k) => `skey:${k.id}` === v);
+  const hAll: HearSource[] = ['workers', ...hKeys.map((k) => `skey:${k.id}` as HearSource)];
+  const hOthers = hAll.filter((v) => !hOrder.includes(v));
+  const hToggle = (v: HearSource, on: boolean) => { setHOrder(on ? [...hOrder, v] : hOrder.filter((x) => x !== v)); if (on) setHOpen(v); };
+  const hMove = (v: HearSource, by: -1 | 1) => {
+    const i = hOrder.indexOf(v), j = i + by;
+    if (i < 0 || j < 0 || j >= hOrder.length) return;
+    const next = [...hOrder]; [next[i], next[j]] = [next[j]!, next[i]!]; setHOrder(next);
+  };
+  const addHKey = () => {
+    const id = 'new-' + Math.random().toString(36).slice(2, 8);
+    const p = HEAR_PROVIDERS[0]!;
+    setHKeys([...hKeys, { id, label: '', provider: p.provider, baseUrl: p.baseUrl ?? '', model: p.models?.[0] ?? '', region: '', apiKey: '', saved: false }]);
+    setHOrder([...hOrder, `skey:${id}`]); setHOpen(`skey:${id}`); setDirty((d) => ({ ...d, ['h:' + id]: true }));
+  };
+  const removeHKey = async (k: HearDraft) => {
+    if (confirm !== 'h:' + k.id) { setConfirm('h:' + k.id); return; }
+    setConfirm(''); setNote(null);
+    try {
+      if (!isNew(k.id)) await api(`/voice/hear-keys/${encodeURIComponent(k.id)}`, { method: 'DELETE' });
+      setHKeys(hKeys.filter((x) => x.id !== k.id)); setHOrder(hOrder.filter((x) => x !== `skey:${k.id}`));
+      if (!isNew(k.id)) { await refreshMe(); setNote({ ok: true, text: 'Speech-in key removed.' }); }
+    } catch (x: any) { setNote({ ok: false, text: x.message }); }
+  };
+  // Test: you say something, and this one service (as set on the page, saved or not) writes down what it heard.
+  const testHear = async (v: HearSource) => {
+    if (testing) { testing.cap.finish(); return; }
+    setNote(null);
+    if (!captureSupported()) { setNote({ ok: false, text: 'This browser cannot record from the microphone.' }); return; }
+    const cap = captureUtterance({ waitMs: 6000, maxMs: 10_000 });
+    setTesting({ entry: v, cap });
+    setNote({ ok: true, text: 'Listening… say something, such as “What’s on my calendar today?”' });
+    try {
+      const wav = await cap.done;
+      if (!wav) { setNote({ ok: false, text: 'Nothing was heard. Check the microphone and try again.' }); return; }
+      setNote({ ok: true, text: 'Turning that into words…' });
+      const k = hKeyOf(v);
+      const r = await transcribe(wav, { source: v, key: k ? { ...k, apiKey: k.apiKey || undefined } : undefined });
+      setNote({ ok: true, text: r.text ? `It heard: “${r.text}”` : 'It answered, but heard no words.' });
+    } catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setTesting(null); }
+  };
+  const testBtn = (v: HearSource, disabled = false) => <button type="button" className="bt" onClick={() => testHear(v)} disabled={disabled || (!!testing && testing.entry !== v)}>{testing?.entry === v ? 'Stop' : 'Test'}</button>;
+  const hearSettings = (v: HearSource) => {
+    if (v === 'workers') return (
+      <div className="eng-fields col">
+        <div className="eng-fields">{testBtn(v)}</div>
+        <p className="hint">OpenAI’s Whisper, run on Cloudflare. Free within Cloudflare’s daily allowance, shared with the Workers AI brain and voice. Many languages.</p>
+      </div>
+    );
+    const k = hKeyOf(v);
+    if (!k) return null;
+    const p = hearInfo(k);
+    return (
+      <div className="eng-fields col">
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Service</span>
+            <select className="in" value={p.id} onChange={(x) => { const n = HEAR_PROVIDERS.find((y) => y.id === x.target.value)!; editHKey(k.id, { provider: n.provider, baseUrl: n.baseUrl ?? (n.id === 'other' && p.id === 'other' ? k.baseUrl : ''), model: n.models?.[0] ?? '', region: '' }); }}>
+              {HEAR_PROVIDERS.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+          </label>
+          <label className="fld"><span className="k">Name · optional</span><input className="in" type="text" maxLength={40} placeholder="Work OpenAI, Spare Groq…" value={k.label} onChange={(x) => editHKey(k.id, { label: x.target.value })} /></label>
+        </div>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">API key</span><input className="in" type="password" autoComplete="off" placeholder={k.saved ? 'Saved · type to replace' : 'Paste key'} value={k.apiKey} onChange={(x) => editHKey(k.id, { apiKey: x.target.value })} /></label>
+          {k.provider === 'azure' && <label className="fld"><span className="k">Region</span><input className="in" type="text" placeholder="eastus, southeastasia…" value={k.region} onChange={(x) => editHKey(k.id, { region: x.target.value.trim().toLowerCase() })} /></label>}
+          {p.id === 'other' && <label className="fld"><span className="k">Base URL</span><input className="in" type="url" placeholder="https://" value={k.baseUrl} onChange={(x) => editHKey(k.id, { baseUrl: x.target.value })} /></label>}
+        </div>
+        <div className="eng-fields">
+          {(p.models || p.id === 'other') && <label className="fld"><span className="k">Model</span>
+            {p.models
+              ? <select className="in" value={k.model} onChange={(x) => editHKey(k.id, { model: x.target.value })}>{p.models.map((m) => <option key={m} value={m}>{m}</option>)}</select>
+              : <input className="in" type="text" placeholder="As listed by the service" value={k.model} onChange={(x) => editHKey(k.id, { model: x.target.value })} />}
+          </label>}
+          {testBtn(v, !k.apiKey.trim() && !k.saved)}
+          <button type="button" className={'bt' + (confirm === 'h:' + k.id ? ' danger' : '')} onClick={() => removeHKey(k)} onBlur={() => confirm === 'h:' + k.id && setConfirm('')}>{confirm === 'h:' + k.id ? 'Tap again to remove' : 'Remove'}</button>
+        </div>
+        <p className="hint">{p.note}</p>
+      </div>
+    );
+  };
+  const hName = (v: HearSource) => { const k = hKeyOf(v); return k ? k.label || hearInfo(k).name : 'Cloudflare speech recognition'; };
+  const hSub = (v: HearSource) => { const k = hKeyOf(v); return k ? [hearInfo(k).name, k.model || 'default model'].join(' · ') + (k.saved ? '' : ' · not saved yet') : 'Whisper on Cloudflare, where Niko runs. Nothing to set up.'; };
+  const hRow = (v: HearSource, i: number | null) => {
+    const on = i !== null, resting = on ? voiceRestLine(me.engine.hearRest?.[v]) : '';
+    return (
+      <li key={v} className={'vrow' + (on ? ' on' : '')}>
+        <div className="vrow-head">
+          <span className="n" aria-hidden="true">{on ? i + 1 : '–'}</span>
+          <button type="button" className="vrow-title" aria-expanded={hOpen === v} onClick={() => setHOpen(hOpen === v ? null : v)}>
+            <b>{hName(v)}</b><span className="sub">{hSub(v)}</span>
+            {resting && <span className="sub vrow-warn">{resting.replace('The next voice speaks', 'The next one listens').replace('next voice', 'next one')}</span>}
+          </button>
+          <span className="k tag">{hKeyOf(v) ? 'Your key' : 'Free'}</span>
+          {on && <span className="vrow-move">
+            <button type="button" className="stp" onClick={() => hMove(v, -1)} disabled={i === 0} aria-label={`Move ${hName(v)} up`}>↑</button>
+            <button type="button" className="stp" onClick={() => hMove(v, 1)} disabled={i === hOrder.length - 1} aria-label={`Move ${hName(v)} down`}>↓</button>
+          </span>}
+          <Switch on={on} onChange={(x) => hToggle(v, x)} label={`Use ${hName(v)}`} />
+        </div>
+        {hOpen === v && <div className="vrow-body">{hearSettings(v)}</div>}
+      </li>
+    );
+  };
 
   const keySettings = (k: VoiceDraft) => {
     const p = presetInfo(k), ml = lists[k.id];
@@ -911,12 +1043,27 @@ export function Voice() {
           </>}
         </section>
         <section className="g eng-card listen" aria-label="Listening">
-          <span className="k">Listening · speech in</span>
-          <label className="fld"><span className="hint">How your voice is turned into text</span><select className="in" value="device" onChange={() => undefined}><option value="device">Device speech recognition · free</option><option value="workers" disabled>Workers AI speech-to-text · not available yet</option></select></label>
+          <span className="k" style={{ paddingBottom: 2 }}>Listening · speech in, tried in this order</span>
+          <p className="hint">After you tap the mic or say “Niko”, your request is recorded and turned into words by the first service that works. When one reaches its limit or fails, the next one is used.</p>
+          <ol className="vlist">
+            {hOrder.map((v, i) => hRow(v, i))}
+            <li className="vrow on last">
+              <div className="vrow-head">
+                <span className="n" aria-hidden="true">{hOrder.length + 1}</span>
+                <span className="vrow-title static"><b>Device speech recognition</b><span className="sub">Built into this browser. Always last, and always the one that listens for “Niko”, so nothing is sent while you are not talking to Niko.</span></span>
+                <span className="k tag">Free</span>
+              </div>
+            </li>
+          </ol>
+          <button type="button" className="bt add-key" onClick={addHKey} disabled={hKeys.length >= MAX_HEAR_KEYS}><Icon name="plus" size={18} />Add a speech-in API key</button>
+          {hOthers.length > 0 && <>
+            <span className="k" style={{ padding: '14px 0 4px' }}>Not in use</span>
+            <ul className="vlist">{hOthers.map((v) => hRow(v, null))}</ul>
+          </>}
           <div className="eng-line"><span>Wake when I say “Niko”</span><Switch on={!!e.wake} onChange={(x) => set({ wake: x })} label="Wake when I say Niko" /></div>
           <div className="eng-line"><span>After Niko answers, keep listening for a few seconds so you can carry on talking</span><span className="k later">On</span></div>
           <div className="eng-line"><span>Respond only to my voice <span className="k soon">Not available yet</span></span><Switch on={false} onChange={() => undefined} label="Respond only to my voice" disabled /></div>
-          <p className="hint">Voice keys are encrypted on the server, never stored in this browser, and never shown again after saving. Two keys from the same account share one allowance, so a backup helps most when it is from another account or service.</p>
+          <p className="hint">Keys are encrypted on the server, never stored in this browser, and never shown again after saving. Recordings go to the service once and are never stored. Two keys from the same account share one allowance, so a backup helps most when it is from another account or service.</p>
         </section>
       </div>
     </SettingsPage>
