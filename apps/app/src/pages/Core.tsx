@@ -4,7 +4,7 @@ import { Link, NavLink, useLocation } from 'react-router-dom';
 import { SEND_COUNTDOWN_SECONDS, VOICE_NAMES, voiceOrder } from '@niko/shared';
 import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
 import { useNiko } from '../niko';
-import type { Brief, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
+import type { Brief, BriefPart, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
 
 // The mockups' rail: Home, Inbox, Calendar, Notes, Connections. Settings (appearance, engine, account) sit behind the last button.
 const NAVS: [string, string, string][] = [['/', 'spark', 'Home'], ['/inbox', 'mail', 'Inbox'], ['/calendar', 'calendar', 'Calendar'], ['/notes', 'note', 'Notes'], ['/connections', 'plug', 'Connections'], ['/appearance', 'user', 'Settings']];
@@ -17,6 +17,20 @@ function Dock({ className }: { className: string }) {
       ))}
     </nav>
   );
+}
+
+/** Which parts of the briefing each workspace screen shows. */
+const VIEW_PARTS: Record<string, BriefPart[]> = { inbox: ['mail', 'chats'], calendar: ['events'], notes: ['notes'] };
+const BRIEF_FRESH_MS = 300_000;
+const EMPTY_BRIEF: Brief = { mail: [], events: [], notes: [], chats: [], problems: [] };
+/** The briefing as last read, part by part, kept while the app is open (the workspace remounts on each screen). */
+const briefCache: { data: Brief; at: Partial<Record<BriefPart, number>>; loaded: Set<BriefPart> } = { data: EMPTY_BRIEF, at: {}, loaded: new Set() };
+function mergeBrief(r: Brief, read: BriefPart[]) {
+  const d = { ...briefCache.data };
+  for (const p of read) (d as any)[p] = r[p];
+  for (const p of read) briefCache.loaded.add(p);
+  d.problems = [...briefCache.data.problems.filter((x) => !read.includes(x.part)), ...r.problems.filter((x) => read.includes(x.part))];
+  briefCache.data = d;
 }
 
 function useWide() {
@@ -235,7 +249,7 @@ export function Workspace() {
   // The ring's place on screen, for the particle flow from and to Home.
   const ringRef = useCallback((el: HTMLDivElement | null) => { if (el) spots.set('ring', el); else spots.delete('ring'); }, []);
   const view = useLocation().pathname.replace('/', '') as 'inbox' | 'calendar' | 'notes';
-  const [brief, setBrief] = useState<Brief | null>(n.brief);
+  const [brief, setBrief] = useState<Brief | null>(() => (briefCache.data !== EMPTY_BRIEF ? briefCache.data : n.brief));
   const [sel, setSel] = useState<Sel | null>(null);
   const [thread, setThread] = useState<{ id: string; direction: string; sender: string; body: string; fileName: string | null }[]>([]);
   const [draft, setDraft] = useState('');
@@ -254,18 +268,28 @@ export function Workspace() {
   const note = useDetail<NoteDetail>(noteSel ? `/notes/${noteSel.provider}/${encodeURIComponent(noteSel.id)}` : null);
   const event = useDetail<EventDetail>(eventSel ? `/events/${eventSel.provider}/${encodeURIComponent(eventSel.id)}?tz=${new Date().getTimezoneOffset()}` : null);
 
-  // Chats (kept by Niko itself) are checked every 30 s while the page is in view. Mail, calendars and notes come
-  // from other services, so they refresh every 5 minutes: often enough, and gentle on mail servers' sign-in limits.
-  const fullAt = useRef(0);
-  const loadBrief = useCallback(() => { fullAt.current = Date.now(); return api<Brief>(`/brief?tz=${new Date().getTimezoneOffset()}`).then(setBrief).catch((e) => setErr(e.message)); }, []);
-  const loadChats = useCallback(() => api<{ chats: Brief['chats'] }>('/brief/chats').then((r) => setBrief((b) => (b ? { ...b, chats: r.chats } : b))).catch(() => undefined), []);
-  useEffect(() => { void loadBrief(); }, [loadBrief]);
+  // Each screen reads only its own part: Inbox = mail + chats, Calendar = events, Notes = notes, so opening Notes
+  // never calls a calendar or a mail server. Parts read in the last 5 minutes are reused when switching screens.
+  // Chats (kept by Niko itself) are checked every 30 s while the page is in view; mail, calendars and notes come
+  // from other services, so they refresh every 5 minutes: gentle on their rate limits and sign-in limits.
+  const parts = VIEW_PARTS[view] ?? [];
+  const ready = parts.every((p) => briefCache.loaded.has(p));
+  const loadBrief = useCallback((force = false) => {
+    const stale = parts.filter((p) => force || Date.now() - (briefCache.at[p] ?? 0) > BRIEF_FRESH_MS);
+    if (!stale.length) return Promise.resolve();
+    for (const p of stale) briefCache.at[p] = Date.now(); // claimed now, so a second tick doesn't ask again meanwhile
+    return api<Brief>(`/brief?tz=${new Date().getTimezoneOffset()}&parts=${stale.join(',')}`)
+      .then((r) => { mergeBrief(r, stale); setBrief(briefCache.data); })
+      .catch((e) => { for (const p of stale) briefCache.at[p] = 0; setErr(e.message); });
+  }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
+  const loadChats = useCallback(() => api<{ chats: Brief['chats'] }>('/brief/chats').then((r) => { briefCache.data = { ...briefCache.data, chats: r.chats }; setBrief(briefCache.data); }).catch(() => undefined), []);
+  useEffect(() => { if (briefCache.data !== EMPTY_BRIEF) setBrief(briefCache.data); void loadBrief(); }, [loadBrief]);
   useEffect(() => {
-    const tick = () => { if (document.hidden) return; if (Date.now() - fullAt.current > 300_000) void loadBrief(); else void loadChats(); };
+    const tick = () => { if (document.hidden) return; void loadBrief(); if (parts.includes('chats')) void loadChats(); };
     const t = window.setInterval(tick, 30_000);
     document.addEventListener('visibilitychange', tick);
     return () => { window.clearInterval(t); document.removeEventListener('visibilitychange', tick); };
-  }, [loadBrief, loadChats]);
+  }, [loadBrief, loadChats]); // eslint-disable-line react-hooks/exhaustive-deps
   const items: Sel[] = brief ? [
     ...brief.chats.map((c) => ({ kind: 'chat' as const, provider: c.provider, chatId: c.chatId, title: c.title, source: c.source })),
     ...brief.mail.map((m) => ({ kind: 'mail' as const, provider: m.provider, id: m.id, title: m.from, source: m.source, subject: m.subject })),
@@ -397,10 +421,10 @@ export function Workspace() {
 
       <div key={view} className="content hud-in">
         {err && <p className="err" role="alert">{err}</p>}
-        {brief?.problems.map((p) => <p key={p} className="sub">{p}</p>)}
+        {brief?.problems.filter((p) => parts.includes(p.part)).map((p) => <p key={p.text} className="sub">{p.text}</p>)}
         {view === 'inbox' && <>
           <section className="g list" aria-label="Messages">
-            {items.length === 0 && <p className="sub" style={{ padding: 14 }}>{brief ? 'Nothing needs you. Link mail or chat apps in Connections.' : 'Loading…'}</p>}
+            {items.length === 0 && <p className="sub" style={{ padding: 14 }}>{ready ? 'Nothing needs you. Link mail or chat apps in Connections.' : 'Loading…'}</p>}
             {items.map((it) => {
               const on = !!sel && (it.kind === 'chat' ? sel.kind === 'chat' && sel.chatId === it.chatId && sel.provider === it.provider : sel.kind === 'mail' && sel.id === it.id);
               return <button key={it.kind + (it.kind === 'chat' ? it.chatId : it.id)} className={'item' + (on ? ' on' : '')} onClick={() => setSel(it)} aria-pressed={on}><b>{it.title}</b><span className="k">{it.source}</span></button>;
@@ -456,8 +480,8 @@ export function Workspace() {
         </>}
         {view === 'calendar' && <>
           <section className="g list" aria-label="Today">
-            {brief && brief.events.length === 0 && <p className="sub" style={{ padding: 14 }}>No events today, or no calendar is linked yet.</p>}
-            {!brief && <p className="sub" style={{ padding: 14 }}>Loading…</p>}
+            {ready && brief && brief.events.length === 0 && <p className="sub" style={{ padding: 14 }}>No events today, or no calendar is linked yet.</p>}
+            {!ready && !brief?.events.length && <p className="sub" style={{ padding: 14 }}>Loading…</p>}
             {brief?.events.map((e) => {
               const on = eventSel?.id === e.id && eventSel.provider === e.provider;
               return <button key={e.provider + e.id} className={'item ev' + (on ? ' on' : '')} onClick={() => setEventSel(e)} aria-pressed={on}><span className="t">{e.time}</span><b>{e.title}</b><span className="k">{e.source}</span></button>;
@@ -480,8 +504,8 @@ export function Workspace() {
         </>}
         {view === 'notes' && <>
           <section className="g list" aria-label="Recent notes">
-            {brief && brief.notes.length === 0 && <p className="sub" style={{ padding: 14 }}>No notes yet. Link Notion or OneNote in Connections.</p>}
-            {!brief && <p className="sub" style={{ padding: 14 }}>Loading…</p>}
+            {ready && brief && brief.notes.length === 0 && <p className="sub" style={{ padding: 14 }}>No notes yet. Link Notion or OneNote in Connections.</p>}
+            {!ready && !brief?.notes.length && <p className="sub" style={{ padding: 14 }}>Loading…</p>}
             {brief?.notes.map((e) => {
               const on = noteSel?.id === e.id && noteSel.provider === e.provider;
               return <button key={e.provider + e.id} className={'item' + (on ? ' on' : '')} onClick={() => setNoteSel(e)} aria-pressed={on}><b>{e.title}</b><span className="k">{e.source}</span></button>;

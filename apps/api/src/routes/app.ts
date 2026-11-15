@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
-import { APPS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, VOICE_SOURCES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, WORKERS_MODELS, type Appearance, type Brief, type Brain, type EnginePrefs, type Permissions } from '@niko/shared';
+import { APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, VOICE_SOURCES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, WORKERS_MODELS, type Appearance, type Brief, type BriefPart, type BriefProblem, type Brain, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
 import { audit, requireUser, tooMany } from '../lib/session';
@@ -261,29 +261,42 @@ export async function oauthCallback(c: import('hono').Context<AppEnv>) {
 
 // ---------------------------------------------------------------- data for the workspace and the brief
 
-async function buildBrief(c: import('hono').Context<AppEnv>, tzOffsetMin: number): Promise<Brief> {
+async function buildBrief(c: import('hono').Context<AppEnv>, tzOffsetMin: number, parts: ReadonlySet<BriefPart> = new Set(BRIEF_PARTS)): Promise<Brief> {
   const db = c.get('db');
   const u = c.get('user');
   const linked = (await db.select({ provider: connections.provider }).from(connections).where(eq(connections.userId, u.id))).map((r) => r.provider);
-  const problems: string[] = [];
-  const guard = async <T,>(name: string, fn: () => Promise<T[]>): Promise<T[]> => {
-    try { return await fn(); } catch (e) { problems.push(`${name}: ${(e as Error).message}`); return []; }
+  const problems: BriefProblem[] = [];
+  const guard = async <T,>(part: BriefPart, provider: string, fn: () => Promise<T[]>): Promise<T[]> => {
+    try { return await fn(); } catch (e) {
+      const source = PROVIDERS.find((p) => p.id === provider)?.name ?? provider;
+      problems.push({ part, source, text: `${source}: ${(e as Error).message}` });
+      return [];
+    }
   };
+  // Only the parts asked for are read: opening Notes must not call calendars or mail servers.
+  const want = (part: BriefPart, ids: string[]) => (parts.has(part) ? ids.filter((p) => linked.includes(p)) : []);
   // "Today" in the user's own time zone.
   const now = Date.now();
   const local = new Date(now - tzOffsetMin * 60_000);
   const dayStart = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) + tzOffsetMin * 60_000);
   const dayEnd = new Date(dayStart.getTime() + 86400_000);
-  const [mailLists, eventLists, noteLists] = await Promise.all([
-    Promise.all(['gmail', 'outlook-mail', ...IMAP_PROVIDERS].filter((p) => linked.includes(p)).map((p) => guard(p, () => listMail(c.env, db, u.id, p)))),
-    Promise.all(['google-calendar', 'outlook-calendar', 'ical'].filter((p) => linked.includes(p)).map((p) => guard(p, () => listEvents(c.env, db, u.id, p, dayStart, dayEnd, tzOffsetMin)))),
-    Promise.all(['notion', 'onenote'].filter((p) => linked.includes(p)).map((p) => guard(p, () => listNotes(c.env, db, u.id, p)))),
+  const [mailLists, eventLists, noteLists, chats] = await Promise.all([
+    Promise.all(want('mail', ['gmail', 'outlook-mail', ...IMAP_PROVIDERS]).map((p) => guard('mail', p, () => listMail(c.env, db, u.id, p)))),
+    Promise.all(want('events', ['google-calendar', 'outlook-calendar', 'ical']).map((p) => guard('events', p, () => listEvents(c.env, db, u.id, p, dayStart, dayEnd, tzOffsetMin)))),
+    Promise.all(want('notes', ['notion', 'onenote']).map((p) => guard('notes', p, () => listNotes(c.env, db, u.id, p)))),
+    parts.has('chats') ? recentChats(c) : Promise.resolve([]),
   ]);
   const events = eventLists.flat().sort((a, b) => a.start - b.start).map((e) => {
     const d = new Date(e.start - tzOffsetMin * 60_000);
     return { ...e, time: e.allDay ? 'All day' : `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}` };
   });
-  return { mail: mailLists.flat(), events, notes: noteLists.flat(), chats: await recentChats(c), problems };
+  return { mail: mailLists.flat(), events, notes: noteLists.flat(), chats, problems };
+}
+
+/** ?parts=events,notes → only those; missing or unknown → all (as before). */
+function briefParts(q: string | undefined): Set<BriefPart> {
+  const asked = String(q ?? '').split(',').map((x) => x.trim()).filter((x): x is BriefPart => (BRIEF_PARTS as string[]).includes(x));
+  return new Set(asked.length ? asked : BRIEF_PARTS);
 }
 
 /** The latest conversation from each chat, from Niko's own store (no third-party calls, so it is cheap to ask often). */
@@ -300,7 +313,7 @@ async function recentChats(c: import('hono').Context<AppEnv>): Promise<Brief['ch
   return chats.slice(0, 8);
 }
 
-app.get('/brief', async (c) => c.json(await buildBrief(c, clampNum(Number(c.req.query('tz')), -840, 840, 0))));
+app.get('/brief', async (c) => c.json(await buildBrief(c, clampNum(Number(c.req.query('tz')), -840, 840, 0), briefParts(c.req.query('parts')))));
 app.get('/brief/chats', async (c) => c.json({ chats: await recentChats(c) }));
 
 // What opens from the workspace: one note, one email or one event, as plain text.

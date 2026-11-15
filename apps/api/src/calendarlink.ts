@@ -5,12 +5,14 @@ import type { EventDetail, EventItem } from '@niko/shared';
 import { publicHttpsUrl } from './providers';
 
 const MAX_BYTES = 5 * 1024 * 1024;
-const CACHE_SECONDS = 300;
 const hex = async (s: string) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map((b) => b.toString(16).padStart(2, '0')).join('');
 
 // Microsoft's published-calendar links refuse requests that don't look like a web browser (HTTP 400 or 500, or a
-// redirect to an error page), and a Worker sends no User-Agent at all. Google accepts either. So identify as a browser.
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+// redirect to an error page), and a Worker sends no User-Agent at all. So Microsoft is asked as a browser.
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+// Everyone else gets an honest calendar-client name: a browser name from a data-centre address is more likely to be
+// treated as a bot (Google answers those with 429 and a CAPTCHA page).
+const CLIENT_UA = 'Niko-Calendar/1.0 (+https://niko.sxingxian.com)';
 const MS_HOSTS = /(^|\.)(outlook\.live\.com|outlook\.office365\.com|outlook\.office\.com)$/i;
 const isGoogle = (u: URL) => /(^|\.)calendar\.google\.com$/i.test(u.hostname);
 const ORDINAL = ['first', 'second', 'third'];
@@ -50,31 +52,95 @@ function linkProblem(url: URL, status: number | 'html' | 'signin' | 'page', whic
   return `${name} couldn’t be read (the calendar server answered ${status}). Try again in a few minutes.`;
 }
 
-/** Fetches one calendar file, kept for five minutes in Cloudflare's cache under a hash of its address, never the address itself. */
+// ---- How often a calendar is fetched
+// Calendar servers limit how often a feed may be read, and Workers share Cloudflare's addresses with many others, so
+// each feed is read at most every 10 minutes. The last good copy is kept for a day: if the server says "too many
+// requests" (429) or fails, that copy is used quietly and the server is left alone for as long as it asks (Retry-After).
+const FRESH_MS = 10 * 60_000;
+const KEEP_MS = 24 * 3600_000;
+const BACKOFF_MS = { 429: 15 * 60_000, other: 5 * 60_000, max: 3600_000 };
+interface Kept { text: string; at: number; until: number } // until = don't ask the server again before this time
+
+// Two layers: this Worker instance's memory (instant, survives between requests on the same instance) and
+// Cloudflare's cache in this data centre (shared by instances; may be evicted, so it is only a helper).
+const mem = new Map<string, Kept>();
+const cacheKey = (h: string) => new Request(`https://niko-cache.invalid/ical/${h}`);
+const edge = () => (globalThis as any).caches?.default as Cache | undefined;
+async function readKept(h: string): Promise<Kept | null> {
+  const m = mem.get(h);
+  if (m) return m;
+  const hit = await edge()?.match(cacheKey(h)).catch(() => undefined);
+  if (!hit) return null;
+  const k = { text: await hit.text(), at: Number(hit.headers.get('x-at')) || 0, until: Number(hit.headers.get('x-until')) || 0 };
+  mem.set(h, k);
+  return k;
+}
+async function keep(h: string, k: Kept): Promise<void> {
+  if (mem.size > 200) mem.delete(mem.keys().next().value!);
+  mem.set(h, k);
+  await edge()?.put(cacheKey(h), new Response(k.text, { headers: { 'cache-control': `max-age=${KEEP_MS / 1000}`, 'x-at': String(k.at), 'x-until': String(k.until) } })).catch(() => undefined);
+}
+/** Seconds or an HTTP date, as Retry-After allows; within sensible bounds. */
+function retryAfterMs(v: string | null, fallback: number): number {
+  if (!v) return fallback;
+  const n = /^\d+$/.test(v.trim()) ? Number(v) * 1000 : Date.parse(v) - Date.now();
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.max(n, 60_000), BACKOFF_MS.max) : fallback;
+}
+class Busy extends Error { constructor(message: string, readonly waitMs: number) { super(message); } }
+const serverName = (u: URL) => (isGoogle(u) ? 'Google' : MS_HOSTS.test(u.hostname) ? 'Outlook' : 'The calendar server');
+const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000));
+
+/** One calendar file: from the kept copy when it is recent, otherwise from the server. Never echoes the address. */
 async function fetchIcs(url: string, which = 'first'): Promise<string> {
   const u = new URL(url);
   // Google's "embed" and app links are pages for people, not files: say so before fetching.
   if (isGoogle(u) && !/\/ical\//i.test(u.pathname)) throw new Error(linkProblem(u, 'page', which));
-  const key = new Request(`https://niko-cache.invalid/ical/${await hex(url)}`);
-  const cache = (globalThis as any).caches?.default as Cache | undefined;
-  const hit = await cache?.match(key);
-  if (hit) return hit.text();
+  const h = await hex(url);
+  const now = Date.now();
+  const kept = await readKept(h);
+  if (kept?.text && now - kept.at < FRESH_MS) return kept.text;
+  if (kept && now < kept.until) {
+    if (kept.text && now - kept.at < KEEP_MS) return kept.text;
+    throw new Error(`${serverName(u)} asked Niko to wait before reading the ${which} calendar again. It will try in about ${minutes(kept.until - now)} min.`);
+  }
+  try {
+    const text = await download(u, url, which);
+    await keep(h, { text, at: now, until: 0 });
+    return text;
+  } catch (e) {
+    if (!(e instanceof Busy)) throw e;
+    // Too many requests, or the server is having trouble: back off, and use the last good copy if there is one.
+    await keep(h, { text: kept?.text ?? '', at: kept?.at ?? 0, until: now + e.waitMs });
+    if (kept?.text && now - kept.at < KEEP_MS) { console.warn(`ical: ${e.message} (showing the copy from ${minutes(now - kept.at)} min ago)`); return kept.text; }
+    throw new Error(e.message);
+  }
+}
+
+async function download(u: URL, url: string, which: string): Promise<string> {
   let res: Response;
   try {
-    res = await fetch(url, { headers: { 'user-agent': UA, accept: 'text/calendar, text/plain;q=0.9, */*;q=0.8' }, redirect: 'follow', signal: AbortSignal.timeout(12_000) });
+    res = await fetch(url, { headers: { 'user-agent': MS_HOSTS.test(u.hostname) ? BROWSER_UA : CLIENT_UA, accept: 'text/calendar, text/plain;q=0.9, */*;q=0.8' }, redirect: 'follow', signal: AbortSignal.timeout(12_000) });
   } catch {
-    throw new Error(`The ${which} calendar address didn’t answer in time. Check it, or try again in a few minutes.`);
+    throw new Busy(`The ${which} calendar address didn’t answer in time. Niko will try again in a few minutes.`, BACKOFF_MS.other);
   }
   // Redirected to a sign-in page: the link is private to an account, not published.
   if (/(^|\.)(login\.live\.com|login\.microsoftonline\.com|accounts\.google\.com)$/i.test(new URL(res.url || url).hostname)) throw new Error(linkProblem(u, 'signin', which));
+  if (res.status === 429) {
+    const wait = retryAfterMs(res.headers.get('retry-after'), BACKOFF_MS[429]);
+    throw new Busy(`${serverName(u)} is limiting how often the ${which} calendar can be read. Niko will try again in about ${minutes(wait)} min.`, wait);
+  }
+  // Outlook's 500 means "not published / not a browser"; other servers' 5xx is a passing fault.
+  if (res.status >= 500 && !MS_HOSTS.test(u.hostname)) throw new Busy(`${serverName(u)} had a problem reading the ${which} calendar (it answered ${res.status}). Niko will try again in a few minutes.`, retryAfterMs(res.headers.get('retry-after'), BACKOFF_MS.other));
   if (!res.ok) throw new Error(linkProblem(u, res.status, which));
   if (Number(res.headers.get('content-length')) > MAX_BYTES) throw new Error(`The ${which} calendar is too large to read.`);
   const text = await res.text();
   if (text.length > MAX_BYTES) throw new Error(`The ${which} calendar is too large to read.`);
   if (!/BEGIN:VCALENDAR/i.test(text.slice(0, 2000))) throw new Error(linkProblem(u, 'html', which));
-  await cache?.put(key, new Response(text, { headers: { 'cache-control': `max-age=${CACHE_SECONDS}` } })).catch(() => undefined);
   return text;
 }
+
+/** For tests: forget kept copies. */
+export function forgetIcsCopies() { mem.clear(); }
 
 interface Occ { uid: string; start: number; end: number; allDay: boolean; ev: any }
 function parse(text: string): any {

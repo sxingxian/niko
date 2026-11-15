@@ -1,4 +1,4 @@
-import { icalList, icalDetail, icalCheck, icalLinks, normalizeLink } from '../apps/api/src/calendarlink.ts';
+import { icalList, icalDetail, icalCheck, icalLinks, normalizeLink, forgetIcsCopies } from '../apps/api/src/calendarlink.ts';
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 const ICS = [
 'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Google Inc//Google Calendar 70.9054//EN',
@@ -84,3 +84,42 @@ ok(o.title === 'Team sync' && sgt(o.start) === '14:00', 'an Outlook event (Windo
 ev = await icalList({ url: URL1, url2: 'https://outlook.live.com/owa/calendar/0/gone/cid-1/calendar.ics' }, a, b, tz);
 ok(ev.some((e) => e.title === 'Dentist'), 'a calendar that stops working does not hide the others');
 try { await icalList({ url: 'https://outlook.live.com/owa/calendar/0/gone/cid-1/calendar.ics' }, a, b, tz); ok(false, 'all failed accepted'); } catch { ok(true, 'when every address fails, the problem is reported'); }
+
+// ---- Rate limits: read each feed at most every 10 minutes, keep the last good copy, back off when told to
+{
+  const realNow = Date.now; let clock = realNow.call(Date); Date.now = () => clock;
+  const G = 'https://calendar.google.com/calendar/ical/rl%40gmail.com/private-x/basic.ics';
+  let calls = 0, mode = 'ok', retryAfter = null, uaSeen = '';
+  const before = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    if (String(input) !== G) return before(input, init);
+    calls++; uaSeen = new Headers(init.headers).get('user-agent') ?? '';
+    if (mode === '429') return new Response('<html>Too many requests (CAPTCHA)</html>', { status: 429, headers: retryAfter ? { 'retry-after': retryAfter } : {} });
+    if (mode === '503') return new Response('busy', { status: 503 });
+    return new Response(ICS, { headers: { 'content-type': 'text/calendar' } });
+  };
+  forgetIcsCopies();
+  const S2 = { url: G };
+  let [x, y] = day(2026, 11, 16);
+  await icalList(S2, x, y, tz); await icalList(S2, x, y, tz); await icalDetail(S2, (await icalList(S2, x, y, tz))[1].id, tz);
+  ok(calls === 1, `within 10 minutes the feed is read once, however often screens ask (${calls} read)`);
+  ok(!/Mozilla/.test(uaSeen) && /Niko-Calendar/.test(uaSeen), 'Google is asked as a calendar client, not as a browser');
+  clock += 11 * 60_000; await icalList(S2, x, y, tz);
+  ok(calls === 2, 'after 10 minutes it is read again');
+  // Google says 429 with a saved copy: the copy is shown quietly, and Google is left alone for Retry-After.
+  mode = '429'; retryAfter = '1200'; clock += 11 * 60_000;
+  const ev429 = await icalList(S2, x, y, tz);
+  ok(ev429.some((e) => e.title === 'Dentist'), '429 with a saved copy: events still show, no error');
+  const c429 = calls; clock += 5 * 60_000; await icalList(S2, x, y, tz); clock += 10 * 60_000; await icalList(S2, x, y, tz);
+  ok(calls === c429, `during the 20 min Google asked for (Retry-After: 1200), it is not asked again (${calls - c429} extra)`);
+  mode = 'ok'; clock += 6 * 60_000; await icalList(S2, x, y, tz);
+  ok(calls === c429 + 1, 'after the wait, it is read again');
+  // 503 is a passing fault: same treatment, 5 minutes.
+  mode = '503'; clock += 11 * 60_000;
+  ok((await icalList(S2, x, y, tz)).length > 0, 'a server fault (503) with a saved copy: events still show');
+  // No saved copy at all and Google says 429: a plain message, and no hammering.
+  forgetIcsCopies(); mode = '429'; retryAfter = null; calls = 0; clock += 60 * 60_000;
+  try { await icalList(S2, x, y, tz); ok(false, '429 without copy accepted'); } catch (e) { ok(/Google is limiting how often the first calendar can be read.*about 15 min/.test(e.message), '429 with no saved copy explains and says when: ' + e.message); }
+  try { await icalList(S2, x, y, tz); } catch (e) { ok(calls === 1 && /asked Niko to wait/.test(e.message), 'and asking again right away does not call Google: ' + e.message); }
+  Date.now = realNow;
+}

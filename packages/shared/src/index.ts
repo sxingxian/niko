@@ -234,7 +234,12 @@ export interface MailItem { id: string; from: string; subject: string; source: s
 export interface EventItem { id: string; provider: string; time: string; title: string; source: string; start: number; allDay?: boolean }
 export interface NoteItem { id: string; provider: string; title: string; source: string; edited?: number }
 export interface ChatItem { provider: string; chatId: string; title: string; last: string; source: string; lastAt?: number }
-export interface Brief { mail: MailItem[]; events: EventItem[]; notes: NoteItem[]; chats: ChatItem[]; problems: string[] }
+/** The parts of the briefing, so each screen asks only for its own: Inbox = mail + chats, Calendar = events, Notes = notes. */
+export type BriefPart = 'mail' | 'events' | 'notes' | 'chats';
+export const BRIEF_PARTS: BriefPart[] = ['mail', 'events', 'notes', 'chats'];
+/** A source that couldn't be read, tagged with the part it belongs to so it only shows on that part's screen. */
+export interface BriefProblem { part: BriefPart; source: string; text: string }
+export interface Brief { mail: MailItem[]; events: EventItem[]; notes: NoteItem[]; chats: ChatItem[]; problems: BriefProblem[] }
 
 /** One block of a note's content, as plain text: Niko never renders a provider's HTML. */
 export interface DocBlock { kind: 'h1' | 'h2' | 'h3' | 'p' | 'li' | 'ol' | 'todo' | 'quote' | 'code' | 'hr' | 'prop'; text: string; done?: boolean; depth?: number; label?: string }
