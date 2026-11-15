@@ -94,7 +94,7 @@ export const PROVIDERS: ProviderDef[] = [
     { text: 'Your location is sent only with weather questions, rounded to about a kilometre, and is never stored. Without it, Niko uses the home place below.' },
   ], can: { read: true, send: false } },
   { id: 'workers-ai', name: 'Cloudflare Workers AI', group: 'ai', how: 'Free daily allowance', kind: 'builtin', can: { read: true, send: false } },
-  { id: 'elevenlabs', name: 'ElevenLabs voice', group: 'ai', how: 'Your API key · your cloned voice', kind: 'token', fields: [{ key: 'apiKey', label: 'API key', type: 'password' }, { key: 'voiceId', label: 'Voice ID', type: 'text', shown: true }], can: { read: false, send: false } },
+  { id: 'elevenlabs', name: 'ElevenLabs voice', group: 'ai', how: 'Your API key · your cloned voice', kind: 'token', hidden: true, fields: [{ key: 'apiKey', label: 'API key', type: 'password' }, { key: 'voiceId', label: 'Voice ID', type: 'text', shown: true }], can: { read: false, send: false } },
   // Keys for other AI systems are added, ordered and removed on the Engine screen, where there can be several.
   { id: 'custom-ai', name: 'Other AI systems', group: 'ai', how: 'Your API keys · OpenAI-compatible, Anthropic or Google', kind: 'token', hidden: true, fields: [
     { key: 'baseUrl', label: 'Base URL', type: 'url', placeholder: 'https://', shown: true },
@@ -155,11 +155,36 @@ export const SHIFT_ORDER = ['cyan', 'violet', 'rose', 'amber', 'emerald'];
 
 export interface Appearance { mode: 'shift' | 'single'; colours: string[]; single: string; customHue: number; seconds: number }
 export type Brain = 'workers-ai' | 'custom-ai' | 'self-hosted-ai';
-/** Where Niko's speech can come from. The device voice is not listed: it is always the last resort. */
-export type VoiceSource = 'workers' | 'kokoro' | 'self-hosted' | 'elevenlabs';
-export const VOICE_SOURCES: VoiceSource[] = ['workers', 'kokoro', 'self-hosted', 'elevenlabs'];
-/** Short names for the voices, as shown on chips and in the voice list. */
-export const VOICE_NAMES: Record<VoiceSource | 'device', string> = { workers: 'Cloudflare voice', kokoro: 'On-device voice', 'self-hosted': 'Your voice server', elevenlabs: 'ElevenLabs', device: 'Device voice' };
+/** Where Niko's speech can come from: three built in, and any number of the user's voice API keys ("vkey:<id>").
+ * The device voice is not listed: it is always the last resort. */
+export type VoiceSource = 'workers' | 'kokoro' | 'self-hosted' | `vkey:${string}`;
+export const VOICE_SOURCES: VoiceSource[] = ['workers', 'kokoro', 'self-hosted'];
+export const VOICE_ENTRY = /^(workers|kokoro|self-hosted|vkey:[a-z0-9]{1,16})$/;
+export const MAX_VOICE_KEYS = 10;
+/** Short names for the built-in voices, as shown on chips and in the voice list. */
+export const VOICE_NAMES: Record<'workers' | 'kokoro' | 'self-hosted' | 'device', string> = { workers: 'Cloudflare voice', kokoro: 'On-device voice', 'self-hosted': 'Your voice server', device: 'Device voice' };
+export const voiceName = (v: VoiceSource | 'device' | undefined) => (v && v in VOICE_NAMES ? VOICE_NAMES[v as keyof typeof VOICE_NAMES] : 'Your voice');
+
+/** Voice services that a key can be added for. "openai" also covers any OpenAI-compatible speech API. */
+export type VoiceProvider = 'openai' | 'elevenlabs' | 'google' | 'azure' | 'deepgram' | 'cartesia';
+/** A saved voice key as the Voice screen sees it: everything except the key itself. */
+export interface VoiceKeyInfo { id: string; label: string; provider: VoiceProvider; voice: string; model: string; baseUrl: string; region: string }
+export const VOICE_PROVIDERS: { id: string; provider: VoiceProvider; name: string; baseUrl?: string; models?: string[]; voices?: { id: string; name: string }[]; note: string }[] = [
+  { id: 'openai', provider: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'],
+    voices: ['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse'].map((v) => ({ id: v, name: v[0]!.toUpperCase() + v.slice(1) })),
+    note: 'Natural voices, paid per character. Keys from platform.openai.com.' },
+  { id: 'elevenlabs', provider: 'elevenlabs', name: 'ElevenLabs', models: ['eleven_flash_v2_5', 'eleven_turbo_v2_5', 'eleven_multilingual_v2'], note: 'Very natural, and your own cloned voices. Its free plan refuses cloud servers such as Niko’s; a paid plan works. The key needs Text to Speech and Voices permissions.' },
+  { id: 'google', provider: 'google', name: 'Google Cloud', note: 'Many languages. Uses an API key with the Cloud Text-to-Speech API enabled; a free monthly allowance applies.' },
+  { id: 'azure', provider: 'azure', name: 'Microsoft Azure', note: 'Many languages and neural voices. Uses a Speech resource key and its region; a free monthly allowance applies.' },
+  { id: 'deepgram', provider: 'deepgram', name: 'Deepgram', voices: ['thalia', 'andromeda', 'helena', 'apollo', 'arcas', 'aries', 'asteria', 'athena', 'hera', 'luna', 'orion', 'orpheus', 'zeus'].map((v) => ({ id: `aura-2-${v}-en`, name: v[0]!.toUpperCase() + v.slice(1) })),
+    note: 'Fast, natural English voices (Aura 2), with free credit when you sign up.' },
+  { id: 'cartesia', provider: 'cartesia', name: 'Cartesia', models: ['sonic-3.5', 'sonic-3', 'sonic-latest'], note: 'Very fast, natural voices, with a free monthly allowance.' },
+  { id: 'other', provider: 'openai', name: 'Other (OpenAI-compatible)', note: 'Any speech service with an OpenAI-compatible API, such as Groq or a hosted Kokoro.' },
+];
+export function voicePresetOf(k: { provider: VoiceProvider; baseUrl: string }): string {
+  if (k.provider !== 'openai') return k.provider;
+  return k.baseUrl.trim().replace(/\/+$/, '').toLowerCase() === 'https://api.openai.com/v1' ? 'openai' : 'other';
+}
 /** The default order: Cloudflare's voice, then the device voice. */
 export const DEFAULT_VOICES: VoiceSource[] = ['workers'];
 
@@ -214,6 +239,8 @@ export interface EnginePrefs {
   voice?: 'elevenlabs' | 'device';
   /** The voices to try, in order; the device voice always comes after them. */
   voices?: VoiceSource[];
+  /** Voices being skipped for now (usage limit, refused key, no answer), and until when. Set by the server only. */
+  voiceRest?: Record<string, BrainRest>;
   workersVoice?: string;
   kokoroVoice?: string;
   wake: boolean; onlyMyVoice: boolean; fallback: boolean; listen: 'device';
@@ -221,8 +248,10 @@ export interface EnginePrefs {
 
 /** The order to try voices in, for accounts saved before and after the voice order existed. */
 export function voiceOrder(e: Partial<EnginePrefs> | undefined): VoiceSource[] {
-  if (Array.isArray(e?.voices)) return [...new Set(e!.voices.filter((v): v is VoiceSource => (VOICE_SOURCES as string[]).includes(v)))];
-  return e?.voice === 'elevenlabs' ? ['elevenlabs', 'workers'] : [...DEFAULT_VOICES];
+  // An ElevenLabs key saved before there could be several is read as voice key "el1".
+  const up = (v: string) => (v === 'elevenlabs' ? 'vkey:el1' : v);
+  if (Array.isArray(e?.voices)) return [...new Set(e!.voices.map((v) => up(String(v))).filter((v) => VOICE_ENTRY.test(v)))] as VoiceSource[];
+  return e?.voice === 'elevenlabs' ? ['vkey:el1', 'workers'] : [...DEFAULT_VOICES];
 }
 /** The order to try brains in, for accounts saved before and after the order existed. */
 export function brainOrder(e: Partial<EnginePrefs> | undefined): BrainEntry[] {

@@ -1,14 +1,15 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
-import { aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, isWeatherQuestion, MAX_AI_KEYS, type BrainEntry } from '@niko/shared';
-import { APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, VOICE_SOURCES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
+import { aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, isWeatherQuestion, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
+import { APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
 import { audit, requireUser, tooMany } from '../lib/session';
 import { eventDetail, mailDetail, noteDetail } from '../details';
 import { BrainFail, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveKeys, testEntry, think } from '../brains';
 import { cleanWhere, forecastText, geocode, stripWeatherTags, weatherTags } from '../weather';
+import { defaultVoiceLabel, listVoices, loadVoiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
 import { icalCheck, normalizeLink } from '../calendarlink';
 import { IMAP_PROVIDERS, imapCheck, isImapProvider } from '../mailbox';
 import {
@@ -54,13 +55,19 @@ app.patch('/me', async (c) => {
       brains = [...new Set(e.brains.map(String).filter((x: string) => BRAIN_ENTRY.test(x) && (!x.startsWith('key:') || saved.has(x))))].slice(0, MAX_AI_KEYS + 2) as BrainEntry[];
       if (!brains.length) return c.json({ error: 'Switch on at least one brain.' }, 400);
     }
+    // The voice order may only name the built-in voices and voice keys this account has saved.
+    let voices: VoiceSource[] | null = null;
+    if (Array.isArray(e.voices)) {
+      const saved = new Set((await loadVoiceKeys(c.env, c.get('db'), u.id)).map((k) => `vkey:${k.id}`));
+      voices = voiceOrder({ voices: e.voices }).filter((x) => VOICE_ENTRY.test(x) && (!x.startsWith('vkey:') || saved.has(x))).slice(0, MAX_VOICE_KEYS + 3);
+    }
     set.engine = {
       ...(u.engine as object),
       ...(e.brain ? { brain: (['custom-ai', 'self-hosted-ai'] as string[]).includes(e.brain) ? e.brain : 'workers-ai' } : {}),
       ...(brains ? { brains, brain: brainKind(brains[0]) } : {}),
       ...(e.model ? { model: e.model === 'large' ? 'large' : 'fast' } : {}),
       ...(e.voice ? { voice: e.voice === 'elevenlabs' ? 'elevenlabs' : 'device' } : {}),
-      ...(Array.isArray(e.voices) ? { voices: voiceOrder({ voices: e.voices }).slice(0, VOICE_SOURCES.length) } : {}),
+      ...(voices ? { voices } : {}),
       ...(typeof e.workersVoice === 'string' && WORKERS_VOICES.some((v) => v.id === e.workersVoice) ? { workersVoice: e.workersVoice } : {}),
       ...(typeof e.kokoroVoice === 'string' && KOKORO_VOICES.some((v) => v.id === e.kokoroVoice) ? { kokoroVoice: e.kokoroVoice } : {}),
       ...(typeof e.wake === 'boolean' ? { wake: e.wake } : {}),
@@ -655,57 +662,120 @@ app.post('/automations/:provider/run', async (c) => {
   return c.json({ ok: res.ok, status: res.status });
 });
 
-/** ElevenLabs' error, in words a person can act on. ElevenLabs puts a status code in `detail.status`. */
-async function elevenLabsProblem(res: Response): Promise<{ code: string; message: string }> {
-  const j: any = await res.json().catch(() => null);
-  const code = String(j?.detail?.status ?? j?.detail?.code ?? res.status);
-  const text = String(j?.detail?.message ?? '');
-  if (code === 'detected_unusual_activity' || /unusual activity|free tier usage disabled/i.test(text))
-    return { code, message: 'ElevenLabs refused: its free plan blocks requests that come from cloud servers, which is where Niko runs. A paid ElevenLabs plan (Starter or above) works.' };
-  if (code === 'missing_permissions' || /permission/i.test(text))
-    return { code, message: 'Your ElevenLabs key is missing the Text to Speech permission (and Voices: Read, to list voices). Edit the key in ElevenLabs → API keys, or make a new one.' };
-  if (code === 'invalid_api_key' || res.status === 401) return { code, message: 'ElevenLabs did not accept that key. Check it was copied in full.' };
-  if (code === 'paid_plan_required' || code === 'payment_required' || res.status === 402)
-    return { code, message: 'That voice needs a paid ElevenLabs plan. Pick one of your own voices or a default voice.' };
-  if (code === 'voice_not_found' || res.status === 404) return { code, message: 'ElevenLabs could not find that voice. Pick another one under Voice.' };
-  if (code === 'quota_exceeded' || res.status === 429) return { code, message: 'Your ElevenLabs character allowance is used up for now.' };
-  return { code, message: `ElevenLabs could not speak that (${res.status}).` };
+// ---------------------------------------------------------------- voice keys (the Voice screen)
+app.get('/voice/keys', async (c) => {
+  const keys = await loadVoiceKeys(c.env, c.get('db'), c.get('user').id);
+  return c.json({ keys: keys.map(voiceKeyInfo) });
+});
+
+/** A voice key from the screen: its settings, checked and trimmed. */
+function voiceKeyFrom(b: any): Omit<VoiceKey, 'id' | 'apiKey' | 'label'> & { label: string; apiKey: string } {
+  const provider = (['openai', 'elevenlabs', 'google', 'azure', 'deepgram', 'cartesia'] as const).find((p) => p === b?.provider) ?? 'openai';
+  return { provider, label: clip(b?.label, 40), voice: clip(b?.voice, 120), model: clip(b?.model, 100), baseUrl: provider === 'openai' ? clip(b?.baseUrl, 500) : '', region: provider === 'azure' ? clip(b?.region, 30).toLowerCase() : '', apiKey: clip(b?.apiKey, 4000) };
+}
+/** The saved key a request may use: only with the same service, and (for OpenAI-compatible ones) the same address. */
+function savedFor(prior: VoiceKey | undefined, k: { provider: string; baseUrl: string }): string {
+  if (!prior || prior.provider !== k.provider) return '';
+  if (k.provider === 'openai' && !sameOrigin(prior.baseUrl, k.baseUrl)) return '';
+  return prior.apiKey;
 }
 
-// Engine screen: the voices in the user's ElevenLabs library. A key typed but not saved yet may be passed; it is only sent to ElevenLabs.
-const VOICE_ID = /^[A-Za-z0-9]{1,64}$/;
-app.post('/voice/voices', async (c) => {
-  const b = await c.req.json<{ apiKey?: string }>().catch(() => ({} as { apiKey?: string }));
-  const key = (typeof b.apiKey === 'string' && b.apiKey.trim()) || (await credentials(c.env, c.get('db'), c.get('user').id, 'elevenlabs'))?.apiKey;
-  if (!key) return c.json({ voices: [] });
-  const res = await fetch('https://api.elevenlabs.io/v1/voices', { headers: { 'xi-api-key': String(key).slice(0, 200), accept: 'application/json' } });
-  if (!res.ok) return c.json({ error: (await elevenLabsProblem(res)).message }, 502);
-  const j: any = await res.json();
-  const voices = (Array.isArray(j.voices) ? j.voices : []).slice(0, 200).map((v: any) => ({ id: String(v.voice_id), name: String(v.name ?? 'Voice').slice(0, 80), cloned: v.category === 'cloned' || v.category === 'professional' }));
-  return c.json({ voices: voices.filter((v: { id: string }) => VOICE_ID.test(v.id)) });
+// Adds a voice key, or changes one (a blank key keeps the saved one). Changing a key ends its rest.
+app.post('/voice/keys', async (c) => {
+  const b = await c.req.json<any>().catch(() => ({}));
+  const u = c.get('user'), db = c.get('db');
+  const keys = await loadVoiceKeys(c.env, db, u.id);
+  const k = voiceKeyFrom(b);
+  const problem = voiceKeyProblem(k);
+  if (problem) return c.json({ error: problem }, 400);
+  const prior = typeof b.id === 'string' ? keys.find((x) => x.id === b.id) : undefined;
+  if (b.id && !prior) return c.json({ error: 'That voice key is no longer saved.' }, 404);
+  const apiKey = k.apiKey || savedFor(prior, k);
+  if (!apiKey) return c.json({ error: prior ? 'Paste the API key again when you change the service or its address.' : 'Paste the API key.' }, 400);
+  if (!prior && keys.length >= MAX_VOICE_KEYS) return c.json({ error: `Up to ${MAX_VOICE_KEYS} voice keys can be saved.` }, 400);
+  let id = prior?.id ?? '';
+  while (!id || (!prior && keys.some((x) => x.id === id))) id = Array.from(crypto.getRandomValues(new Uint8Array(8)), (n) => 'abcdefghijklmnopqrstuvwxyz0123456789'[n % 36]).join('');
+  const key: VoiceKey = { ...k, id, apiKey, label: k.label || defaultVoiceLabel(k) };
+  await saveVoiceKeys(c.env, db, u.id, prior ? keys.map((x) => (x.id === id ? key : x)) : [...keys, key]);
+  await noteVoice(db, u, `vkey:${id}`, null);
+  await audit(c, prior ? 'voice-key.changed' : 'voice-key.added', { provider: key.provider }, u.id);
+  return c.json({ ok: true, key: voiceKeyInfo(key) });
+});
+
+// Removing a voice key deletes it outright, and takes it out of the order.
+app.delete('/voice/keys/:id', async (c) => {
+  const u = c.get('user'), db = c.get('db'), id = c.req.param('id');
+  const keys = await loadVoiceKeys(c.env, db, u.id);
+  if (!keys.some((k) => k.id === id)) return c.json({ ok: true });
+  await saveVoiceKeys(c.env, db, u.id, keys.filter((k) => k.id !== id));
+  const engine = u.engine as unknown as EnginePrefs;
+  const voices = voiceOrder(engine).filter((x) => x !== `vkey:${id}`);
+  const voiceRest = { ...(engine.voiceRest ?? {}) }; delete voiceRest[`vkey:${id}`];
+  await db.update(users).set({ engine: { ...engine, voices, voiceRest } as any }).where(eq(users.id, u.id));
+  await audit(c, 'voice-key.removed', {}, u.id);
+  return c.json({ ok: true });
+});
+
+// The voices a key can use. A key typed but not saved may be passed; a saved key is used only with its own service and address.
+app.post('/voice/keys/voices', async (c) => {
+  const u = c.get('user');
+  if (await tooMany(c, 'voices:' + u.id, 30, 15)) return c.json({ error: 'Too many lookups just now. Try again in a few minutes.' }, 429);
+  const b = await c.req.json<any>().catch(() => ({}));
+  const k = voiceKeyFrom(b);
+  const prior = typeof b.id === 'string' ? (await loadVoiceKeys(c.env, c.get('db'), u.id)).find((x) => x.id === b.id) : undefined;
+  const apiKey = k.apiKey || savedFor(prior, k);
+  if (!apiKey) return c.json({ error: 'Paste the API key to list its voices.' }, 400);
+  try { return c.json({ voices: await listVoices({ ...k, id: 'x', apiKey }) }); }
+  catch (e) {
+    const f = e instanceof BrainFail ? e : null;
+    return c.json({ error: f?.why === 'refused' ? `It refused the key${f.detail ? `: ${f.detail}` : '.'}` : `The voices could not be listed${f?.detail ? `: ${f.detail}` : '.'}` }, 502);
+  }
 });
 
 // ---------------------------------------------------------------- speech out
 // One endpoint for every voice that is made on a server: Cloudflare's own (Workers AI), the user's own voice server,
-// and ElevenLabs. Kokoro runs on the device and the device voice in the browser, so neither comes here.
+// and the user's voice keys. Kokoro runs on the device and the device voice in the browser, so neither comes here.
 // "Preview" may pass settings that are not saved yet; they are used for that one request only.
+// A voice that fails is set to rest (usage limit, refused key, no answer), so the next lines skip it straight away.
 const TTS_MAX_CHARS = 800;
-const TTS_MAX_BYTES = 8 * 1024 * 1024;
-type TtsBody = { text?: string; source?: string; workersVoice?: string; apiKey?: string; voiceId?: string; baseUrl?: string; voice?: string; model?: string };
-const mp3 = (body: BodyInit) => new Response(body, { headers: { 'content-type': 'audio/mpeg', 'cache-control': 'no-store' } });
-const ttsError = (c: { json: (b: unknown, s: any) => Response }, error: string, status = 502) => c.json({ error }, status);
-
+type TtsBody = { text?: string; source?: string; workersVoice?: string; baseUrl?: string; voice?: string; model?: string; apiKey?: string; key?: any; preview?: boolean };
+const ttsError = (c: { json: (b: unknown, s: any) => Response }, error: string, status = 502, rest?: BrainRest | null) => c.json({ error, ...(rest ? { rest } : {}) }, status);
 app.post('/voice/tts', async (c) => {
   const b = await c.req.json<TtsBody>().catch(() => ({} as TtsBody));
   const text = String(b.text ?? '').replace(/\s+/g, ' ').trim().slice(0, TTS_MAX_CHARS);
   if (!text) return ttsError(c, 'Nothing to say.', 400);
-  const u = c.get('user');
+  const u = c.get('user'), db = c.get('db');
   // Every voice here uses something shared or paid for, so each account gets a generous but finite number of lines.
   if (await tooMany(c, 'tts:' + u.id, 150, 15)) return ttsError(c, 'Niko has spoken a lot in the last few minutes. The device voice is used for now.', 429);
-  const source = b.source === 'workers' || b.source === 'self-hosted' ? b.source : 'elevenlabs';
-  if (source === 'workers') return workersTts(c, text, typeof b.workersVoice === 'string' ? b.workersVoice : (u.engine as Partial<EnginePrefs>)?.workersVoice);
-  if (source === 'self-hosted') return selfHostedTts(c, text, b);
-  return elevenLabsTts(c, text, b);
+  const source = b.source === 'elevenlabs' ? 'vkey:el1' : String(b.source ?? '');
+  const preview = b.preview === true;
+  try {
+    let out: { bytes: Uint8Array; type: string };
+    if (source === 'workers') out = await workersTts(c, text, typeof b.workersVoice === 'string' ? b.workersVoice : (u.engine as Partial<EnginePrefs>)?.workersVoice);
+    else if (source === 'self-hosted') out = await selfHostedTts(c, text, b);
+    else if (source.startsWith('vkey:')) {
+      const keys = await loadVoiceKeys(c.env, db, u.id);
+      const saved = keys.find((x) => `vkey:${x.id}` === source);
+      let key: VoiceKey | undefined = saved;
+      if (preview && b.key) {
+        // Preview with what is on the screen: a typed key, or the saved one where it is still for the same service and address.
+        const k = voiceKeyFrom(b.key);
+        const apiKey = k.apiKey || savedFor(saved, k);
+        if (!apiKey) return ttsError(c, 'Paste the API key to hear this voice.', 400);
+        key = { ...k, id: 'preview', apiKey };
+      }
+      if (!key) return ttsError(c, 'That voice key is no longer saved.', 404);
+      out = await speakWithKey(key, text);
+    } else return ttsError(c, 'Unknown voice.', 400);
+    if (!preview && (u.engine as unknown as EnginePrefs)?.voiceRest?.[source]) await noteVoice(db, u, source, null);
+    return new Response(out.bytes, { headers: { 'content-type': out.type, 'cache-control': 'no-store' } });
+  } catch (e) {
+    const f = e instanceof BrainFail ? e : new BrainFail(String((e as Error)?.message ?? e).slice(0, 200), 'down', 60_000);
+    console.warn(`tts ${source} failed (${f.why}): ${f.message.slice(0, 200)}`);
+    const rest = preview ? null : await noteVoice(db, u, source, f);
+    const said = f.detail ? ` It said: “${f.detail}”` : '';
+    return ttsError(c, (f.why === 'limit' ? 'Its usage limit is reached; the next voice speaks until it resets.' : f.why === 'refused' ? 'It refused the request. Check its key and voice.' : 'It did not answer just now.') + said, 502, rest);
+  }
 });
 
 /** Workers AI returns audio in different shapes depending on the model and runtime. */
@@ -720,68 +790,35 @@ async function audioBytes(out: unknown): Promise<Uint8Array | null> {
   return null;
 }
 
-async function workersTts(c: any, text: string, voiceId: string | undefined): Promise<Response> {
+async function workersTts(c: any, text: string, voiceId: string | undefined): Promise<{ bytes: Uint8Array; type: string }> {
   const v = WORKERS_VOICES.find((x) => x.id === voiceId) ?? WORKERS_VOICES[0]!;
+  let msg = '';
   try {
     const out = v.speaker
       ? await c.env.AI.run(v.model as any, { text, speaker: v.speaker, encoding: 'mp3' } as any, { returnRawResponse: true } as any)
       : await c.env.AI.run(v.model as any, { prompt: text, lang: 'en' } as any);
     const bytes = await audioBytes(out);
-    if (!bytes?.length) throw new Error('empty audio');
-    return mp3(bytes);
-  } catch (e) {
-    const msg = String((e as Error)?.message ?? e);
-    console.warn(`workers-ai tts ${v.model}: ${msg.slice(0, 200)}`);
-    // Cloudflare stops Workers AI for the day once the free allocation is used.
-    if (/4006|daily free allocation|neurons|quota|limit/i.test(msg)) return ttsError(c, 'Cloudflare’s free voice allowance for today is used up; it resets at midnight UTC.');
-    return ttsError(c, 'Cloudflare’s voice did not answer just now.');
+    if (bytes?.length) return { bytes, type: 'audio/mpeg' };
+    msg = 'empty audio';
+  } catch (e) { msg = String((e as Error)?.message ?? e); }
+  console.warn(`workers-ai tts ${v.model}: ${msg.slice(0, 200)}`);
+  // Cloudflare stops Workers AI for the day once the free allocation is used.
+  if (/4006|daily free allocation|neurons|quota|limit/i.test(msg)) {
+    const d = new Date(); const midnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) + 30_000;
+    throw new BrainFail('workers daily allowance', 'limit', midnight - Date.now(), 'Cloudflare’s free voice allowance for today is used up; it resets at midnight UTC.');
   }
+  throw new BrainFail('workers tts', 'down', 60_000, 'Cloudflare’s voice did not answer just now.');
 }
 
 /** An OpenAI-compatible speech server (for example Kokoro-FastAPI or Chatterbox TTS Server) at a public https address. */
-function speechUrl(base: URL): string {
-  const root = base.toString().replace(/\/+$/, '');
-  if (/\/audio\/speech$/.test(root)) return root;
-  return /\/v1$/.test(root) ? `${root}/audio/speech` : `${root}/v1/audio/speech`;
-}
-async function selfHostedTts(c: any, text: string, b: TtsBody): Promise<Response> {
+async function selfHostedTts(c: any, text: string, b: TtsBody): Promise<{ bytes: Uint8Array; type: string }> {
   const saved = (await credentials(c.env, c.get('db'), c.get('user').id, 'self-hosted-voice')) as Record<string, string> | null;
   const pick = (k: 'baseUrl' | 'voice' | 'model' | 'apiKey') => (typeof b[k] === 'string' && b[k]!.trim() ? b[k]!.trim() : saved?.[k] ?? '').slice(0, 500);
-  const base = publicHttpsUrl(pick('baseUrl'));
-  if (!base) return ttsError(c, saved ? 'The voice server address must be a public https address.' : 'Your voice server is not set up yet.', 404);
-  const key = pick('apiKey');
-  let res: Response;
-  try {
-    res = await fetch(speechUrl(base), {
-      method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(20_000),
-      headers: { 'content-type': 'application/json', accept: 'audio/mpeg', ...(key ? { authorization: `Bearer ${key}` } : {}) },
-      body: JSON.stringify({ model: pick('model') || 'tts-1', voice: pick('voice') || 'alloy', input: text, response_format: 'mp3' }),
-    });
-  } catch { return ttsError(c, 'Your voice server did not answer. Check it is running and reachable at its https address.'); }
-  // Redirects are not followed, so a public address cannot bounce the request somewhere else.
-  if (res.status >= 300 && res.status < 400) return ttsError(c, 'Your voice server tried to redirect the request. Use its final https address.');
-  if (res.status === 401 || res.status === 403) return ttsError(c, 'Your voice server refused the request. Check its API key.');
-  if (!res.ok) return ttsError(c, `Your voice server answered ${res.status}. Check the voice and model names.`);
-  if (!/^audio\//.test(res.headers.get('content-type') ?? '')) return ttsError(c, 'Your voice server did not send audio back. Check the address ends at its OpenAI-compatible API.');
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  if (bytes.length > TTS_MAX_BYTES) return ttsError(c, 'Your voice server sent back more audio than expected.');
-  return new Response(bytes, { headers: { 'content-type': res.headers.get('content-type')!, 'cache-control': 'no-store' } });
-}
-
-async function elevenLabsTts(c: any, text: string, b: TtsBody): Promise<Response> {
-  const saved = await credentials(c.env, c.get('db'), c.get('user').id, 'elevenlabs');
-  const s = { apiKey: (typeof b.apiKey === 'string' && b.apiKey.trim()) || saved?.apiKey, voiceId: (typeof b.voiceId === 'string' && VOICE_ID.test(b.voiceId) && b.voiceId) || saved?.voiceId };
-  if (!s.apiKey || !s.voiceId) return ttsError(c, 'ElevenLabs is not linked.', 404);
-  const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(s.voiceId)}/stream`, {
-    method: 'POST', headers: { 'xi-api-key': String(s.apiKey).slice(0, 200), 'content-type': 'application/json', accept: 'audio/mpeg' },
-    body: JSON.stringify({ text, model_id: 'eleven_flash_v2_5' }),
-  });
-  if (!res.ok) {
-    const why = await elevenLabsProblem(res);
-    console.error(`elevenlabs tts ${res.status} ${why.code}`);
-    return c.json({ error: why.message, code: why.code }, 502);
-  }
-  return mp3(res.body!);
+  const baseUrl = pick('baseUrl');
+  if (!publicHttpsUrl(baseUrl)) throw new BrainFail('no server', 'refused', 30 * 60_000, saved ? 'The voice server address must be a public https address.' : 'Your voice server is not set up yet.');
+  // A saved key is only sent to the saved address.
+  const apiKey = typeof b.apiKey === 'string' && b.apiKey.trim() ? b.apiKey.trim() : saved && sameOrigin(saved.baseUrl ?? '', baseUrl) ? saved.apiKey ?? '' : '';
+  return speakWithKey({ id: 'self', label: '', provider: 'openai', baseUrl, voice: pick('voice') || 'alloy', model: pick('model') || 'tts-1', region: '', apiKey }, text);
 }
 
 export { getConnection };

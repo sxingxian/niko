@@ -5,7 +5,7 @@ import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSp
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { AI_PRESETS, aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, presetOf, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
-import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, VOICE_NAMES, VOICE_SOURCES, voiceOrder, WORKERS_VOICES, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
+import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, VOICE_NAMES, VOICE_PROVIDERS, VOICE_SOURCES, voiceName, voiceOrder, voicePresetOf, WORKERS_VOICES, type VoiceKeyInfo, type VoiceProvider, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
 import { api, Field, Icon, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
 
@@ -607,77 +607,116 @@ export function Engine() {
 }
 
 // ---------------------------------------------------------------- voice (speech out, speech in)
-type Src = VoiceSource;
-const VOICE_INFO: Record<Src, { sub: string; tag: string }> = {
+type Builtin = 'workers' | 'kokoro' | 'self-hosted';
+const VOICE_INFO: Record<Builtin, { sub: string; tag: string }> = {
   workers: { sub: 'Made on Cloudflare, where Niko runs. Nothing to set up.', tag: 'Free' },
   kokoro: { sub: 'A natural voice made on this device. Private, and works offline once downloaded.', tag: 'Free' },
   'self-hosted': { sub: 'A speech server you run, such as on a NAS. Can use a cloned voice.', tag: 'Your server' },
-  elevenlabs: { sub: 'Natural speech and your ElevenLabs voices. Needs a paid ElevenLabs plan.', tag: 'Paid plan' },
 };
 const PREVIEW_LINE = (name: string) => `Hi ${name || 'there'}, this is how I sound.`;
+/** A voice key being added or changed on this page. `id` is the saved key's id, or a temporary "new-…" one. */
+type VoiceDraft = VoiceKeyInfo & { apiKey: string; saved: boolean };
+const presetInfo = (k: { provider: VoiceProvider; baseUrl: string }) => VOICE_PROVIDERS.find((p) => p.id === voicePresetOf(k))!;
+function voiceRestLine(r: BrainRest | undefined): string {
+  if (!r || r.until <= Date.now()) return '';
+  if (r.why === 'limit') return `Usage limit reached. The next voice speaks, and this one is tried again at ${day(r.until)}.`;
+  if (r.why === 'refused') return `It refused the last request. Check its key and voice; it is tried again at ${day(r.until)}.`;
+  return `It did not answer just now. The next voice speaks, and this one is tried again at ${day(r.until)}.`;
+}
 
 export function Voice() {
   const { me, refreshMe } = useNiko();
   const { linked, values, ready, reload } = useLinks();
   const [e, setE] = useState<EnginePrefs | null>(null);
-  const [order, setOrder] = useState<Src[]>([]);
-  const [open, setOpen] = useState<Src | null>(null);
-  const [el, setEl] = useState({ apiKey: '', voiceId: '' });
+  const [order, setOrder] = useState<VoiceSource[]>([]);
+  const [keys, setKeys] = useState<VoiceDraft[]>([]);
+  const [open, setOpen] = useState<VoiceSource | null>(null);
   const [sh, setSh] = useState({ baseUrl: '', voice: '', model: '', apiKey: '' });
-  const [voices, setVoices] = useState<{ id: string; name: string; cloned: boolean }[]>([]);
+  const [lists, setLists] = useState<Record<string, { list: { id: string; name: string }[]; err: string; busy: boolean }>>({});
   const [note, setNote] = useState<Note>(null);
   const [busy, setBusy] = useState('');
-  const [dirty, setDirty] = useState({ el: false, sh: false });
+  const [dirty, setDirty] = useState<Record<string, boolean>>({});
+  const [confirm, setConfirm] = useState('');
   const [kReady, setKReady] = useState(kokoroReady());
   const [kProgress, setKProgress] = useState<number | null>(null);
   const playing = useRef<{ stop: () => void } | null>(null);
-  useEffect(() => { if (me && !e) { setE({ ...me.engine }); setOrder(voiceOrder(me.engine)); } }, [me, e]);
-  useEffect(() => () => playing.current?.stop(), []);
-  const listVoices = useCallback(async (apiKey?: string) => {
-    try {
-      const r = await api<{ voices: { id: string; name: string; cloned: boolean }[] }>('/voice/voices', { body: { apiKey: apiKey || undefined } });
-      const list = Array.isArray(r.voices) ? r.voices : [];
-      setVoices(list);
-      // Keep the chosen voice; pick one only if none is chosen or it no longer exists in the account.
-      setEl((v) => (!list[0] || list.some((x) => x.id === v.voiceId) ? v : { ...v, voiceId: (list.find((x) => x.cloned) ?? list[0])!.id }));
-    } catch (x: any) { setNote({ ok: false, text: x.message }); }
+  const loadKeys = useCallback(async () => {
+    const r = await api<{ keys: VoiceKeyInfo[] }>('/voice/keys');
+    setKeys((cur) => [...(r.keys ?? []).map((k) => ({ ...k, apiKey: '', saved: true })), ...cur.filter((k) => isNew(k.id))]);
   }, []);
+  useEffect(() => { if (me && !e) { setE({ ...me.engine }); setOrder(voiceOrder(me.engine)); void loadKeys(); } }, [me, e, loadKeys]);
+  useEffect(() => () => playing.current?.stop(), []);
   // Saved settings are shown again, so the page reopens as it was left.
   useEffect(() => {
     if (!ready) return;
-    if (values.elevenlabs?.voiceId && !dirty.el) setEl((v) => ({ ...v, voiceId: values.elevenlabs!.voiceId! }));
     const s = values['self-hosted-voice'];
     if (s && !dirty.sh) setSh((v) => ({ ...v, baseUrl: s.baseUrl ?? '', voice: s.voice ?? '', model: s.model ?? '' }));
   }, [ready, values]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (ready && linked.elevenlabs) void listVoices(); }, [ready, linked.elevenlabs, listVoices]);
   if (!me || !e) return null;
   const set = (p: Partial<EnginePrefs>) => setE({ ...e, ...p });
-  const editEl = (p: Partial<typeof el>) => { setDirty((d) => ({ ...d, el: true })); setEl({ ...el, ...p }); };
   const editSh = (p: Partial<typeof sh>) => { setDirty((d) => ({ ...d, sh: true })); setSh({ ...sh, ...p }); };
-  const others = VOICE_SOURCES.filter((v) => !order.includes(v));
-  const toggle = (v: Src, on: boolean) => { setOrder(on ? [...order, v] : order.filter((x) => x !== v)); if (on) setOpen(v); };
-  const move = (v: Src, by: -1 | 1) => {
+  const editKey = (id: string, p: Partial<VoiceDraft>) => { setDirty((d) => ({ ...d, [id]: true })); setKeys(keys.map((k) => (k.id === id ? { ...k, ...p } : k))); };
+  const keyOf = (v: VoiceSource) => keys.find((k) => `vkey:${k.id}` === v);
+  const all: VoiceSource[] = [...VOICE_SOURCES, ...keys.map((k) => `vkey:${k.id}` as VoiceSource)];
+  const others = all.filter((v) => !order.includes(v));
+  const toggle = (v: VoiceSource, on: boolean) => { setOrder(on ? [...order, v] : order.filter((x) => x !== v)); if (on) setOpen(v); };
+  const move = (v: VoiceSource, by: -1 | 1) => {
     const i = order.indexOf(v), j = i + by;
     if (i < 0 || j < 0 || j >= order.length) return;
     const next = [...order]; [next[i], next[j]] = [next[j]!, next[i]!]; setOrder(next);
+  };
+  const addKey = () => {
+    const id = 'new-' + Math.random().toString(36).slice(2, 8);
+    const p = VOICE_PROVIDERS[0]!;
+    setKeys([...keys, { id, label: '', provider: p.provider, baseUrl: p.baseUrl ?? '', voice: p.voices?.[0]?.id ?? '', model: p.models?.[0] ?? '', region: '', apiKey: '', saved: false }]);
+    setOrder([...order, `vkey:${id}`]); setOpen(`vkey:${id}`); setDirty((d) => ({ ...d, [id]: true }));
+  };
+  const removeKey = async (k: VoiceDraft) => {
+    if (confirm !== k.id) { setConfirm(k.id); return; }
+    setConfirm(''); setNote(null);
+    try {
+      if (!isNew(k.id)) await api(`/voice/keys/${encodeURIComponent(k.id)}`, { method: 'DELETE' });
+      setKeys(keys.filter((x) => x.id !== k.id)); setOrder(order.filter((x) => x !== `vkey:${k.id}`));
+      if (!isNew(k.id)) { await refreshMe(); setNote({ ok: true, text: 'Voice key removed.' }); }
+    } catch (x: any) { setNote({ ok: false, text: x.message }); }
+  };
+  const listVoices = async (k: VoiceDraft) => {
+    if (!k.apiKey.trim() && !k.saved) return;
+    setLists((m) => ({ ...m, [k.id]: { list: m[k.id]?.list ?? [], err: '', busy: true } }));
+    try {
+      const r = await api<{ voices: { id: string; name: string }[] }>('/voice/keys/voices', { body: { ...k, id: isNew(k.id) ? undefined : k.id, apiKey: k.apiKey || undefined } });
+      setLists((m) => ({ ...m, [k.id]: { list: r.voices, err: r.voices.length ? '' : 'No voices were listed for this key.', busy: false } }));
+      if (r.voices[0] && !r.voices.some((v) => v.id === k.voice)) editKey(k.id, { voice: r.voices[0].id });
+    } catch (x: any) { setLists((m) => ({ ...m, [k.id]: { list: [], err: x.message, busy: false } })); }
   };
 
   const save = async () => {
     setNote(null); setBusy('save');
     try {
-      if (dirty.el && (el.apiKey.trim() || linked.elevenlabs)) await api('/connections/elevenlabs', { body: { apiKey: el.apiKey, voiceId: el.voiceId } });
+      // New and changed keys are saved first; a new key's temporary id becomes its saved one.
+      let next = [...order];
+      const kept: VoiceDraft[] = [], savedIds = new Set<string>();
+      for (const k of keys) {
+        if (!dirty[k.id]) { kept.push(k); continue; }
+        if (isNew(k.id) && !k.apiKey.trim()) { if (next.includes(`vkey:${k.id}`)) throw new Error(`Paste the API key for ${k.label || presetInfo(k).name}, or remove it.`); kept.push(k); continue; }
+        const r = await api<{ key: VoiceKeyInfo }>('/voice/keys', { body: { ...k, id: isNew(k.id) ? undefined : k.id } });
+        next = next.map((v) => (v === `vkey:${k.id}` ? `vkey:${r.key.id}` as VoiceSource : v));
+        kept.push({ ...r.key, apiKey: '', saved: true }); savedIds.add(k.id);
+      }
+      // Saved keys are kept in the page at once, so a problem further on never saves them twice.
+      setKeys(kept); setOrder(next);
+      setDirty((d) => Object.fromEntries(Object.entries(d).filter(([id]) => !savedIds.has(id))));
       if (dirty.sh && sh.baseUrl.trim()) await api('/connections/self-hosted-voice', { body: sh });
-      if (order.includes('elevenlabs') && !linked.elevenlabs && !el.apiKey.trim()) throw new Error('Add your ElevenLabs API key, or switch ElevenLabs off.');
-      if (order.includes('self-hosted') && !linked['self-hosted-voice'] && !sh.baseUrl.trim()) throw new Error('Add your voice server’s address, or switch it off.');
-      await api('/me', { method: 'PATCH', body: { engine: { voices: order, workersVoice: e.workersVoice ?? 'melo', kokoroVoice: e.kokoroVoice ?? 'af_heart', wake: e.wake } } });
+      if (next.includes('self-hosted') && !linked['self-hosted-voice'] && !sh.baseUrl.trim()) throw new Error('Add your voice server’s address, or switch it off.');
+      await api('/me', { method: 'PATCH', body: { engine: { voices: next, workersVoice: e.workersVoice ?? 'melo', kokoroVoice: e.kokoroVoice ?? 'af_heart', wake: e.wake } } });
       await Promise.all([refreshMe(), reload()]);
-      setEl((v) => ({ ...v, apiKey: '' })); setSh((v) => ({ ...v, apiKey: '' })); setDirty({ el: false, sh: false });
-      setNote({ ok: true, text: order.includes('kokoro') && !kReady ? 'Saved. The on-device voice is skipped on this device until it is downloaded here.' : 'Saved.' });
+      setSh((v) => ({ ...v, apiKey: '' })); setDirty({});
+      setNote({ ok: true, text: next.includes('kokoro') && !kReady ? 'Saved. The on-device voice is skipped on this device until it is downloaded here.' : 'Saved.' });
     } catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setBusy(''); }
   };
 
   // Preview plays the voice as set on this page, saved or not.
-  const preview = async (v: Src | 'device') => {
+  const preview = async (v: VoiceSource | 'device') => {
     setNote(null); playing.current?.stop(); playing.current = null;
     const line = PREVIEW_LINE(me.name);
     if (v === 'device') { window.speechSynthesis?.cancel(); window.speechSynthesis?.speak(new SpeechSynthesisUtterance(line)); return; }
@@ -687,10 +726,11 @@ export function Voice() {
         const s = kokoroSpeak(line, e.kokoroVoice ?? 'af_heart'); playing.current = s;
         await s.started; await s.done; return;
       }
-      const body: Record<string, unknown> = { text: line, source: v };
+      const body: Record<string, unknown> = { text: line, source: v, preview: true };
       if (v === 'workers') body.workersVoice = e.workersVoice ?? 'melo';
-      if (v === 'elevenlabs') Object.assign(body, { apiKey: el.apiKey || undefined, voiceId: el.voiceId || undefined });
       if (v === 'self-hosted') Object.assign(body, { baseUrl: sh.baseUrl || undefined, voice: sh.voice || undefined, model: sh.model || undefined, apiKey: sh.apiKey || undefined });
+      const k = keyOf(v);
+      if (k) body.key = { ...k, apiKey: k.apiKey || undefined };
       const res = await fetch('/api/voice/tts', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? 'That voice could not speak.');
       const url = URL.createObjectURL(await res.blob()); const a = new Audio(url);
@@ -704,9 +744,55 @@ export function Voice() {
     catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setKProgress(null); }
   };
   const removeKokoro = async () => { await kokoroRemove(); setKReady(false); setNote({ ok: true, text: 'Removed the on-device voice from this device.' }); };
-  const previewBtn = (v: Src | 'device', disabled = false) => <button type="button" className="bt" onClick={() => preview(v)} disabled={!!busy || disabled}>{busy === 'preview-' + v ? 'Playing…' : 'Preview'}</button>;
+  const previewBtn = (v: VoiceSource | 'device', disabled = false) => <button type="button" className="bt" onClick={() => preview(v)} disabled={!!busy || disabled}>{busy === 'preview-' + v ? 'Playing…' : 'Preview'}</button>;
 
-  const settings = (v: Src) => {
+  const keySettings = (k: VoiceDraft) => {
+    const p = presetInfo(k), ml = lists[k.id];
+    const voices = ml?.list.length ? ml.list : p.voices ?? [];
+    const v: VoiceSource = `vkey:${k.id}`;
+    return (
+      <div className="eng-fields col">
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Service</span>
+            <select className="in" value={p.id} onChange={(x) => { const n = VOICE_PROVIDERS.find((y) => y.id === x.target.value)!; editKey(k.id, { provider: n.provider, baseUrl: n.baseUrl ?? (n.id === 'other' && p.id === 'other' ? k.baseUrl : ''), voice: n.voices?.[0]?.id ?? '', model: n.models?.[0] ?? '', region: '' }); setLists((m) => ({ ...m, [k.id]: { list: [], err: '', busy: false } })); }}>
+              {VOICE_PROVIDERS.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+          </label>
+          <label className="fld"><span className="k">Name · optional</span><input className="in" type="text" maxLength={40} placeholder="Work OpenAI, Spare Azure…" value={k.label} onChange={(x) => editKey(k.id, { label: x.target.value })} /></label>
+        </div>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">API key</span><input className="in" type="password" autoComplete="off" placeholder={k.saved ? 'Saved · type to replace' : 'Paste key'} value={k.apiKey} onChange={(x) => editKey(k.id, { apiKey: x.target.value })} onBlur={() => k.apiKey.trim() && ['elevenlabs', 'google', 'azure', 'cartesia'].includes(k.provider) && (k.provider !== 'azure' || k.region) && listVoices(k)} /></label>
+          {k.provider === 'azure' && <label className="fld"><span className="k">Region</span><input className="in" type="text" placeholder="eastus, southeastasia…" value={k.region} onChange={(x) => editKey(k.id, { region: x.target.value.trim().toLowerCase() })} /></label>}
+          {p.id === 'other' && <label className="fld"><span className="k">Base URL</span><input className="in" type="url" placeholder="https://api.groq.com/openai/v1" value={k.baseUrl} onChange={(x) => editKey(k.id, { baseUrl: x.target.value })} /></label>}
+        </div>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Voice</span>
+            {voices.length
+              ? <select className="in" value={voices.some((o) => o.id === k.voice) ? k.voice : ''} onChange={(x) => editKey(k.id, { voice: x.target.value })}>
+                  {!voices.some((o) => o.id === k.voice) && <option value="">{k.voice ? `${k.voice} · not in the list` : 'Choose a voice'}</option>}
+                  {voices.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                </select>
+              : <input className="in" type="text" placeholder={k.provider === 'openai' ? 'Voice name, such as alloy' : 'List voices, or type its id'} value={k.voice} onChange={(x) => editKey(k.id, { voice: x.target.value })} />}
+          </label>
+          {(p.models || p.id === 'other') && <label className="fld"><span className="k">Model</span>
+            {p.models
+              ? <select className="in" value={k.model} onChange={(x) => editKey(k.id, { model: x.target.value })}>{p.models.map((m) => <option key={m} value={m}>{m}</option>)}</select>
+              : <input className="in" type="text" placeholder="As listed by the service" value={k.model} onChange={(x) => editKey(k.id, { model: x.target.value })} />}
+          </label>}
+          {['elevenlabs', 'google', 'azure', 'cartesia'].includes(k.provider) && <button type="button" className="bt" onClick={() => listVoices(k)} disabled={!!ml?.busy || (!k.apiKey.trim() && !k.saved)}>{ml?.busy ? 'Listing…' : 'List voices'}</button>}
+        </div>
+        <div className="eng-fields">
+          {previewBtn(v, !k.apiKey.trim() && !k.saved)}
+          <button type="button" className={'bt' + (confirm === k.id ? ' danger' : '')} onClick={() => removeKey(k)} onBlur={() => confirm === k.id && setConfirm('')}>{confirm === k.id ? 'Tap again to remove' : 'Remove'}</button>
+        </div>
+        {ml?.err && <p className="hint vrow-warn">{ml.err}</p>}
+        <p className="hint">{p.note}</p>
+      </div>
+    );
+  };
+  const settings = (v: VoiceSource) => {
+    const k = keyOf(v);
+    if (k) return keySettings(k);
     if (v === 'workers') return (
       <div className="eng-fields col">
         <div className="eng-fields">
@@ -749,7 +835,7 @@ export function Voice() {
         </>}
       </div>
     );
-    if (v === 'self-hosted') return (
+    return (
       <div className="eng-fields col">
         <label className="fld"><span className="k">Server address</span><input className="in" type="url" placeholder="https://voice.example.com/v1" value={sh.baseUrl} onChange={(x) => editSh({ baseUrl: x.target.value })} /></label>
         <div className="eng-fields">
@@ -763,40 +849,34 @@ export function Voice() {
         <p className="hint">Any server with an OpenAI-compatible speech API works, such as Kokoro-FastAPI, or Chatterbox TTS Server, which can clone a voice from a few seconds of recording. It needs a public https address; Cloudflare Tunnel is a free way to give one to a NAS.</p>
       </div>
     );
-    return (
-      <div className="eng-fields col">
-        <label className="fld"><span className="k">ElevenLabs API key</span><input className="in" type="password" autoComplete="off" placeholder={linked.elevenlabs ? 'Saved · type to replace' : 'Paste key'} value={el.apiKey} onChange={(x) => editEl({ apiKey: x.target.value })} onBlur={() => el.apiKey.trim() && listVoices(el.apiKey)} /></label>
-        <div className="eng-fields">
-          <label className="fld"><span className="k">Voice</span>
-            <select className="in" value={el.voiceId} onChange={(x) => editEl({ voiceId: x.target.value })} disabled={!voices.length}>
-              {!voices.length && <option value="">Add your key to list your voices</option>}
-              {voices.map((x) => <option key={x.id} value={x.id}>{x.cloned ? `${x.name} · your cloned voice` : x.name}</option>)}
-            </select>
-          </label>
-          {previewBtn('elevenlabs', !el.apiKey && !linked.elevenlabs)}
-        </div>
-        <p className="hint">The key needs the Text to Speech and Voices permissions. ElevenLabs’ free plan refuses requests from cloud servers such as Niko’s, so a paid plan is needed.</p>
-      </div>
-    );
   };
-  const row = (v: Src, i: number | null) => {
-    const on = i !== null;
+  const name = (v: VoiceSource) => { const k = keyOf(v); return k ? k.label || presetInfo(k).name : voiceName(v); };
+  const sub = (v: VoiceSource) => {
+    const k = keyOf(v);
+    if (!k) return VOICE_INFO[v as Builtin]?.sub ?? '';
+    const vn = (lists[k.id]?.list ?? presetInfo(k).voices ?? []).find((o) => o.id === k.voice)?.name ?? k.voice;
+    return [presetInfo(k).name, vn || 'voice not set'].join(' · ') + (k.saved ? '' : ' · not saved yet');
+  };
+  const tag = (v: VoiceSource) => (keyOf(v) ? 'Your key' : VOICE_INFO[v as Builtin]?.tag ?? '');
+  const row = (v: VoiceSource, i: number | null) => {
+    const on = i !== null, resting = on ? voiceRestLine(me.engine.voiceRest?.[v]) : '';
     return (
       <li key={v} className={'vrow' + (on ? ' on' : '')}>
         <div className="vrow-head">
           <span className="n" aria-hidden="true">{on ? i + 1 : '–'}</span>
-          <button type="button" className="vrow-title" aria-expanded={open === v} onClick={() => setOpen(open === v ? null : v)}>
-            <b>{VOICE_NAMES[v]}</b><span className="sub">{VOICE_INFO[v].sub}</span>
+          <button type="button" className="vrow-title" aria-expanded={open === v} onClick={() => { const k = keyOf(v); if (open !== v && k?.saved && !lists[k.id] && ['elevenlabs', 'google', 'azure', 'cartesia'].includes(k.provider)) void listVoices(k); setOpen(open === v ? null : v); }}>
+            <b>{name(v)}</b><span className="sub">{sub(v)}</span>
+            {resting && <span className="sub vrow-warn">{resting}</span>}
             {v === 'kokoro' && on && !kReady && kokoroSupported() && <span className="sub vrow-warn">Not downloaded on this device yet, so Niko skips it here.</span>}
             {v === 'kokoro' && on && kReady && kokoroTooSlow() && <span className="sub vrow-warn">Too slow on this device to keep up while speaking, so Niko skips it here.</span>}
             {v === 'kokoro' && !kokoroSupported() && <span className="sub vrow-warn">This browser cannot run it.</span>}
           </button>
-          <span className="k tag">{VOICE_INFO[v].tag}</span>
+          <span className="k tag">{tag(v)}</span>
           {on && <span className="vrow-move">
-            <button type="button" className="stp" onClick={() => move(v, -1)} disabled={i === 0} aria-label={`Move ${VOICE_NAMES[v]} up`}>↑</button>
-            <button type="button" className="stp" onClick={() => move(v, 1)} disabled={i === order.length - 1} aria-label={`Move ${VOICE_NAMES[v]} down`}>↓</button>
+            <button type="button" className="stp" onClick={() => move(v, -1)} disabled={i === 0} aria-label={`Move ${name(v)} up`}>↑</button>
+            <button type="button" className="stp" onClick={() => move(v, 1)} disabled={i === order.length - 1} aria-label={`Move ${name(v)} down`}>↓</button>
           </span>}
-          <Switch on={on} onChange={(x) => toggle(v, x)} label={`Use ${VOICE_NAMES[v]}`} />
+          <Switch on={on} onChange={(x) => toggle(v, x)} label={`Use ${name(v)}`} />
         </div>
         {open === v && <div className="vrow-body">{settings(v)}</div>}
       </li>
@@ -809,6 +889,7 @@ export function Voice() {
       <div className="eng-grid">
         <section className="g eng-card" aria-label="Speech out">
           <span className="k" style={{ paddingBottom: 6 }}>Speech out · tried in this order</span>
+          <p className="hint" style={{ paddingBottom: 8 }}>Niko speaks with the first voice that works. When one reaches its usage limit, refuses its key or stops answering, the next one speaks straight away, and Niko goes back to it once it has reset.</p>
           <ol className="vlist">
             {order.map((v, i) => row(v, i))}
             <li className="vrow on last">
@@ -820,6 +901,7 @@ export function Voice() {
               </div>
             </li>
           </ol>
+          <button type="button" className="bt add-key" onClick={addKey} disabled={keys.length >= MAX_VOICE_KEYS}><Icon name="plus" size={18} />Add a voice API key</button>
           {others.length > 0 && <>
             <span className="k" style={{ padding: '18px 0 6px' }}>Not in use</span>
             <ul className="vlist">{others.map((v) => row(v, null))}</ul>
@@ -831,6 +913,7 @@ export function Voice() {
           <div className="eng-line"><span>Wake when I say “Niko”</span><Switch on={!!e.wake} onChange={(x) => set({ wake: x })} label="Wake when I say Niko" /></div>
           <div className="eng-line"><span>After Niko answers, keep listening for a few seconds so you can carry on talking</span><span className="k later">On</span></div>
           <div className="eng-line"><span>Respond only to my voice <span className="k soon">Not available yet</span></span><Switch on={false} onChange={() => undefined} label="Respond only to my voice" disabled /></div>
+          <p className="hint">Voice keys are encrypted on the server, never stored in this browser, and never shown again after saving. Two keys from the same account share one allowance, so a backup helps most when it is from another account or service.</p>
         </section>
       </div>
     </SettingsPage>

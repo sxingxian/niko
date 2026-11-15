@@ -41,7 +41,10 @@ const Ctx = createContext<NikoState>(null as never);
 export const useNiko = () => useContext(Ctx);
 
 
-/** One voice made on Niko's server (Cloudflare, the user's own server, ElevenLabs), played as audio. */
+/** Voices to skip on this device until a time, as the server last said (it also keeps them on the account). */
+const restingVoices = new Map<string, number>();
+const isResting = (v: string, e: EnginePrefs | undefined) => Math.max(restingVoices.get(v) ?? 0, e?.voiceRest?.[v]?.until ?? 0) > Date.now();
+/** One voice made on Niko's server (Cloudflare, the user's own server, a voice key), played as audio. */
 function serverSpeech(source: VoiceSource, text: string): Speech {
   const ctl = new AbortController();
   let el: HTMLAudioElement | null = null, url = '';
@@ -52,7 +55,12 @@ function serverSpeech(source: VoiceSource, text: string): Speech {
     const timer = window.setTimeout(() => ctl.abort(), 15_000);
     try {
       const r = await fetch('/api/voice/tts', { method: 'POST', credentials: 'same-origin', signal: ctl.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, source }) });
-      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? 'That voice could not speak.');
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        // The server says how long to skip this voice for (usage limit, refused key, no answer).
+        if (j?.rest?.until) restingVoices.set(source, j.rest.until);
+        throw new Error(j.error ?? 'That voice could not speak.');
+      }
       url = URL.createObjectURL(await r.blob());
       el = new Audio(url);
       el.onended = cleanup; el.onerror = cleanup;
@@ -180,6 +188,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         // Never starts a large download by itself, and does not wait while its engine is still starting up.
         // …and is skipped on a device too slow to keep up with its own speech.
         if (source === 'kokoro' && (!kokoroReady() || !kokoroLoaded() || kokoroTooSlow())) { if (kokoroReady()) kokoroWarm(); continue; }
+        // A voice that reached its limit or failed is skipped until its rest is over, so speech starts at once.
+        if (source !== 'kokoro' && isResting(source, engine)) continue;
         const s = speakWith(source, text, engine);
         current.current = s;
         try {
