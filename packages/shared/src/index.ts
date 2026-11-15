@@ -1,6 +1,6 @@
 // Shared constants and types for the Niko API and front ends.
 
-export type ProviderGroup = 'mail' | 'calendar' | 'notes' | 'automation' | 'messaging' | 'ai';
+export type ProviderGroup = 'mail' | 'calendar' | 'notes' | 'automation' | 'messaging' | 'weather' | 'ai';
 export type ConnectKind = 'oauth' | 'credentials' | 'token' | 'webhook' | 'builtin' | 'planned';
 
 /** `shown`: not secret (an address, a model, a voice), so it is shown back to its owner after saving. Keys never are. */
@@ -85,6 +85,14 @@ export const PROVIDERS: ProviderDef[] = [
   { id: 'telegram-user', name: 'Telegram personal account', group: 'messaging', how: 'Sign in with your number · all your chats', kind: 'planned', can: { read: false, send: false } },
   { id: 'slack', name: 'Slack', group: 'messaging', how: 'Slack sign-in · channels you pick', kind: 'oauth', app: 'slack', can: { read: true, send: true } },
   { id: 'discord', name: 'Discord', group: 'messaging', how: 'Bot token · servers you pick', kind: 'token', fields: [{ key: 'token', label: 'Bot token', type: 'password' }, { key: 'channelId', label: 'Default channel ID', type: 'text', shown: true }], can: { read: false, send: true } },
+  // Free, no key or account (non-commercial use). Your location is sent only with weather questions, rounded to about 1 km.
+  { id: 'open-meteo', name: 'Open-Meteo', group: 'weather', how: 'Free forecasts, no key · weather data by Open-Meteo.com', kind: 'token', fields: [
+    { key: 'home', label: 'Home place', type: 'text', optional: true, shown: true, placeholder: 'Used when location is off, such as Singapore' },
+    { key: 'units', label: 'Temperature', type: 'text', optional: true, shown: true, placeholder: 'C or F · C if left empty' },
+  ], steps: [
+    { text: 'Ask Niko about the weather, such as “Will it rain this afternoon?” or “What’s the weather in Tokyo this weekend?”. For where you are, your browser asks once to share your location.' },
+    { text: 'Your location is sent only with weather questions, rounded to about a kilometre, and is never stored. Without it, Niko uses the home place below.' },
+  ], can: { read: true, send: false } },
   { id: 'workers-ai', name: 'Cloudflare Workers AI', group: 'ai', how: 'Free daily allowance', kind: 'builtin', can: { read: true, send: false } },
   { id: 'elevenlabs', name: 'ElevenLabs voice', group: 'ai', how: 'Your API key · your cloned voice', kind: 'token', fields: [{ key: 'apiKey', label: 'API key', type: 'password' }, { key: 'voiceId', label: 'Voice ID', type: 'text', shown: true }], can: { read: false, send: false } },
   // Keys for other AI systems are added, ordered and removed on the Engine screen, where there can be several.
@@ -138,6 +146,7 @@ export const GROUPS: { id: ProviderGroup; name: string; note: string }[] = [
   { id: 'notes', name: 'Notes', note: 'Only what you share' },
   { id: 'automation', name: 'Automation', note: 'Run and trigger your flows' },
   { id: 'messaging', name: 'Messaging', note: 'Read · reply' },
+  { id: 'weather', name: 'Weather', note: 'Here and anywhere you ask' },
   { id: 'ai', name: 'AI systems', note: '' },
 ];
 
@@ -219,6 +228,13 @@ export interface Permissions { draft: boolean; chatReply: boolean; files: boolea
 export interface Me {
   id: string; email: string; name: string; role: 'admin' | 'member';
   appearance: Appearance; engine: EnginePrefs; permissions: Permissions;
+  /** A weather service is connected, so weather questions may carry the device's rounded location. */
+  weather?: boolean;
+}
+
+/** Whether a message is about the weather. Only then is the device's location asked for and sent. */
+export function isWeatherQuestion(text: string): boolean {
+  return /\b(weather|forecast|rain(ing|y)?|drizzl(e|ing|y)|showers?|storms?|stormy|thunder(storms?)?|snow(ing)?|sunny|sunshine|cloudy|umbrella|temperature|degrees|hot|cold|warm|chilly|humid(ity)?|wind(y)?|uv|heatwave|typhoon|monsoon|haze|fog(gy)?)\b/i.test(text);
 }
 
 export const SEND_COUNTDOWN_SECONDS = 10;

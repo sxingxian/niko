@@ -45,6 +45,7 @@ Nothing here has run against live services yet. The code typechecks, all three f
 | "Niko, send it" with the 10-second countdown, enforced on the server, replies only | Built |
 | Per-user colour (shifting or fixed, custom picker) | Built |
 | AI: Workers AI, your model server and any number of your own keys (OpenAI-compatible / Anthropic / Google), in an order you choose; one that reaches its usage limit is skipped until it resets | Built |
+| Weather from Open-Meteo (free, no key): forecasts for where you are and any place you ask about | Built |
 | Voices in an order you choose: Cloudflare (free), on-device Kokoro (free), your own voice server, ElevenLabs; device voice always last | Built |
 | Gmail, Outlook mail: read unread, open, send replies | Built, untested |
 | Personal mail by app password over IMAP/SMTP: Gmail, iCloud, Synology, others (not Outlook.com) | Built; tested against local test servers only |

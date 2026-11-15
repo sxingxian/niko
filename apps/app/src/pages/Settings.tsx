@@ -146,7 +146,8 @@ export function Connections() {
     manageDlg.current?.close();
     await api(`/connections/${p.id}`, { method: 'DELETE' }).catch((e) => setNote({ ok: false, text: e.message }));
     await load();
-    setNote({ ok: true, text: `${p.name} removed. Its stored credentials were deleted.` });
+    if (p.id === 'open-meteo') await refreshMe();
+    setNote({ ok: true, text: p.id === 'open-meteo' ? 'Open-Meteo removed. Weather questions no longer send your location.' : `${p.name} removed. Its stored credentials were deleted.` });
   };
   const refreshTelegram = async () => {
     try {
@@ -167,7 +168,7 @@ export function Connections() {
     try {
       const r = await api<{ inboundUrl?: string; signingSecret?: string; readsGroups?: boolean }>(`/connections/${form.id}`, { body: values });
       setValues({});
-      if (form.id === 'telegram-bot' || form.id === 'telegram-user') await refreshMe();
+      if (form.id === 'telegram-bot' || form.id === 'telegram-user' || form.id === 'open-meteo') await refreshMe();
       await load();
       if (r.inboundUrl && r.signingSecret) setShown({ inboundUrl: r.inboundUrl, signingSecret: r.signingSecret });
       else { dlg.current?.close(); setNote({ ok: true, text: `${form.name} linked.` }); }
@@ -220,7 +221,7 @@ export function Connections() {
             <section className="g panel" aria-label="What Niko may do"><header><h2>What Niko may do</h2></header>{permRows}</section>
           </div>
           <div className="stack">{panel('calendar')}{panel('notes')}</div>
-          <div className="stack">{panel('automation')}{panel('messaging')}</div>
+          <div className="stack">{panel('automation')}{panel('messaging')}{panel('weather')}</div>
         </div>
       )}
 

@@ -1,7 +1,7 @@
 // Shared Niko state: who is signed in, and the voice loop (wake word, commands, speech).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
+import { isWeatherQuestion, voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
 import { isEcho, matchWake, screenFor, screenName, takeItemTag, takeScreenTag } from './speech';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, setAppearance, type CoreMode } from '@niko/ui';
@@ -64,6 +64,20 @@ function serverSpeech(source: VoiceSource, text: string): Speech {
   })();
   return { started, done, stop: () => { ctl.abort(); el?.pause(); cleanup(); } };
 }
+/** This device's location, rounded to about 1 km, if the browser has it or the user allows it now. Never stored. */
+function whereAmI(): Promise<{ lat: number; lon: number } | undefined> {
+  if (!('geolocation' in navigator)) return Promise.resolve(undefined);
+  return new Promise((done) => {
+    const r2 = (v: number) => Math.round(v * 100) / 100;
+    const stop = window.setTimeout(() => done(undefined), 8000);
+    navigator.geolocation.getCurrentPosition(
+      (p) => { window.clearTimeout(stop); done({ lat: r2(p.coords.latitude), lon: r2(p.coords.longitude) }); },
+      () => { window.clearTimeout(stop); done(undefined); },
+      { enableHighAccuracy: false, maximumAge: 15 * 60_000, timeout: 7000 },
+    );
+  });
+}
+
 function speakWith(source: VoiceSource, text: string, engine: EnginePrefs | undefined): Speech {
   return source === 'kokoro' ? kokoroSpeak(text, engine?.kokoroVoice ?? 'af_heart') : serverSpeech(source, text);
 }
@@ -214,7 +228,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     // 3. Everything else goes to the brain.
     setMode('thinking'); setLabel('Thinking'); setLine(`“${text}”`);
     try {
-      const r = await api<{ reply: string; brief: Brief }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset() } });
+      // A weather question carries where this device is, rounded to about 1 km, when a weather service is connected.
+      const where = meRef.current?.weather && isWeatherQuestion(text) ? await whereAmI() : undefined;
+      const r = await api<{ reply: string; brief: Brief }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}) } });
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
       // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
       const { text: noScreen, path: asked } = takeScreenTag(r.reply);

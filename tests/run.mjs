@@ -1,11 +1,11 @@
-// Runs the mail (IMAP/SMTP), calendar-link, voice-matching and brain-order tests in Node against local test servers.
+// Runs the mail (IMAP/SMTP), calendar-link, voice-matching, brain-order and weather tests in Node against local test servers.
 // cloudflare:sockets is stood in for by a plain-TCP shim; the code under test only allows that for 127.0.0.1 in tests.
 import { build } from 'esbuild';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const here = fileURLToPath(new URL('.', import.meta.url));
 let failed = false;
-for (const name of ['mail', 'ical', 'voice', 'brains']) {
+for (const name of ['mail', 'ical', 'voice', 'brains', 'weather']) {
   const out = `${here}.out-${name}.mjs`;
   await build({
     entryPoints: [`${here}${name}.test.mjs`], bundle: true, platform: 'node', format: 'esm', outfile: out, logLevel: 'error',
