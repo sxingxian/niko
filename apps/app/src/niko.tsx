@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
-import { isEcho, matchWake } from './speech';
+import { isEcho, matchWake, screenFor, screenName, takeScreenTag } from './speech';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, setAppearance, type CoreMode } from '@niko/ui';
 
@@ -35,10 +35,6 @@ interface NikoState {
 const Ctx = createContext<NikoState>(null as never);
 export const useNiko = () => useContext(Ctx);
 
-const NAV: [RegExp, string][] = [
-  [/\b(inbox|mail|messages?)\b/, '/inbox'], [/\bcalendar\b/, '/calendar'], [/\bnotes?\b/, '/notes'], [/\bconnections?\b/, '/connections'],
-  [/\bengine\b/, '/engine'], [/\b(voice|speech)\b/, '/voice'], [/\bsettings\b/, '/appearance'], [/\b(appearance|colou?rs?)\b/, '/appearance'], [/\baccount\b/, '/account'], [/\bhome\b/, '/'],
-];
 
 /** One voice made on Niko's server (Cloudflare, the user's own server, ElevenLabs), played as audio. */
 function serverSpeech(source: VoiceSource, text: string): Speech {
@@ -183,6 +179,19 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     })();
   }, [listenForFollowUp]);
 
+  const here = useRef(path);
+  here.current = path;
+  /** Opens a screen asked for by voice or typing, says so on the status line, and keeps listening for the next request. */
+  const goTo = useCallback((screen: string) => {
+    if (screen === 'back') { window.history.back(); setMode('speaking'); setLabel('Heard'); setLine('Going back.'); }
+    else {
+      const name = screenName(screen);
+      setMode('speaking'); setLabel('Heard');
+      if (here.current === screen) setLine(`You’re on ${name}.`); else { setLine(`Opening ${name}.`); navigate(screen); }
+    }
+    window.setTimeout(() => (SR && wantRec.current ? listenForFollowUp() : idle()), 1200);
+  }, [navigate, idle, listenForFollowUp, SR]);
+
   const ask = useCallback(async (raw: string) => {
     const text = raw.trim();
     if (!text) return;
@@ -193,21 +202,22 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     setReply(null);
     // 1. Phrases a page has claimed (send it / cancel).
     if (handler.current?.(lower)) return;
-    // 2. Navigation by voice: "open my inbox", "go home".
-    if (/^(open|show|go( to)?|take me to)\b/.test(lower)) {
-      const hit = NAV.find(([re]) => re.test(lower));
-      if (hit) { setMode('speaking'); setLabel('Heard'); setLine(`“Niko, ${text}”`); navigate(hit[1]); setTimeout(idle, 1400); return; }
-    }
+    // 2. Changing screen by voice: "switch to calendar", "can you open my notes", "back to home", "go back".
+    const screen = screenFor(text);
+    if (screen) { goTo(screen); return; }
     // 3. Everything else goes to the brain.
     setMode('listening'); setLabel('Thinking'); setLine(`“${text}”`);
     try {
       const r = await api<{ reply: string; brief: Brief }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset() } });
-      setBrief(r.brief); setReply(r.reply); say(r.reply);
+      // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
+      const { text: answer, path: asked } = takeScreenTag(r.reply);
+      setBrief(r.brief); setReply(answer); say(answer);
+      if (asked) navigate(asked);
     } catch (e: any) {
       if (e?.data?.brief) setBrief(e.data.brief);
       setReply(e.message); setMode('idle'); setLabel('Problem'); setLine(e.message);
     }
-  }, [navigate, idle, say]);
+  }, [navigate, idle, say, goTo]);
 
   // Speech recognition: runs while the app is open and the mic is allowed.
   // Interim results let the core react the moment "Niko" is heard; the command itself is taken from the final text.
