@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { startCore, type CoreHandle, type CoreMode } from './core';
+import { spots, startCore, type CoreHandle, type CoreMode } from './core';
 
 export * from './core';
 
@@ -60,7 +60,9 @@ export function Switch({ on, onChange, label, disabled }: { on: boolean; onChang
 }
 
 /** The live particle sphere. `shift` slides it sideways (used when panels open). */
-export function ParticleCore({ size, mode = 'idle', shift = 0, particles, style }: { size: number | string; mode?: CoreMode; shift?: number; particles?: number; style?: React.CSSProperties }) {
+/** The particle sphere. `pad` widens the canvas on both sides so particles can drift sideways (`shift`) without being cut off.
+ * `spot` names it for the screen-to-screen transition. */
+export function ParticleCore({ size, mode = 'idle', shift = 0, particles, style, pad = 0, spot }: { size: number | string; mode?: CoreMode; shift?: number; particles?: number; style?: React.CSSProperties; pad?: number; spot?: string }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const handle = useRef<CoreHandle | null>(null);
   useEffect(() => {
@@ -71,7 +73,14 @@ export function ParticleCore({ size, mode = 'idle', shift = 0, particles, style 
   }, [particles]);
   useEffect(() => { handle.current?.setMode(mode); }, [mode]);
   useEffect(() => { handle.current?.setShift(shift); }, [shift]);
-  return <canvas ref={ref} role="img" aria-label="Niko particle core" style={{ width: size, height: size, display: 'block', ...style }} />;
+  useEffect(() => {
+    if (!spot || !ref.current) return;
+    const el = ref.current;
+    spots.set(spot, el);
+    return () => { if (spots.get(spot) === el) spots.delete(spot); };
+  }, [spot]);
+  const w = pad ? `calc(${typeof size === 'number' ? size + 'px' : size} + ${2 * pad}px)` : size;
+  return <canvas ref={ref} data-core="1" role="img" aria-label="Niko particle core" style={{ width: w, height: size, display: 'block', flex: 'none', ...style }} />;
 }
 
 export function PasswordField({ label, value, onChange, autoComplete, meter }: { label: string; value: string; onChange: (v: string) => void; autoComplete: string; meter?: boolean }) {

@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { SEND_COUNTDOWN_SECONDS } from '@niko/shared';
-import { api, Icon, ParticleCore } from '@niko/ui';
+import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
 import { useNiko, type Brief } from '../niko';
 
 // The mockups' rail: Home, Inbox, Calendar, Notes, Connections. Settings (appearance, engine, account) sit behind the last button.
@@ -18,20 +18,103 @@ function Dock({ className }: { className: string }) {
   );
 }
 
+function useWide() {
+  const q = '(min-width: 901px)';
+  const [on, setOn] = useState(() => typeof window !== 'undefined' && window.matchMedia(q).matches);
+  useEffect(() => { const m = window.matchMedia(q); const f = () => setOn(m.matches); m.addEventListener('change', f); return () => m.removeEventListener('change', f); }, []);
+  return on;
+}
+
+/** The answer writes itself in, word by word, after its card has filled in. */
+function Words({ text, start }: { text: string; start: number }) {
+  const parts = text.split(/(\s+)/);
+  let n = 0;
+  return <>{parts.map((w, i) => (/^\s+$/.test(w) ? w : <span key={i} className="w" style={{ animationDelay: `${(start + Math.min(n++, 60) * 0.045).toFixed(3)}s` }}>{w}</span>))}</>;
+}
+
+/** Sparks that leave the core and trace each answer card's outline as it builds (desktop). */
+function Sparks({ run, cards }: { run: number; cards: number }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const cv = ref.current;
+    if (!run || !cv || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const ctx = cv.getContext('2d')!;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const W = window.innerWidth, H = window.innerHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    const PER = 80, t0 = performance.now(), rnd = Math.random;
+    const list = Array.from({ length: PER * cards }, (_, i) => ({ card: Math.floor(i / PER), u: (i % PER) / PER, d: rnd() * 0.3, a: rnd() * Math.PI * 2, r: Math.sqrt(rnd()), lift: 30 + rnd() * 60 }));
+    const smooth = (v: number) => v * v * v * (v * (v * 6 - 15) + 10);
+    const edge = (b: DOMRect, u: number) => {
+      const L = 2 * (b.width + b.height); let d = u * L;
+      if (d < b.width) return [b.left + d, b.top]; d -= b.width;
+      if (d < b.height) return [b.right, b.top + d]; d -= b.height;
+      if (d < b.width) return [b.right - d, b.bottom]; d -= b.width;
+      return [b.left, b.bottom - d];
+    };
+    let raf = 0;
+    const frame = (now: number) => {
+      const t = (now - t0) / 1000;
+      const core = sphereOf(spots.get('home'));
+      const boxes = Array.from(document.querySelectorAll<HTMLElement>('.home .card-build')).map((el) => el.getBoundingClientRect());
+      const hue = currentHue();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H); ctx.globalCompositeOperation = 'lighter';
+      let alive = false;
+      for (const sp of list) {
+        const b = boxes[sp.card];
+        if (!b || !core) continue;
+        const start = sp.card * CARD_GAP + sp.d, v = (t - start) / 0.55;
+        if (v < 1) alive = true;
+        if (v <= 0 || v >= 1) continue;
+        const e = smooth(v), [tx, ty] = edge(b, sp.u);
+        const fx = core.x - 200 + Math.cos(sp.a) * core.R * sp.r, fy = core.y + Math.sin(sp.a) * core.R * sp.r;
+        const x = fx + (tx! - fx) * e, y = fy + (ty! - fy) * e - Math.sin(Math.PI * e) * sp.lift, al = Math.sin(Math.PI * v);
+        ctx.fillStyle = `hsla(${hue.toFixed(0)},90%,80%,${(0.9 * al).toFixed(3)})`; ctx.fillRect(x - 1.2, y - 1.2, 2.4, 2.4);
+        ctx.fillStyle = `hsla(${hue.toFixed(0)},90%,70%,${(0.25 * al).toFixed(3)})`; ctx.fillRect(x - 3, y - 3, 6, 6);
+      }
+      if (alive || t < 0.2) raf = requestAnimationFrame(frame); else ctx.clearRect(0, 0, W, H);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+  }, [run, cards]);
+  return <canvas ref={ref} className="sparks" aria-hidden="true" />;
+}
+
+const CARD_GAP = 0.6; // seconds between the answer card and the approval card building
+
 export function Home() {
   const n = useNiko();
+  const wide = useWide();
   const [nav, setNav] = useState(false);
   const [typing, setTyping] = useState(false);
   const [text, setText] = useState('');
   const open = !!n.reply;
-  const wide = typeof window !== 'undefined' && window.innerWidth > 900;
+  // Keep the last answer on screen while its cards close.
+  const [shown, setShown] = useState<{ reply: string; chat: Brief['chats'][number] | null; id: number } | null>(null);
+  const [closing, setClosing] = useState(false);
+  const [caption, setCaption] = useState<'' | 'aside' | 'back'>('');
+  useEffect(() => {
+    if (n.reply) {
+      setClosing(false);
+      setShown((s) => ({ reply: n.reply!, chat: n.brief?.chats[0] ?? null, id: (s?.id ?? 0) + (s?.reply === n.reply ? 0 : 1) }));
+      if (wide) setCaption('aside');
+      return;
+    }
+    if (!shown) return;
+    setClosing(true);
+    if (wide) setCaption((c) => (c === 'aside' ? 'back' : c));
+    const t = window.setTimeout(() => { setClosing(false); setShown(null); }, 900);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [n.reply, wide]);
   const submit = (e: FormEvent) => { e.preventDefault(); const t = text; setText(''); setTyping(false); void n.ask(t); };
+  const cards = shown ? (shown.chat ? 2 : 1) : 0;
   return (
-    <div className={'home' + (open ? ' open' : '')}>
+    <div className={'home' + (open ? ' open' : '') + (closing ? ' closing' : '')}>
       <div className="bg" />
       <div className="stage">
-        <ParticleCore size="var(--s)" mode={n.mode} />
-        <div className="caption">
+        <ParticleCore size="var(--s)" mode={n.mode} pad={wide ? 220 : 0} shift={wide && open ? -200 : 0} spot="home" />
+        <div className={'caption ' + caption} key={caption}>
           <span className="k accent" role="status">{n.label}</span>
           <p>{n.line}</p>
           {n.voiceProblem && n.me?.engine.voice === 'elevenlabs' && <Link to="/voice" className="voice-note">Using the device voice. {n.voiceProblem}</Link>}
@@ -45,25 +128,34 @@ export function Home() {
         <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : 'Workers AI'} · {n.me?.engine.voice === 'elevenlabs' ? 'ElevenLabs' : 'Device voice'}</span><span className="short">Engine</span></Link>
       </div>
       <Dock className={'dock' + (nav ? ' show' : '')} />
-      <aside className="panels" aria-label="Details" aria-hidden={!open}>
-        <section className="g">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span className="k">Niko</span>
-            <button className="ib" style={{ width: 44, height: 44, margin: '-8px -10px -8px 0' }} onClick={n.dismissReply} aria-label="Hide panels" tabIndex={open ? 0 : -1}><Icon name="x" /></button>
+      {wide && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}
+      <aside className="panels" aria-label="Niko’s answer" aria-hidden={!open} key={shown?.id ?? 0}>
+        {shown && <>
+          <div className="card-build" style={{ ['--d' as string]: '0s' }}>
+            <section className="g">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span className="k">Niko</span>
+                <button className="ib" style={{ width: 44, height: 44, margin: '-8px -10px -8px 0' }} onClick={n.dismissReply} aria-label="Hide the answer" tabIndex={open ? 0 : -1}><Icon name="x" /></button>
+              </div>
+              <p className="reply"><Words text={shown.reply} start={wide ? 1.0 : 0.35} /></p>
+            </section>
+            <Outline />
           </div>
-          <p className="reply">{n.reply}</p>
-        </section>
-        {n.brief && n.brief.chats[0] && (
-          <section className="g" aria-label="Waiting for a reply">
-            <div className="meta"><span className="k">Waiting for a reply</span><span>{n.brief.chats[0].source}</span></div>
-            <h2 style={{ fontSize: 18 }}>{n.brief.chats[0].title}</h2>
-            <p className="reply">{n.brief.chats[0].last}</p>
-            <div className="two">
-              <Link className="sec" to="/inbox" tabIndex={open ? 0 : -1}>Review</Link>
-              <Link className="pri" to="/inbox" tabIndex={open ? 0 : -1}>Reply</Link>
+          {shown.chat && (
+            <div className="card-build" style={{ ['--d' as string]: `${CARD_GAP}s` }}>
+              <section className="g" aria-label="Waiting for a reply">
+                <div className="meta"><span className="k">Waiting for a reply</span><span>{shown.chat.source}</span></div>
+                <h2 style={{ fontSize: 18 }}>{shown.chat.title}</h2>
+                <p className="reply">{shown.chat.last}</p>
+                <div className="two">
+                  <Link className="sec" to="/inbox" tabIndex={open ? 0 : -1}>Review</Link>
+                  <Link className="pri" to="/inbox" tabIndex={open ? 0 : -1}>Reply</Link>
+                </div>
+              </section>
+              <Outline />
             </div>
-          </section>
-        )}
+          )}
+        </>}
       </aside>
       {typing && (
         <form className="g typebar" onSubmit={submit}>
@@ -72,7 +164,7 @@ export function Home() {
           <button className="ib on" style={{ width: 44, height: 44 }} aria-label="Send"><Icon name="arrow" size={20} /></button>
         </form>
       )}
-      <div className="controls" style={wide ? undefined : { transform: 'none' }}>
+      <div className="controls">
         <button className="ib g" onClick={() => setTyping(!typing)} aria-label="Type instead" aria-pressed={typing}><Icon name="keys" /></button>
         <button className="micbtn" onClick={n.toggleMic} aria-label="Talk"><Icon name="mic" size={28} /></button>
         <button className="ib g" onClick={n.stop} aria-label="Stop"><Icon name="stop" /></button>
@@ -81,11 +173,21 @@ export function Home() {
   );
 }
 
+/** The glowing outline and scan line a card is built from (drawn by CSS). */
+function Outline() {
+  return <>
+    <svg className="outline" aria-hidden="true"><rect x="0.5" y="0.5" width="99.9%" height="99.8%" rx="28" pathLength="100" /></svg>
+    <i className="scan" aria-hidden="true" />
+  </>;
+}
+
 type Sel = { kind: 'chat'; provider: string; chatId: string; title: string; source: string } | { kind: 'mail'; provider: string; id: string; title: string; source: string; subject: string };
 type SendState = { phase: 'draft' } | { phase: 'counting'; id: string; left: number } | { phase: 'sent' } | { phase: 'busy' };
 
 export function Workspace() {
   const n = useNiko();
+  // The ring's place on screen, for the particle flow from and to Home.
+  const ringRef = useCallback((el: HTMLDivElement | null) => { if (el) spots.set('ring', el); else spots.delete('ring'); }, []);
   const view = useLocation().pathname.replace('/', '') as 'inbox' | 'calendar' | 'notes';
   const [brief, setBrief] = useState<Brief | null>(n.brief);
   const [sel, setSel] = useState<Sel | null>(null);
@@ -186,13 +288,14 @@ export function Workspace() {
       <div className="head"><span className="wordmark">NIKO</span><h1>{title}</h1><span className="k">{String(count).padStart(2, '0')}</span></div>
       <Dock className="rail" />
       <div className="corewrap">
-        <div className="ringbox">
-          <svg className="ticks" viewBox="0 0 600 600" aria-hidden="true"><circle cx="300" cy="300" r="292" fill="none" stroke="rgba(255,255,255,.35)" strokeWidth="6" strokeDasharray="1.5 13.8" /><circle cx="300" cy="300" r="276" fill="none" stroke="rgba(255,255,255,.14)" /></svg>
+        <div className="ringbox" ref={ringRef}>
+          <svg className="ticks" viewBox="0 0 600 600" aria-hidden="true"><circle className="outer" cx="300" cy="300" r="292" fill="none" stroke="rgba(255,255,255,.35)" strokeWidth="6" strokeDasharray="1.5 13.8" /><circle className="inner" cx="300" cy="300" r="276" fill="none" stroke="rgba(255,255,255,.14)" pathLength={100} /></svg>
+          <svg className="sweep" viewBox="0 0 600 600" aria-hidden="true"><circle cx="300" cy="300" r="292" fill="none" strokeWidth="2.5" strokeLinecap="round" pathLength={100} /></svg>
           <svg className="count" viewBox="0 0 600 600" aria-hidden="true" style={{ opacity: counting ? 1 : 0 }}>
             <circle cx="300" cy="300" r="262" fill="none" stroke="rgba(255,255,255,.18)" strokeWidth="4" />
             <circle cx="300" cy="300" r="262" fill="none" stroke="#fff" strokeWidth="4" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={counting ? C * (1 - send.left / SEND_COUNTDOWN_SECONDS) : C} style={{ transition: 'stroke-dashoffset 1s linear' }} />
           </svg>
-          <ParticleCore size="86.8%" mode={n.mode} particles={1000} />
+          <ParticleCore size="86.8%" mode={n.mode} particles={1000} spot="ws" />
           {counting && <div className="num" role="status">{send.left}</div>}
         </div>
         <div className="status"><span className="k accent" role="status">{n.label}</span><span>{n.line}</span></div>

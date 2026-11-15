@@ -28,13 +28,12 @@
 .home .top { position: absolute; left: 36px; right: 36px; top: 30px; display: flex; align-items: center; justify-content: space-between; gap: 14px; z-index: 3; }
 .home .top .left { display: flex; align-items: center; gap: 14px; }
 .home .top .chip .short { display: none; }
-.home .stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; padding-top: max(20px, calc(50vh - 430px)); transition: transform .8s cubic-bezier(.2,.8,.2,1); }
-.home.open .stage { transform: translateX(-200px); }
-.home .stage canvas { width: var(--s) !important; height: var(--s) !important; flex: none; }
+.home .stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; padding-top: max(20px, calc(50vh - 430px)); overflow: hidden; }
+/* The core moves aside particle by particle (drawn inside a wider canvas), not as a sliding block. */
+.home .stage canvas { height: var(--s) !important; flex: none; }
 .home .caption { position: relative; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; margin-top: calc(var(--s) * -.1167); padding: 0 20px; }
 .home .caption p { font-size: 26px; line-height: 1.25; letter-spacing: -.01em; max-width: 720px; text-wrap: balance; }
-.home .controls { position: absolute; left: 0; right: 0; bottom: 36px; display: flex; align-items: center; justify-content: center; gap: 14px; transition: transform .8s cubic-bezier(.2,.8,.2,1); z-index: 2; }
-.home.open .controls { transform: translateX(-200px); }
+.home .controls { position: absolute; left: 0; right: 0; bottom: 36px; display: flex; align-items: center; justify-content: center; gap: 14px; z-index: 2; }
 .home .controls .ib.g, .home .top .ib.g { box-shadow: none; }
 .micbtn { width: 68px; height: 68px; border-radius: 50%; border: 0; cursor: pointer; display: flex; align-items: center; justify-content: center; flex: none;
   background: hsl(var(--h) 100% 75%); color: #05060a; box-shadow: 0 0 40px hsl(var(--h) 100% 73% / .35); }
@@ -43,9 +42,47 @@
 .dock { position: absolute; left: 32px; top: 232px; transform: translateX(-40px); opacity: 0; visibility: hidden; border-radius: 999px; padding: 10px; display: flex; flex-direction: column; gap: 8px; z-index: 3;
   transition: transform .7s cubic-bezier(.2,.8,.2,1), opacity .45s, visibility .45s; }
 .dock.show { transform: none; opacity: 1; visibility: visible; }
-.panels { position: absolute; right: 36px; top: 104px; width: 400px; display: flex; flex-direction: column; gap: 16px; z-index: 2;
-  transform: translateX(60px); opacity: 0; visibility: hidden; transition: transform .7s cubic-bezier(.2,.8,.2,1), opacity .45s, visibility .45s; max-height: calc(100% - 230px); overflow: auto; }
-.home.open .panels { transform: none; opacity: 1; visibility: visible; }
+.panels { position: absolute; right: 36px; top: 104px; width: 400px; display: flex; flex-direction: column; gap: 16px; z-index: 2; max-height: calc(100% - 230px); overflow: visible; visibility: hidden; }
+.home.open .panels, .home.closing .panels { visibility: visible; }
+
+/* Caption: fades out where it was and back in under the core's new place. */
+.home .caption.aside { animation: capAside .9s ease both; }
+.home .caption.back { animation: capBack .9s ease both; }
+@keyframes capAside { 0% { opacity: 1; transform: none; } 45% { opacity: 0; transform: none; } 55% { opacity: 0; transform: translateX(-200px); } 100% { opacity: 1; transform: translateX(-200px); } }
+@keyframes capBack { 0% { opacity: 1; transform: translateX(-200px); } 45% { opacity: 0; transform: translateX(-200px); } 55% { opacity: 0; transform: none; } 100% { opacity: 1; transform: none; } }
+
+/* Answer cards (desktop): sparks trace the outline, a scan line fills in the glass, then the outline fades. */
+.sparks { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 3; }
+.card-build { position: relative; --d: 0s; }
+.card-build .outline { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; opacity: 0; }
+.card-build .outline rect { fill: none; stroke: hsl(var(--h) 100% 75%); stroke-width: 1.5; stroke-dasharray: 100; stroke-dashoffset: 100; filter: drop-shadow(0 0 6px hsl(var(--h) 100% 75% / .7)); }
+.card-build .scan { position: absolute; left: 10px; right: 10px; top: 0; height: 2px; border-radius: 2px; opacity: 0; pointer-events: none;
+  background: linear-gradient(90deg, transparent, hsl(var(--h) 100% 88%) 30%, hsl(var(--h) 100% 75%) 70%, transparent); box-shadow: 0 0 14px 2px hsl(var(--h) 100% 75% / .55); }
+.card-build > section { clip-path: inset(0 0 100% 0 round 28px); }
+.home.open .card-build .outline { animation: outlineShow 1.6s linear calc(var(--d) + .15s) both; }
+.home.open .card-build .outline rect { animation: trace .5s cubic-bezier(.4,0,.2,1) calc(var(--d) + .15s) both; }
+.home.open .card-build > section { animation: fillIn .5s cubic-bezier(.4,0,.2,1) calc(var(--d) + .45s) both; }
+.home.open .card-build .scan { animation: scanDown .5s cubic-bezier(.4,0,.2,1) calc(var(--d) + .45s) both; }
+@keyframes outlineShow { 0% { opacity: 1; } 55% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes trace { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
+@keyframes fillIn { from { clip-path: inset(0 0 100% 0 round 28px); } to { clip-path: inset(0 0 0 0 round 28px); } }
+@keyframes scanDown { 0% { top: 0; opacity: 0; } 4% { opacity: 1; } 95% { opacity: 1; } 100% { top: calc(100% - 1px); opacity: 0; } }
+/* Closing: the scan line rises and empties the glass, the outline flickers out; the lower card first. */
+.home.closing .card-build > section { animation: fillOut .45s cubic-bezier(.4,0,.2,1) calc(.12s - var(--d) / 5) both; }
+.home.closing .card-build .scan { animation: scanUp .45s cubic-bezier(.4,0,.2,1) calc(.12s - var(--d) / 5) both; }
+.home.closing .card-build .outline { animation: outlineOut .6s linear calc(.12s - var(--d) / 5) both; }
+.home.closing .card-build .outline rect { stroke-dashoffset: 0; }
+@keyframes fillOut { from { clip-path: inset(0 0 0 0 round 28px); } to { clip-path: inset(0 0 100% 0 round 28px); } }
+@keyframes scanUp { 0% { top: calc(100% - 1px); opacity: 0; } 4% { opacity: 1; } 95% { opacity: 1; } 100% { top: 0; opacity: 0; } }
+@keyframes outlineOut { 0% { opacity: .9; } 50% { opacity: .3; } 60% { opacity: .8; } 100% { opacity: 0; } }
+.home.open .w { animation: wordIn .35s cubic-bezier(.2,.8,.2,1) both; display: inline-block; }
+@keyframes wordIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .home .caption.aside, .home .caption.back { animation: none; }
+  .home .caption.aside { transform: translateX(-200px); }
+  .card-build > section { clip-path: none; }
+  .home.open .card-build *, .home.open .card-build > section, .home.open .w, .home.closing .card-build > section { animation: none !important; }
+}
 .panels section { border-radius: 28px; padding: 22px 24px 24px; display: flex; flex-direction: column; gap: 12px; }
 .panels h2 { font-weight: 500; font-size: 21px; line-height: 1.25; }
 .panels .reply { font: 400 14px/1.45 system-ui, sans-serif; color: #e6eaf1; white-space: pre-wrap; }
@@ -64,13 +101,18 @@
   .home .top .chip .long { display: none; }
   .home .top .chip .short { display: inline; }
   .home .stage { padding-top: 100px; }
-  .home.open .stage, .home.open .controls { transform: none; }
+  .home .caption.aside, .home .caption.back { animation: none; transform: none; }
   .home .caption { margin-top: -20px; gap: 6px; }
   .home .caption p { font-size: 17px; line-height: 1.3; letter-spacing: 0; }
   .home .controls { bottom: 28px; gap: 16px; }
   .home .controls .ib.g { box-shadow: inset 0 1px 0 rgba(255,255,255,.1), 0 24px 60px rgba(0,0,0,.35); }
   .micbtn { width: 66px; height: 66px; }
-  .panels { left: 12px; right: 12px; top: auto; bottom: 122px; width: auto; transform: translateY(40px); max-height: 46%; }
+  /* Phone: the cards sit at the bottom, so they slide up (no outline tracing). */
+  .panels { left: 12px; right: 12px; top: auto; bottom: 122px; width: auto; max-height: 46%; overflow: auto; }
+  .card-build > section { clip-path: none !important; }
+  .card-build .outline, .card-build .scan { display: none; }
+  .home.open .card-build > section { animation: slideUp .5s cubic-bezier(.2,.8,.2,1) calc(var(--d) / 2) both; }
+  .home.closing .card-build > section { animation: slideDown .4s ease both; }
   .panels section { background: rgba(16,20,30,.82); border-radius: 26px; padding: 14px 16px 16px; gap: 10px; }
   .panels h2 { font-size: 17px; }
   .dock { top: auto; bottom: 118px; left: 50%; flex-direction: row; transform: translate(-50%, 30px); }
@@ -89,6 +131,8 @@
 .ringbox .ticks { animation: spin 90s linear infinite; transform-origin: 50% 50%; }
 .ringbox .count { transform: rotate(-90deg); transition: opacity .4s; }
 .ringbox canvas { position: absolute; left: 6.6%; top: 6.6%; }
+.ringbox .sweep { transform: rotate(-90deg); opacity: 0; }
+.ringbox .sweep circle { stroke: hsl(var(--h) 100% 75%); stroke-dasharray: 5 95; filter: drop-shadow(0 0 6px hsl(var(--h) 100% 75% / .8)); }
 .ringbox .num { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: clamp(80px, 12vw, 150px); font-weight: 500; letter-spacing: -.04em; text-shadow: 0 0 40px rgba(0,0,0,.8); pointer-events: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .status { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; min-height: 70px; }
@@ -115,7 +159,7 @@
   .rail { margin-top: 0; }
   .content { overflow: visible; }
   .rail { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); flex-direction: row; z-index: 5; background: rgba(12,16,24,.8); }
-  .ringbox { width: min(300px, 80%); }
+  .ringbox { width: 220px; }
   .status { min-height: 50px; }
   .status span:last-child { font-size: 18px; }
 }
@@ -272,3 +316,48 @@ dialog.sheet::backdrop { background: rgba(0,0,0,.6); }
 dialog.sheet form { display: flex; flex-direction: column; gap: 16px; }
 
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; }
+
+@keyframes slideUp { from { opacity: 0; transform: translateY(72px); } to { opacity: 1; transform: none; } }
+@keyframes slideDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(72px); } }
+
+/* ---- Home ⇄ workspace: the particle flow (drawn by flow.tsx) and how each screen leaves and arrives around it.
+   Times are fractions of --D (the whole flow); --el is how long the old screen stays while fading out. */
+.flow-layer { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 4; }
+@keyframes fadeAway { to { opacity: 0; } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes riseIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes drawRing { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
+@keyframes sweepRound { 0% { opacity: 0; stroke-dashoffset: 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { opacity: 0; stroke-dashoffset: -100; } }
+/* Desktop cards: hinged on the left edge, they swing up and forward out of the background. */
+@keyframes swingIn { from { opacity: 0; transform: perspective(1400px) translate3d(0, 36px, -120px) rotateY(78deg) rotateX(-14deg); } 45% { opacity: 1; } to { opacity: 1; transform: none; } }
+@keyframes swingOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: perspective(1400px) translate3d(0, 36px, -120px) rotateY(78deg) rotateX(-14deg); } }
+
+/* Leaving: the particles are taken over by the flow at once; everything else fades in --el. */
+.route.leaving canvas[data-core] { opacity: 0 !important; }
+.route.leaving .home > :not(.bg):not(.stage), .route.leaving .home .caption { animation: fadeAway var(--el) ease both; }
+.route.leaving .ws .head, .route.leaving .ws .rail, .route.leaving .ws .status, .route.leaving .ws .ws-mic, .route.leaving .ws .ringbox svg { animation: fadeAway var(--el) ease both; }
+.route.leaving .ws .content > * { transform-origin: left center; animation: swingOut var(--el) cubic-bezier(.4,0,1,1) both; }
+
+/* Arriving in the workspace: the ring is drawn as its particles land, then the cards swing in. */
+.route.flow-in .ws canvas[data-core] { animation: fadeIn calc(var(--D) * .12) ease calc(var(--D) * .9 - var(--el)) both; }
+.route.flow-in .ws .ticks .outer { animation: fadeIn calc(var(--D) * .22) linear calc(var(--D) * .7 - var(--el)) both; }
+.route.flow-in .ws .ticks .inner { stroke-dasharray: 100; animation: drawRing calc(var(--D) * .32) cubic-bezier(.4,0,.2,1) calc(var(--D) * .58 - var(--el)) both; }
+.route.flow-in .ws .sweep { animation: sweepRound calc(var(--D) * .34) cubic-bezier(.4,0,.2,1) calc(var(--D) * .58 - var(--el)) both; }
+.route.flow-in .ws .sweep circle { animation: sweepRound calc(var(--D) * .34) cubic-bezier(.4,0,.2,1) calc(var(--D) * .58 - var(--el)) both; }
+.route.flow-in .ws .head { animation: fadeIn calc(var(--D) * .18) ease calc(var(--D) * .66 - var(--el)) both; }
+.route.flow-in .ws .rail { animation: fadeIn calc(var(--D) * .25) ease calc(var(--D) * .3 - var(--el)) both; }
+.route.flow-in .ws .status, .route.flow-in .ws .ws-mic { animation: riseIn calc(var(--D) * .18) cubic-bezier(.2,.8,.2,1) calc(var(--D) * .72 - var(--el)) both; }
+.route.flow-in .ws .content.hud-in { animation: none; }
+.route.flow-in .ws .content > * { transform-origin: left center; animation: swingIn calc(var(--D) * .21) cubic-bezier(.2,.8,.2,1) calc(var(--D) * .7 - var(--el)) both; }
+.route.flow-in .ws .content > :nth-child(2) { animation-delay: calc(var(--D) * .78 - var(--el)); }
+.route.flow-in .ws .content > :nth-child(n+3) { animation-delay: calc(var(--D) * .84 - var(--el)); }
+
+/* Arriving back at Home: the core takes over from the flow; the caption and controls return. */
+.route.flow-out .home canvas[data-core] { animation: fadeIn calc(var(--D) * .12) ease calc(var(--D) * .9 - var(--el)) both; }
+.route.flow-out .home .top, .route.flow-out .home .caption, .route.flow-out .home .controls { animation: riseIn calc(var(--D) * .2) cubic-bezier(.2,.8,.2,1) calc(var(--D) * .78 - var(--el)) both; }
+
+@media (max-width: 900px) {
+  /* Phone: the workspace cards sit below the ring, so they slide up instead of swinging. */
+  .route.flow-in .ws .content > * { animation-name: slideUp; transform-origin: center; }
+  .route.leaving .ws .content > * { animation-name: slideDown; }
+}
