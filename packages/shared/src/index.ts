@@ -153,7 +153,8 @@ export const GROUPS: { id: ProviderGroup; name: string; note: string }[] = [
 export const COLOURS: Record<string, number> = { cyan: 190, violet: 262, rose: 330, amber: 32, emerald: 158 };
 export const SHIFT_ORDER = ['cyan', 'violet', 'rose', 'amber', 'emerald'];
 
-export interface Appearance { mode: 'shift' | 'single'; colours: string[]; single: string; customHue: number; seconds: number }
+export interface Appearance { mode: 'shift' | 'single'; colours: string[]; single: string; customHue: number; seconds: number; /** Items per page in Inbox, Calendar and Notes. */ pageSize?: number }
+export const PAGE_SIZES = [5, 10, 20, 25, 50];
 export type Brain = 'workers-ai' | 'custom-ai' | 'self-hosted-ai';
 /** Where Niko's speech can come from: three built in, and any number of the user's voice API keys ("vkey:<id>").
  * The device voice is not listed: it is always the last resort. */

@@ -5,7 +5,7 @@ import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSp
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { AI_PRESETS, aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, presetOf, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
-import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, VOICE_NAMES, VOICE_PROVIDERS, VOICE_SOURCES, voiceName, voiceOrder, voicePresetOf, WORKERS_VOICES, type VoiceKeyInfo, type VoiceProvider, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
+import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, PAGE_SIZES, VOICE_NAMES, VOICE_PROVIDERS, VOICE_SOURCES, voiceName, voiceOrder, voicePresetOf, WORKERS_VOICES, type VoiceKeyInfo, type VoiceProvider, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
 import { api, Field, Icon, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
 
@@ -951,7 +951,7 @@ export function Appearance() {
   const rotation = a.mode === 'shift' ? a.colours : [a.single];
   const ph = hueOf(rotation[tick % rotation.length] ?? 'cyan');
   return (
-    <SettingsPage title="Appearance" sub="Your own background. The particles and accents follow it." action={<button className="pri set-save" onClick={save}>{saved ? 'Saved' : 'Save'}</button>}>
+    <SettingsPage title="Appearance" sub="Your own background, and how long lists are shown. The particles and accents follow your colours." action={<button className="pri set-save" onClick={save}>{saved ? 'Saved' : 'Save'}</button>}>
       <div className="set-grid">
         <section className="set-card" aria-label="Background settings">
           <div className="grp">
@@ -990,7 +990,14 @@ export function Appearance() {
               </div>
             </div>
           )}
-          <p className="set-note">Saved to your account and used on all your devices. Other users keep their own colours.</p>
+          <div className="grp">
+            <span className="k">Items per page · Inbox, Calendar and Notes</span>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }} role="group" aria-label="Items per page">
+              {PAGE_SIZES.map((n) => <button key={n} className="seg" aria-pressed={(a.pageSize ?? 10) === n} onClick={() => up({ pageSize: n })}>{n}</button>)}
+            </div>
+            <span className="hint">Up to 50 of each are fetched. Say “next page”, “page 3” or “last page” to move between pages.</span>
+          </div>
+          <p className="set-note">Saved to your account and used on all your devices. Other users keep their own settings.</p>
         </section>
         <section className="set-card" aria-label="Preview" style={{ gap: 14 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}><span className="k">Preview</span><span className="hint">{rotation.length > 1 ? 'Cycling faster than the app will' : 'One colour'}</span></div>

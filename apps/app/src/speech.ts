@@ -149,3 +149,19 @@ export function scrollRequest(raw: string): 'down' | 'up' | 'top' | 'bottom' | n
   if (new RegExp(`^(scroll|page|go|move)\\s+(the page\\s+|the list\\s+|it\\s+)?(back\\s+)?(up|upwards)${tail}$|^(up|back up|further up|previous page)${tail}$`).test(p)) return 'up';
   return null;
 }
+
+/**
+ * Moving between pages of a list: "next page", "previous page", "page 3", "go to page two", "first page",
+ * "last page". Returns where to go, or null for anything else.
+ */
+export function pageRequest(raw: string): 'next' | 'prev' | 'first' | 'last' | number | null {
+  const p = normTitle(raw.replace(/^(niko|nico|hey niko)[,\s]+/i, '')).replace(/^(please|can you|could you)\s+/, '').replace(/\s+please$/, '').trim();
+  if (!p || p.length > 50) return null;
+  const go = '(?:(?:go|move|turn|jump|skip|flip|switch|take me)\\s+(?:back\\s+)?(?:to\\s+)?|show(?: me)?\\s+|open\\s+)?(?:the\\s+)?';
+  if (new RegExp(`^${go}(next|following) page$|^page forward$|^(go )?forward a page$`).test(p)) return 'next';
+  if (new RegExp(`^${go}(previous|prior) page$|^page back$|^(go )?back a page$`).test(p)) return 'prev';
+  if (new RegExp(`^${go}(first|1st) page$`).test(p)) return 'first';
+  if (new RegExp(`^${go}(last|final) page$`).test(p)) return 'last';
+  const n = new RegExp(`^${go}page (?:number )?(\\d{1,3})$`).exec(p);
+  return n ? Number(n[1]) : null;
+}

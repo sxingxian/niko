@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
-import { aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, isWeatherQuestion, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
+import { aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, isWeatherQuestion, PAGE_SIZES, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
 import { APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -44,6 +44,7 @@ app.patch('/me', async (c) => {
       single: names.includes(String(a.single)) ? a.single : 'cyan',
       customHue: clampNum(a.customHue, 0, 359, 210),
       seconds: clampNum(a.seconds, 4, 30, 8),
+      pageSize: PAGE_SIZES.includes(Number(a.pageSize)) ? Number(a.pageSize) : 10,
     };
   }
   if (b.engine) {
@@ -310,16 +311,20 @@ async function buildBrief(c: import('hono').Context<AppEnv>, tzOffsetMin: number
   const now = Date.now();
   const local = new Date(now - tzOffsetMin * 60_000);
   const dayStart = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) + tzOffsetMin * 60_000);
-  const dayEnd = new Date(dayStart.getTime() + 86400_000);
+  // The calendar list runs from the start of today through the next 30 days (at most 50 events).
+  const dayEnd = new Date(dayStart.getTime() + 31 * 86400_000);
   const [mailLists, eventLists, noteLists, chats] = await Promise.all([
     Promise.all(want('mail', ['gmail', 'outlook-mail', ...IMAP_PROVIDERS]).map((p) => guard('mail', p, () => listMail(c.env, db, u.id, p)))),
     Promise.all(want('events', ['google-calendar', 'outlook-calendar', 'ical']).map((p) => guard('events', p, () => listEvents(c.env, db, u.id, p, dayStart, dayEnd, tzOffsetMin)))),
     Promise.all(want('notes', ['notion', 'onenote']).map((p) => guard('notes', p, () => listNotes(c.env, db, u.id, p)))),
     parts.has('chats') ? recentChats(c) : Promise.resolve([]),
   ]);
-  const events = eventLists.flat().sort((a, b) => a.start - b.start).map((e) => {
+  const DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const events = eventLists.flat().sort((a, b) => a.start - b.start).slice(0, 50).map((e) => {
     const d = new Date(e.start - tzOffsetMin * 60_000);
-    return { ...e, time: e.allDay ? 'All day' : `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}` };
+    const dayN = Math.floor((e.start - dayStart.getTime()) / 86400_000);
+    const day = dayN <= 0 ? '' : dayN === 1 ? 'Tomorrow ' : `${DAY[d.getUTCDay()]} ${d.getUTCDate()} ${MON[d.getUTCMonth()]} `;
+    return { ...e, time: day + (e.allDay ? (day ? 'all-day' : 'All day') : `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`) };
   });
   return { mail: mailLists.flat(), events, notes: noteLists.flat(), chats, problems };
 }
@@ -348,7 +353,7 @@ async function chatBrief(c: import('hono').Context<AppEnv>, tz: number): Promise
 
 /** The latest conversation from each chat, from Niko's own store (no third-party calls, so it is cheap to ask often). */
 async function recentChats(c: import('hono').Context<AppEnv>): Promise<Brief['chats']> {
-  const recent = await c.get('db').select().from(messages).where(and(eq(messages.userId, c.get('user').id), eq(messages.direction, 'in'))).orderBy(desc(messages.createdAt)).limit(40);
+  const recent = await c.get('db').select().from(messages).where(and(eq(messages.userId, c.get('user').id), eq(messages.direction, 'in'))).orderBy(desc(messages.createdAt)).limit(400);
   const seen = new Set<string>();
   const chats: Brief['chats'] = [];
   for (const m of recent) {
@@ -357,7 +362,7 @@ async function recentChats(c: import('hono').Context<AppEnv>): Promise<Brief['ch
     seen.add(key);
     chats.push({ provider: m.provider, chatId: m.chatId, title: m.chatTitle || m.sender, last: m.body.slice(0, 140), lastAt: m.createdAt.getTime(), source: PROVIDERS.find((p) => p.id === m.provider)?.name.replace(' bot', '') ?? m.provider });
   }
-  return chats.slice(0, 8);
+  return chats.slice(0, 50);
 }
 
 app.get('/brief', async (c) => c.json(await buildBrief(c, clampNum(Number(c.req.query('tz')), -840, 840, 0), briefParts(c.req.query('parts')))));
@@ -509,11 +514,11 @@ app.post('/chat', async (c) => {
   // A spoken question gets the whole day as context, reused for 3 minutes so a conversation doesn't re-read every source.
   const brief = oneOff ? EMPTY_BRIEF : await chatBrief(c, clampNum(b.tz, -840, 840, 0));
   const data = oneOff ? '' : [
-    'EVENTS TODAY:', ...brief.events.map((e) => `- ${e.time} ${e.title} (${e.source})`),
+    'EVENTS FROM TODAY (a time alone means today):', ...brief.events.map((e) => `- ${e.time} ${e.title} (${e.source})`),
     'MAIL NEEDING A REPLY:', ...brief.mail.map((m) => `- ${m.from}: ${m.subject} (${m.source})`),
     'RECENT NOTES:', ...brief.notes.map((n) => `- ${n.title} (${n.source})`),
     'CHATS:', ...brief.chats.map((m) => `- ${m.title}: ${m.last} (${m.source})`),
-  ].join('\n').slice(0, 6000);
+  ].join('\n').slice(0, 9000);
   const history = oneOff ? [] : (await db.select().from(chatTurns).where(eq(chatTurns.userId, u.id)).orderBy(desc(chatTurns.createdAt)).limit(8)).reverse();
   // Weather: with a weather service connected, a weather question gets the forecast for where the user is (the
   // browser's rounded location, sent only with weather questions), or else for their home place.

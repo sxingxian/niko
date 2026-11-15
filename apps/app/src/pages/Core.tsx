@@ -1,10 +1,10 @@
 // Home (the adaptive core) and the workspace (inbox, calendar, notes with the docked core and countdown).
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
-import { SEND_COUNTDOWN_SECONDS, voiceName, voiceOrder } from '@niko/shared';
+import { PAGE_SIZES, SEND_COUNTDOWN_SECONDS, voiceName, voiceOrder } from '@niko/shared';
 import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
 import { useNiko } from '../niko';
-import { pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
+import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
 import { isStacked } from '../flow';
 import type { Brief, BriefPart, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
 
@@ -309,6 +309,22 @@ export function Workspace() {
     ? items.findIndex((it) => !!sel && it.kind === sel.kind && it.provider === sel.provider && (it.kind === 'chat' ? sel.kind === 'chat' && it.chatId === sel.chatId : sel.kind === 'mail' && it.id === sel.id))
     : view === 'calendar' ? (brief?.events ?? []).findIndex((e) => e.id === eventSel?.id && e.provider === eventSel?.provider)
     : (brief?.notes ?? []).findIndex((e) => e.id === noteSel?.id && e.provider === noteSel?.provider);
+  // Pages: each list shows a page at a time (Settings → Appearance sets how many). Each screen keeps its own page,
+  // and the page follows the open item when it is opened from elsewhere (by voice, or "next").
+  const pageSize = PAGE_SIZES.includes(n.me?.appearance.pageSize ?? 10) ? n.me!.appearance.pageSize ?? 10 : 10;
+  const [pageOf, setPageOf] = useState<Record<string, number>>({});
+  const pages = Math.max(1, Math.ceil(listTitles.length / pageSize));
+  const page = Math.min(pageOf[view] ?? 0, pages - 1);
+  const pStart = page * pageSize, pEnd = pStart + pageSize;
+  const goPage = (p: number) => setPageOf((m) => ({ ...m, [view]: Math.max(0, Math.min(pages - 1, p)) }));
+  useEffect(() => { if (listIndex >= 0 && (listIndex < pStart || listIndex >= pEnd)) goPage(Math.floor(listIndex / pageSize)); }, [listIndex, pageSize]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pager = pages > 1 && (
+    <nav className="pager" aria-label="Pages">
+      <button type="button" className="pg" onClick={() => goPage(page - 1)} disabled={page === 0} aria-label="Previous page">‹</button>
+      <span className="k" aria-live="polite">{pStart + 1}–{Math.min(pEnd, listTitles.length)} of {listTitles.length}<span className="pg-n"> · page {page + 1} of {pages}</span></span>
+      <button type="button" className="pg" onClick={() => goPage(page + 1)} disabled={page >= pages - 1} aria-label="Next page">›</button>
+    </nav>
+  );
   const openAt = (i: number, spoken: boolean) => {
     const title = view === 'inbox' ? items[i]?.title : view === 'calendar' ? brief?.events[i]?.title : brief?.notes[i]?.title;
     if (title === undefined) return;
@@ -419,19 +435,31 @@ export function Workspace() {
     n.setCommandHandler((p) => {
       if (/^(send|send it|send that)\b/.test(p) && view === 'inbox') { void start('voice'); return true; }
       if (/^(cancel|stop|don't send)\b/.test(p) && send.phase === 'counting') { void cancel(); return true; }
-      if (scrollRequest(p)) return false; // "scroll down", "show me more", "next page": scrolling, handled by Niko
+      // "Next page", "page 3", "last page": the list's pages, when it has more than one.
+      const pr = pageRequest(p);
+      if (pr !== null && pages > 1) {
+        const to = pr === 'next' ? page + 1 : pr === 'prev' ? page - 1 : pr === 'first' ? 0 : pr === 'last' ? pages - 1 : pr - 1;
+        if (to < 0 || to >= pages) n.setStatus('Heard', to < 0 ? 'This is the first page.' : `There are only ${pages} pages.`, 'speaking');
+        else { goPage(to); n.setStatus('Heard', `Page ${to + 1} of ${pages}.`, 'speaking'); }
+        window.setTimeout(n.carryOn, 1000);
+        return true;
+      }
+      if (typeof pr === 'number' || pr === 'first' || pr === 'last') { n.setStatus('Heard', 'Everything fits on one page.', 'speaking'); window.setTimeout(n.carryOn, 1000); return true; }
+      if (scrollRequest(p)) return false; // "scroll down", "show me more", "next page" on a one-page list: scrolling, handled by Niko
       const ask = view === 'inbox' && sel && send.phase === 'draft' ? rewriteRequest(p) : null;
       if (ask) { void rewrite(ask, true); return true; }
       // "Open Testing 123021", "open the second one", "next": an item in this screen's list. A screen's name
       // ("open calendar") still means the screen.
       if (screenFor(p)) return false;
-      const i = pickItem(p, listTitles, listIndex);
+      // "The second one" means on this page; a title can be anywhere in the list (its page opens).
+      const onPage = pickItem(p, listTitles.slice(pStart, pEnd), listIndex - pStart);
+      const i = onPage !== null ? pStart + onPage : pickItem(p, listTitles, listIndex);
       if (i === null) return false;
       openAt(i, true);
       return true;
     });
     return () => n.setCommandHandler(null);
-  }, [n, start, cancel, rewrite, sel, send.phase, view, listTitles.join('\u0001'), listIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [n, start, cancel, rewrite, sel, send.phase, view, listTitles.join('\u0001'), listIndex, page, pages, pStart, pEnd]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // An item the AI was asked to open ("[[item:notes:…]]"), once this screen's list has arrived.
   useEffect(() => {
@@ -502,10 +530,11 @@ export function Workspace() {
         {view === 'inbox' && <>
           <section className="g list" aria-label="Messages">
             {items.length === 0 && <p className="sub" style={{ padding: 14 }}>{ready ? 'Nothing needs you. Link mail or chat apps in Connections.' : 'Loading…'}</p>}
-            {items.map((it) => {
+            {items.slice(pStart, pEnd).map((it) => {
               const on = !!sel && (it.kind === 'chat' ? sel.kind === 'chat' && sel.chatId === it.chatId && sel.provider === it.provider : sel.kind === 'mail' && sel.id === it.id);
               return <button key={it.kind + (it.kind === 'chat' ? it.chatId : it.id)} className={'item' + (on ? ' on' : '')} onClick={() => setSel(it)} aria-pressed={on}><b>{it.title}</b><span className="k">{it.source}</span></button>;
             })}
+            {pager}
           </section>
           {sel && (
             <section className="g thread" aria-label={`Conversation with ${sel.title}`}>
@@ -557,13 +586,14 @@ export function Workspace() {
           )}
         </>}
         {view === 'calendar' && <>
-          <section className="g list" aria-label="Today">
-            {ready && brief && brief.events.length === 0 && <p className="sub" style={{ padding: 14 }}>No events today, or no calendar is linked yet.</p>}
+          <section className="g list" aria-label="Upcoming events">
+            {ready && brief && brief.events.length === 0 && <p className="sub" style={{ padding: 14 }}>Nothing in the next 30 days, or no calendar is linked yet.</p>}
             {!ready && !brief?.events.length && <p className="sub" style={{ padding: 14 }}>Loading…</p>}
-            {brief?.events.map((e) => {
+            {brief?.events.slice(pStart, pEnd).map((e) => {
               const on = eventSel?.id === e.id && eventSel.provider === e.provider;
-              return <button key={e.provider + e.id} className={'item ev' + (on ? ' on' : '')} onClick={() => setEventSel(e)} aria-pressed={on}><span className="t">{e.time}</span><b>{e.title}</b><span className="k">{e.source}</span></button>;
+              return <button key={e.provider + e.id} className={'item ev' + (on ? ' on' : '')} onClick={() => setEventSel(e)} aria-pressed={on}>{(() => { const m = /^(.*\S)\s+(\S+)$/.exec(e.time); return m && !/^all$/i.test(m[1]!) ? <span className="t d"><small>{m[1]}</small>{m[2]}</span> : <span className="t">{e.time}</span>; })()}<b>{e.title}</b><span className="k">{e.source}</span></button>;
             })}
+            {pager}
           </section>
           {eventSel && (
             <section className="g thread" aria-label={eventSel.title}>
@@ -584,10 +614,11 @@ export function Workspace() {
           <section className="g list" aria-label="Recent notes">
             {ready && brief && brief.notes.length === 0 && <p className="sub" style={{ padding: 14 }}>No notes yet. Link Notion or OneNote in Connections.</p>}
             {!ready && !brief?.notes.length && <p className="sub" style={{ padding: 14 }}>Loading…</p>}
-            {brief?.notes.map((e) => {
+            {brief?.notes.slice(pStart, pEnd).map((e) => {
               const on = noteSel?.id === e.id && noteSel.provider === e.provider;
               return <button key={e.provider + e.id} className={'item' + (on ? ' on' : '')} onClick={() => setNoteSel(e)} aria-pressed={on}><b>{e.title}</b><span className="k">{e.source}</span></button>;
             })}
+            {pager}
           </section>
           {noteSel && (
             <section className="g thread" aria-label={noteSel.title}>

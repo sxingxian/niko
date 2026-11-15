@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const here = fileURLToPath(new URL('.', import.meta.url));
 let failed = false;
-for (const name of ['mail', 'ical', 'voice', 'brains', 'weather', 'voices']) {
+for (const name of ['mail', 'ical', 'voice', 'brains', 'weather', 'voices', 'lists']) {
   const out = `${here}.out-${name}.mjs`;
   await build({
     entryPoints: [`${here}${name}.test.mjs`], bundle: true, platform: 'node', format: 'esm', outfile: out, logLevel: 'error',

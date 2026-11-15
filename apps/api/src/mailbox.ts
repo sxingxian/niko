@@ -108,7 +108,7 @@ function parseId(id: string): { validity: string; uid: number } {
 }
 const LABEL: Record<string, string> = { 'gmail-imap': 'Gmail', 'icloud-mail': 'iCloud', 'synology-mail': 'Synology', 'imap-mail': 'Email' };
 
-/** Unread mail in the inbox, newest last-six, without marking anything as read. */
+/** Unread mail in the inbox, the newest 50, without marking anything as read. */
 export async function imapList(provider: string, s: Record<string, string>): Promise<MailItem[]> {
   const a = accountFor(provider, s);
   return withImap(a, async (c) => {
@@ -116,7 +116,7 @@ export async function imapList(provider: string, s: Record<string, string>): Pro
     try {
       const validity = (c.mailbox as any)?.uidValidity;
       const uids = ((await c.search({ seen: false }, { uid: true })) || []) as number[];
-      const pick = uids.slice(-6);
+      const pick = uids.slice(-50);
       if (!pick.length) return [];
       const out: MailItem[] = [];
       for await (const m of c.fetch(pick, { envelope: true, uid: true }, { uid: true })) {

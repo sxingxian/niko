@@ -1,5 +1,6 @@
 // Provider adapters. Every call here goes to a third-party API with the user's own credentials.
 // None of this has been exercised against live accounts yet: treat each adapter as untested until you link one.
+import { gmailBatch } from './gmail';
 import { and, eq } from 'drizzle-orm';
 import { connections, providerApps, type Db } from '@niko/db';
 import { PROVIDERS, type AppId, type EventItem, type MailItem, type NoteItem } from '@niko/shared';
@@ -124,23 +125,27 @@ export async function api(url: string, token: string, init: RequestInit = {}, sc
 }
 
 
+/** The most items any list (mail, events, notes) brings back. The screen shows them a page at a time. */
+export const LIST_MAX = 50;
+
 export async function listMail(env: Env, db: Db, userId: string, provider: string): Promise<MailItem[]> {
   const s = await credentials(env, db, userId, provider);
   if (!s) return [];
   if (isImapProvider(provider)) return imapList(provider, s);
   if (provider === 'gmail') {
     const base = 'https://gmail.googleapis.com/gmail/v1/users/me/messages';
-    const list = await api(`${base}?q=${encodeURIComponent('is:unread in:inbox')}&maxResults=6`, s.accessToken);
-    const out: MailItem[] = [];
-    for (const m of list.messages ?? []) {
-      const d = await api(`${base}/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, s.accessToken);
-      const h = (n: string) => d.payload?.headers?.find((x: any) => x.name === n)?.value ?? '';
-      out.push({ id: m.id, from: h('From').replace(/<.*>/, '').replace(/"/g, '').trim() || h('From'), subject: h('Subject'), source: 'Gmail', provider });
-    }
-    return out;
+    const list = await api(`${base}?q=${encodeURIComponent('is:unread in:inbox')}&maxResults=${LIST_MAX}`, s.accessToken);
+    const ids: string[] = (list.messages ?? []).map((m: any) => String(m.id)).filter((id: string) => /^[A-Za-z0-9]{1,64}$/.test(id));
+    // The senders and subjects of all of them in one batch request, instead of one request each.
+    const details = await gmailBatch(s.accessToken!, ids.map((id) => `/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`));
+    return ids.map((id, i) => {
+      const d = details[i];
+      const h = (n: string) => d?.payload?.headers?.find((x: any) => x.name === n)?.value ?? '';
+      return { id, from: h('From').replace(/<.*>/, '').replace(/"/g, '').trim() || h('From') || '(unknown sender)', subject: h('Subject'), source: 'Gmail', provider };
+    });
   }
   if (provider === 'outlook-mail') {
-    const j = await api("https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$filter=isRead eq false&$top=6&$select=id,subject,from", s.accessToken);
+    const j = await api(`https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$filter=isRead eq false&$top=${LIST_MAX}&$select=id,subject,from`, s.accessToken);
     return (j.value ?? []).map((m: any) => ({ id: m.id, from: m.from?.emailAddress?.name ?? m.from?.emailAddress?.address ?? '', subject: m.subject ?? '', source: 'Outlook', provider }));
   }
   return [];
@@ -153,12 +158,12 @@ export async function listEvents(env: Env, db: Db, userId: string, provider: str
   if (provider === 'google-calendar') {
     const u = new URL('https://www.googleapis.com/calendar/v3/calendars/primary/events');
     u.searchParams.set('timeMin', dayStart.toISOString()); u.searchParams.set('timeMax', dayEnd.toISOString());
-    u.searchParams.set('singleEvents', 'true'); u.searchParams.set('orderBy', 'startTime'); u.searchParams.set('maxResults', '12');
+    u.searchParams.set('singleEvents', 'true'); u.searchParams.set('orderBy', 'startTime'); u.searchParams.set('maxResults', String(LIST_MAX));
     const j = await api(u.toString(), s.accessToken);
     return (j.items ?? []).filter((e: any) => e.status !== 'cancelled').map((e: any) => ({ id: String(e.id), provider, title: e.summary ?? '(no title)', source: 'Google', start: Date.parse(e.start?.dateTime ?? e.start?.date), time: '' }));
   }
   if (provider === 'outlook-calendar') {
-    const u = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${dayStart.toISOString()}&endDateTime=${dayEnd.toISOString()}&$top=12&$select=id,subject,start,isCancelled&$orderby=start/dateTime`;
+    const u = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${dayStart.toISOString()}&endDateTime=${dayEnd.toISOString()}&$top=${LIST_MAX}&$select=id,subject,start,isCancelled&$orderby=start/dateTime`;
     const j = await api(u, s.accessToken, { headers: { prefer: 'outlook.timezone="UTC"' } });
     return (j.value ?? []).filter((e: any) => !e.isCancelled).map((e: any) => ({ id: String(e.id), provider, title: e.subject ?? '(no title)', source: 'Outlook', start: Date.parse(e.start?.dateTime + 'Z'), time: '' }));
   }
@@ -172,13 +177,13 @@ export async function listNotes(env: Env, db: Db, userId: string, provider: stri
     // Search can return pages that are in the trash; those are left out. More are asked for, so there are still enough.
     const j = await api('https://api.notion.com/v1/search', s.accessToken, {
       method: 'POST', headers: { 'content-type': 'application/json', 'notion-version': '2022-06-28' },
-      body: JSON.stringify({ page_size: 25, sort: { direction: 'descending', timestamp: 'last_edited_time' }, filter: { property: 'object', value: 'page' } }),
+      body: JSON.stringify({ page_size: 70, sort: { direction: 'descending', timestamp: 'last_edited_time' }, filter: { property: 'object', value: 'page' } }),
     });
-    return (j.results ?? []).filter((p: any) => !notionDeleted(p)).slice(0, 8)
+    return (j.results ?? []).filter((p: any) => !notionDeleted(p)).slice(0, LIST_MAX)
       .map((p: any) => ({ id: String(p.id), provider, title: notionTitle(p), source: 'Notion', edited: Date.parse(p.last_edited_time) || undefined }));
   }
   if (provider === 'onenote') {
-    const j = await api('https://graph.microsoft.com/v1.0/me/onenote/pages?$top=8&$select=id,title,lastModifiedDateTime&$orderby=lastModifiedDateTime desc', s.accessToken);
+    const j = await api('https://graph.microsoft.com/v1.0/me/onenote/pages?$top=${LIST_MAX}&$select=id,title,lastModifiedDateTime&$orderby=lastModifiedDateTime desc', s.accessToken);
     return (j.value ?? []).map((p: any) => ({ id: String(p.id), provider, title: p.title || 'Untitled', source: 'OneNote', edited: Date.parse(p.lastModifiedDateTime) || undefined }));
   }
   return [];

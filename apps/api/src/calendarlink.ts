@@ -196,7 +196,7 @@ export async function icalList(s: Record<string, string>, from: Date, to: Date, 
   const failed = lists.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
   for (const f of failed) console.warn(`ical: ${String(f.reason?.message ?? f.reason).slice(0, 200)}`);
   if (links.length && failed.length === links.length) throw failed[0]!.reason;
-  return lists.flatMap((r) => (r.status === 'fulfilled' ? r.value : [])).sort((a, b) => a.start - b.start).slice(0, 20);
+  return lists.flatMap((r) => (r.status === 'fulfilled' ? r.value : [])).sort((a, b) => a.start - b.start).slice(0, 50);
 }
 
 export async function icalDetail(s: Record<string, string>, id: string, tzOffsetMin = 0): Promise<EventDetail> {
