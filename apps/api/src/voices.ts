@@ -12,7 +12,7 @@ import { credentials, publicHttpsUrl } from './providers';
 export interface VoiceKey extends VoiceKeyInfo { apiKey: string }
 export const TTS_MAX_BYTES = 8 * 1024 * 1024;
 const MIN = 60_000, HOUR = 60 * MIN;
-const PROVIDERS: VoiceProvider[] = ['openai', 'elevenlabs', 'google', 'azure', 'deepgram', 'cartesia'];
+const PROVIDERS: VoiceProvider[] = ['openai', 'elevenlabs', 'google', 'azure', 'deepgram', 'cartesia', 'fishaudio'];
 const CARTESIA_VERSION = '2026-03-01';
 /** Names that go into a URL or SSML are kept to safe characters. */
 const SAFE_VOICE = /^[A-Za-z0-9._:\-/ ()]{1,120}$/;
@@ -44,7 +44,7 @@ export async function saveVoiceKeys(env: Env, db: Db, userId: string, keys: Voic
 
 export const voiceKeyInfo = (k: VoiceKey): VoiceKeyInfo => ({ id: k.id, label: k.label, provider: k.provider, voice: k.voice, model: k.model, baseUrl: k.baseUrl, region: k.region });
 export function defaultVoiceLabel(k: { provider: VoiceProvider; baseUrl: string }): string {
-  if (k.provider !== 'openai') return { elevenlabs: 'ElevenLabs', google: 'Google Cloud', azure: 'Microsoft Azure', deepgram: 'Deepgram', cartesia: 'Cartesia' }[k.provider];
+  if (k.provider !== 'openai') return { elevenlabs: 'ElevenLabs', google: 'Google Cloud', azure: 'Microsoft Azure', deepgram: 'Deepgram', cartesia: 'Cartesia', fishaudio: 'Fish Audio' }[k.provider];
   try { const h = new URL(k.baseUrl).hostname.replace(/^api\./, ''); return h === 'openai.com' ? 'OpenAI' : h === 'groq.com' ? 'Groq' : h; } catch { return 'OpenAI-compatible'; }
 }
 
@@ -54,7 +54,8 @@ export function voiceKeyProblem(k: Pick<VoiceKey, 'provider' | 'voice' | 'baseUr
   if (k.provider === 'openai' && !publicHttpsUrl(k.baseUrl)) return 'The base URL must be a public https address.';
   if (k.provider === 'azure' && !AZURE_REGION.test(k.region)) return 'Add the region of your Azure Speech resource, such as eastus or southeastasia.';
   if (k.voice && !SAFE_VOICE.test(k.voice)) return 'That voice name has characters a voice name can’t have.';
-  if (k.provider !== 'openai' && !k.voice) return 'Choose a voice.';
+  if (k.provider !== 'openai' && k.provider !== 'fishaudio' && !k.voice) return 'Choose a voice.';
+  if (k.provider === 'fishaudio' && k.voice && !/^[a-f0-9]{16,64}$/i.test(k.voice)) return 'A Fish Audio voice is its id: the 32 letters and digits at the end of the voice’s fish.audio address.';
   return null;
 }
 
@@ -137,6 +138,12 @@ export async function speakWithKey(k: VoiceKey, text: string): Promise<{ bytes: 
     return audioOf(await call(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(k.voice)}&encoding=mp3`, {
       method: 'POST', headers: { authorization: `Token ${k.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ text }) }));
   }
+  if (k.provider === 'fishaudio') {
+    // The model goes in a header; reference_id picks the voice (left out, Fish Audio uses its default voice).
+    return audioOf(await call('https://api.fish.audio/v1/tts', {
+      method: 'POST', headers: { authorization: `Bearer ${k.apiKey}`, 'content-type': 'application/json', model: k.model || 's2-pro' },
+      body: JSON.stringify({ text, ...(k.voice ? { reference_id: k.voice } : {}), format: 'mp3', mp3_bitrate: 128, latency: 'normal' }) }));
+  }
   return audioOf(await call('https://api.cartesia.ai/tts/bytes', {
     method: 'POST', headers: { authorization: `Bearer ${k.apiKey}`, 'cartesia-version': CARTESIA_VERSION, 'content-type': 'application/json' },
     body: JSON.stringify({ model_id: k.model || 'sonic-3.5', transcript: text, voice: { mode: 'id', id: k.voice }, output_format: { container: 'mp3', sample_rate: 44100, bit_rate: 128000 } }) }));
@@ -164,6 +171,14 @@ export async function listVoices(k: VoiceKey): Promise<{ id: string; name: strin
   if (k.provider === 'cartesia') {
     const j = await json(await call('https://api.cartesia.ai/voices?limit=100', { headers: { authorization: `Bearer ${k.apiKey}`, 'cartesia-version': CARTESIA_VERSION } }));
     return clean((Array.isArray(j) ? j : j?.data ?? []).map((v: any) => ({ id: String(v.id), name: `${String(v.name ?? 'Voice').slice(0, 60)}${v.language ? ` · ${v.language}` : ''}` })));
+  }
+  if (k.provider === 'fishaudio') {
+    // The account's own voices first; with none, the most used public voices.
+    const read = async (q: string) => (await json(await call(`https://api.fish.audio/model?${q}`, { headers: { authorization: `Bearer ${k.apiKey}` } })))?.items ?? [];
+    let items: any[] = await read('self=true&page_size=50');
+    const mine = items.length > 0;
+    if (!mine) items = await read('page_size=30&sort_by=task_count');
+    return clean(items.map((v: any) => ({ id: String(v._id ?? v.id ?? ''), name: `${String(v.title ?? 'Voice').slice(0, 60)}${mine ? ' · your voice' : ''}${Array.isArray(v.languages) && v.languages.length ? ` · ${v.languages.slice(0, 2).join(', ')}` : ''}` })));
   }
   return []; // OpenAI and Deepgram have fixed lists, shown by the screen; other OpenAI-compatible services take a name.
 }

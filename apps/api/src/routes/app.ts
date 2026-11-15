@@ -675,7 +675,7 @@ app.get('/voice/keys', async (c) => {
 
 /** A voice key from the screen: its settings, checked and trimmed. */
 function voiceKeyFrom(b: any): Omit<VoiceKey, 'id' | 'apiKey' | 'label'> & { label: string; apiKey: string } {
-  const provider = (['openai', 'elevenlabs', 'google', 'azure', 'deepgram', 'cartesia'] as const).find((p) => p === b?.provider) ?? 'openai';
+  const provider = (['openai', 'elevenlabs', 'google', 'azure', 'deepgram', 'cartesia', 'fishaudio'] as const).find((p) => p === b?.provider) ?? 'openai';
   return { provider, label: clip(b?.label, 40), voice: clip(b?.voice, 120), model: clip(b?.model, 100), baseUrl: provider === 'openai' ? clip(b?.baseUrl, 500) : '', region: provider === 'azure' ? clip(b?.region, 30).toLowerCase() : '', apiKey: clip(b?.apiKey, 4000) };
 }
 /** The saved key a request may use: only with the same service, and (for OpenAI-compatible ones) the same address. */

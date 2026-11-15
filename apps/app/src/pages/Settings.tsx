@@ -616,6 +616,8 @@ const VOICE_INFO: Record<Builtin, { sub: string; tag: string }> = {
 const PREVIEW_LINE = (name: string) => `Hi ${name || 'there'}, this is how I sound.`;
 /** A voice key being added or changed on this page. `id` is the saved key's id, or a temporary "new-…" one. */
 type VoiceDraft = VoiceKeyInfo & { apiKey: string; saved: boolean };
+/** Services whose voices can be listed from the account. */
+const LISTS_VOICES: VoiceProvider[] = ['elevenlabs', 'google', 'azure', 'cartesia', 'fishaudio'];
 const presetInfo = (k: { provider: VoiceProvider; baseUrl: string }) => VOICE_PROVIDERS.find((p) => p.id === voicePresetOf(k))!;
 function voiceRestLine(r: BrainRest | undefined): string {
   if (!r || r.until <= Date.now()) return '';
@@ -761,25 +763,26 @@ export function Voice() {
           <label className="fld"><span className="k">Name · optional</span><input className="in" type="text" maxLength={40} placeholder="Work OpenAI, Spare Azure…" value={k.label} onChange={(x) => editKey(k.id, { label: x.target.value })} /></label>
         </div>
         <div className="eng-fields">
-          <label className="fld"><span className="k">API key</span><input className="in" type="password" autoComplete="off" placeholder={k.saved ? 'Saved · type to replace' : 'Paste key'} value={k.apiKey} onChange={(x) => editKey(k.id, { apiKey: x.target.value })} onBlur={() => k.apiKey.trim() && ['elevenlabs', 'google', 'azure', 'cartesia'].includes(k.provider) && (k.provider !== 'azure' || k.region) && listVoices(k)} /></label>
+          <label className="fld"><span className="k">API key</span><input className="in" type="password" autoComplete="off" placeholder={k.saved ? 'Saved · type to replace' : 'Paste key'} value={k.apiKey} onChange={(x) => editKey(k.id, { apiKey: x.target.value })} onBlur={() => k.apiKey.trim() && LISTS_VOICES.includes(k.provider) && (k.provider !== 'azure' || k.region) && listVoices(k)} /></label>
           {k.provider === 'azure' && <label className="fld"><span className="k">Region</span><input className="in" type="text" placeholder="eastus, southeastasia…" value={k.region} onChange={(x) => editKey(k.id, { region: x.target.value.trim().toLowerCase() })} /></label>}
           {p.id === 'other' && <label className="fld"><span className="k">Base URL</span><input className="in" type="url" placeholder="https://api.groq.com/openai/v1" value={k.baseUrl} onChange={(x) => editKey(k.id, { baseUrl: x.target.value })} /></label>}
         </div>
         <div className="eng-fields">
           <label className="fld"><span className="k">Voice</span>
             {voices.length
-              ? <select className="in" value={voices.some((o) => o.id === k.voice) ? k.voice : ''} onChange={(x) => editKey(k.id, { voice: x.target.value })}>
-                  {!voices.some((o) => o.id === k.voice) && <option value="">{k.voice ? `${k.voice} · not in the list` : 'Choose a voice'}</option>}
+              ? <select className="in" value={k.voice} onChange={(x) => editKey(k.id, { voice: x.target.value })}>
+                  {k.provider === 'fishaudio' && <option value="">Fish Audio’s default voice</option>}
+                  {!voices.some((o) => o.id === k.voice) && (k.voice || k.provider !== 'fishaudio') && <option value={k.voice}>{k.voice ? `${k.voice} · not in the list` : 'Choose a voice'}</option>}
                   {voices.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
                 </select>
-              : <input className="in" type="text" placeholder={k.provider === 'openai' ? 'Voice name, such as alloy' : 'List voices, or type its id'} value={k.voice} onChange={(x) => editKey(k.id, { voice: x.target.value })} />}
+              : <input className="in" type="text" placeholder={k.provider === 'openai' ? 'Voice name, such as alloy' : k.provider === 'fishaudio' ? 'Voice id from fish.audio, or empty for the default' : 'List voices, or type its id'} value={k.voice} onChange={(x) => editKey(k.id, { voice: x.target.value })} />}
           </label>
           {(p.models || p.id === 'other') && <label className="fld"><span className="k">Model</span>
             {p.models
               ? <select className="in" value={k.model} onChange={(x) => editKey(k.id, { model: x.target.value })}>{p.models.map((m) => <option key={m} value={m}>{m}</option>)}</select>
               : <input className="in" type="text" placeholder="As listed by the service" value={k.model} onChange={(x) => editKey(k.id, { model: x.target.value })} />}
           </label>}
-          {['elevenlabs', 'google', 'azure', 'cartesia'].includes(k.provider) && <button type="button" className="bt" onClick={() => listVoices(k)} disabled={!!ml?.busy || (!k.apiKey.trim() && !k.saved)}>{ml?.busy ? 'Listing…' : 'List voices'}</button>}
+          {LISTS_VOICES.includes(k.provider) && <button type="button" className="bt" onClick={() => listVoices(k)} disabled={!!ml?.busy || (!k.apiKey.trim() && !k.saved)}>{ml?.busy ? 'Listing…' : 'List voices'}</button>}
         </div>
         <div className="eng-fields">
           {previewBtn(v, !k.apiKey.trim() && !k.saved)}
@@ -855,7 +858,7 @@ export function Voice() {
     const k = keyOf(v);
     if (!k) return VOICE_INFO[v as Builtin]?.sub ?? '';
     const vn = (lists[k.id]?.list ?? presetInfo(k).voices ?? []).find((o) => o.id === k.voice)?.name ?? k.voice;
-    return [presetInfo(k).name, vn || 'voice not set'].join(' · ') + (k.saved ? '' : ' · not saved yet');
+    return [presetInfo(k).name, vn || (k.provider === 'fishaudio' ? 'default voice' : 'voice not set')].join(' · ') + (k.saved ? '' : ' · not saved yet');
   };
   const tag = (v: VoiceSource) => (keyOf(v) ? 'Your key' : VOICE_INFO[v as Builtin]?.tag ?? '');
   const row = (v: VoiceSource, i: number | null) => {
@@ -864,7 +867,7 @@ export function Voice() {
       <li key={v} className={'vrow' + (on ? ' on' : '')}>
         <div className="vrow-head">
           <span className="n" aria-hidden="true">{on ? i + 1 : '–'}</span>
-          <button type="button" className="vrow-title" aria-expanded={open === v} onClick={() => { const k = keyOf(v); if (open !== v && k?.saved && !lists[k.id] && ['elevenlabs', 'google', 'azure', 'cartesia'].includes(k.provider)) void listVoices(k); setOpen(open === v ? null : v); }}>
+          <button type="button" className="vrow-title" aria-expanded={open === v} onClick={() => { const k = keyOf(v); if (open !== v && k?.saved && !lists[k.id] && LISTS_VOICES.includes(k.provider)) void listVoices(k); setOpen(open === v ? null : v); }}>
             <b>{name(v)}</b><span className="sub">{sub(v)}</span>
             {resting && <span className="sub vrow-warn">{resting}</span>}
             {v === 'kokoro' && on && !kReady && kokoroSupported() && <span className="sub vrow-warn">Not downloaded on this device yet, so Niko skips it here.</span>}

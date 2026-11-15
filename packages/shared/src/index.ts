@@ -167,7 +167,7 @@ export const VOICE_NAMES: Record<'workers' | 'kokoro' | 'self-hosted' | 'device'
 export const voiceName = (v: VoiceSource | 'device' | undefined) => (v && v in VOICE_NAMES ? VOICE_NAMES[v as keyof typeof VOICE_NAMES] : 'Your voice');
 
 /** Voice services that a key can be added for. "openai" also covers any OpenAI-compatible speech API. */
-export type VoiceProvider = 'openai' | 'elevenlabs' | 'google' | 'azure' | 'deepgram' | 'cartesia';
+export type VoiceProvider = 'openai' | 'elevenlabs' | 'google' | 'azure' | 'deepgram' | 'cartesia' | 'fishaudio';
 /** A saved voice key as the Voice screen sees it: everything except the key itself. */
 export interface VoiceKeyInfo { id: string; label: string; provider: VoiceProvider; voice: string; model: string; baseUrl: string; region: string }
 export const VOICE_PROVIDERS: { id: string; provider: VoiceProvider; name: string; baseUrl?: string; models?: string[]; voices?: { id: string; name: string }[]; note: string }[] = [
@@ -179,6 +179,7 @@ export const VOICE_PROVIDERS: { id: string; provider: VoiceProvider; name: strin
   { id: 'azure', provider: 'azure', name: 'Microsoft Azure', note: 'Many languages and neural voices. Uses a Speech resource key and its region; a free monthly allowance applies.' },
   { id: 'deepgram', provider: 'deepgram', name: 'Deepgram', voices: ['thalia', 'andromeda', 'helena', 'apollo', 'arcas', 'aries', 'asteria', 'athena', 'hera', 'luna', 'orion', 'orpheus', 'zeus'].map((v) => ({ id: `aura-2-${v}-en`, name: v[0]!.toUpperCase() + v.slice(1) })),
     note: 'Fast, natural English voices (Aura 2), with free credit when you sign up.' },
+  { id: 'fishaudio', provider: 'fishaudio', name: 'Fish Audio', models: ['s2-pro', 's2.1-pro-free', 's1'], note: 'Natural, expressive voices and your own cloned voices; voices are listed from your Fish Audio account (or popular ones if you have none). Leave the voice empty for its default. A new account without credit needs the s2.1-pro-free model.' },
   { id: 'cartesia', provider: 'cartesia', name: 'Cartesia', models: ['sonic-3.5', 'sonic-3', 'sonic-latest'], note: 'Very fast, natural voices, with a free monthly allowance.' },
   { id: 'other', provider: 'openai', name: 'Other (OpenAI-compatible)', note: 'Any speech service with an OpenAI-compatible API, such as Groq or a hosted Kokoro.' },
 ];

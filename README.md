@@ -47,7 +47,7 @@ Nothing here has run against live services yet. The code typechecks, all three f
 | AI: Workers AI, your model server and any number of your own keys (OpenAI-compatible / Anthropic / Google), in an order you choose; one that reaches its usage limit is skipped until it resets | Built |
 | Inbox, Calendar (next 30 days) and Notes: up to 50 items each, shown a page at a time (5–50 per page, set in Appearance); “next page”, “page 3”, “last page” by voice | Built |
 | Weather from Open-Meteo (free, no key): forecasts for where you are and any place you ask about | Built |
-| Voices in an order you choose: Cloudflare (free), on-device Kokoro (free), your own voice server, and any number of voice API keys (OpenAI or OpenAI-compatible, ElevenLabs, Google Cloud, Azure, Deepgram, Cartesia); one that reaches its limit is skipped until it resets; device voice always last | Built |
+| Voices in an order you choose: Cloudflare (free), on-device Kokoro (free), your own voice server, and any number of voice API keys (OpenAI or OpenAI-compatible, ElevenLabs, Google Cloud, Azure, Deepgram, Cartesia, Fish Audio); one that reaches its limit is skipped until it resets; device voice always last | Built |
 | Gmail, Outlook mail: read unread, open, send replies | Built, untested |
 | Personal mail by app password over IMAP/SMTP: Gmail, iCloud, Synology, others (not Outlook.com) | Built; tested against local test servers only |
 | Google Calendar, Outlook Calendar: today's events, open an event | Built, untested |

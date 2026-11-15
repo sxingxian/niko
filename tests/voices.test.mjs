@@ -95,4 +95,23 @@ await ok('a failure sets a rest on the account, and speaking again clears it', a
   await noteVoice(fakeDb, { id: 'u1', engine: { voiceRest: { 'vkey:a': r } } }, 'vkey:a', null);
   assert.deepEqual(store.engineWrites.at(-1).voiceRest, {});
 });
+await ok('Fish Audio: model header, reference_id for the voice, mp3', async () => {
+  await speakWithKey({ ...base, id: 'h', provider: 'fishaudio', voice: '802e3bc2b27e49c2995d23ef70e6ac89', model: 's2.1-pro-free' }, 'Hi');
+  assert.equal(last.url, 'https://api.fish.audio/v1/tts'); assert.equal(last.init.headers.authorization, 'Bearer KEY'); assert.equal(last.init.headers.model, 's2.1-pro-free');
+  assert.deepEqual(JSON.parse(last.body), { text: 'Hi', reference_id: '802e3bc2b27e49c2995d23ef70e6ac89', format: 'mp3', mp3_bitrate: 128, latency: 'normal' });
+});
+await ok('Fish Audio: no voice uses its default voice; a voice that is not an id is refused', async () => {
+  await speakWithKey({ ...base, id: 'h', provider: 'fishaudio', voice: '' }, 'Hi');
+  assert.equal(JSON.parse(last.body).reference_id, undefined); assert.equal(last.init.headers.model, 's2-pro');
+  assert.ok(voiceKeyProblem({ provider: 'fishaudio', voice: 'https://fish.audio/m/x', baseUrl: '', region: '' }));
+});
+await ok('Fish Audio voices: your own first, popular ones when you have none', async () => {
+  let n = 0;
+  reply = () => (n++ === 0 ? Response.json({ items: [] }) : Response.json({ items: [{ _id: 'a'.repeat(32), title: 'Narrator', languages: ['en'] }] }));
+  const list = await listVoices({ ...base, id: 'h', provider: 'fishaudio', voice: '' });
+  assert.deepEqual(list, [{ id: 'a'.repeat(32), name: 'Narrator · en' }]); assert.ok(last.url.includes('sort_by=task_count'));
+  reply = () => Response.json({ items: [{ _id: 'b'.repeat(32), title: 'Me' }] });
+  assert.equal((await listVoices({ ...base, id: 'h', provider: 'fishaudio', voice: '' }))[0].name, 'Me · your voice');
+  reply = () => new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'audio/mpeg' } });
+});
 console.log(`${pass} voice checks passed`);
