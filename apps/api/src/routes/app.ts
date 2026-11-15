@@ -6,6 +6,8 @@ import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
 import { audit, requireUser, tooMany } from '../lib/session';
 import { eventDetail, mailDetail, noteDetail } from '../details';
+import { icalCheck } from '../calendarlink';
+import { IMAP_PROVIDERS, imapCheck, isImapProvider } from '../mailbox';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
   telegramSetWebhook, type AppKeys,
@@ -163,12 +165,19 @@ app.post('/connections/:provider', async (c) => {
   // A field left blank keeps what is already saved (so a key need not be typed again to change a voice or model).
   const prior = (await credentials(c.env, c.get('db'), u.id, def.id).catch(() => null)) as Record<string, string> | null;
   for (const f of def.fields) {
-    const v = typeof b[f.key] === 'string' && b[f.key]!.trim() ? b[f.key]!.trim() : (prior?.[f.key] ?? '');
+    let v = typeof b[f.key] === 'string' && b[f.key]!.trim() ? b[f.key]!.trim() : (prior?.[f.key] ?? '');
+    if (f.type === 'url') v = v.replace(/^webcal:\/\//i, 'https://'); // calendar links are often given as webcal://
     if (!v && !f.optional && f.key !== 'voiceId' && f.key !== 'channelId') return c.json({ error: `${f.label} is needed.` }, 400);
     if (f.type === 'url' && v && !publicHttpsUrl(v)) return c.json({ error: `${f.label} must be a public https address.` }, 400);
     secret[f.key] = v.slice(0, 2000);
   }
+  // Mail and calendar links are checked before they are saved, so a wrong password or link is caught now.
+  try {
+    if (isImapProvider(def.id)) await imapCheck(def.id, secret);
+    if (def.id === 'ical') await icalCheck(secret);
+  } catch (e) { return c.json({ error: (e as Error).message }, 400); }
   const meta: Record<string, unknown> = { values: shownValues(def, secret) };
+  if (isImapProvider(def.id)) meta.label = secret.email || secret.username;
   const id = crypto.randomUUID();
   if (def.id === 'telegram-bot') {
     secret.hookSecret = randomToken(24);
@@ -266,15 +275,20 @@ async function buildBrief(c: import('hono').Context<AppEnv>, tzOffsetMin: number
   const dayStart = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) + tzOffsetMin * 60_000);
   const dayEnd = new Date(dayStart.getTime() + 86400_000);
   const [mailLists, eventLists, noteLists] = await Promise.all([
-    Promise.all(['gmail', 'outlook-mail'].filter((p) => linked.includes(p)).map((p) => guard(p, () => listMail(c.env, db, u.id, p)))),
-    Promise.all(['google-calendar', 'outlook-calendar'].filter((p) => linked.includes(p)).map((p) => guard(p, () => listEvents(c.env, db, u.id, p, dayStart, dayEnd)))),
+    Promise.all(['gmail', 'outlook-mail', ...IMAP_PROVIDERS].filter((p) => linked.includes(p)).map((p) => guard(p, () => listMail(c.env, db, u.id, p)))),
+    Promise.all(['google-calendar', 'outlook-calendar', 'ical'].filter((p) => linked.includes(p)).map((p) => guard(p, () => listEvents(c.env, db, u.id, p, dayStart, dayEnd, tzOffsetMin)))),
     Promise.all(['notion', 'onenote'].filter((p) => linked.includes(p)).map((p) => guard(p, () => listNotes(c.env, db, u.id, p)))),
   ]);
   const events = eventLists.flat().sort((a, b) => a.start - b.start).map((e) => {
     const d = new Date(e.start - tzOffsetMin * 60_000);
-    return { ...e, time: `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}` };
+    return { ...e, time: e.allDay ? 'All day' : `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}` };
   });
-  const recent = await db.select().from(messages).where(and(eq(messages.userId, u.id), eq(messages.direction, 'in'))).orderBy(desc(messages.createdAt)).limit(40);
+  return { mail: mailLists.flat(), events, notes: noteLists.flat(), chats: await recentChats(c), problems };
+}
+
+/** The latest conversation from each chat, from Niko's own store (no third-party calls, so it is cheap to ask often). */
+async function recentChats(c: import('hono').Context<AppEnv>): Promise<Brief['chats']> {
+  const recent = await c.get('db').select().from(messages).where(and(eq(messages.userId, c.get('user').id), eq(messages.direction, 'in'))).orderBy(desc(messages.createdAt)).limit(40);
   const seen = new Set<string>();
   const chats: Brief['chats'] = [];
   for (const m of recent) {
@@ -283,10 +297,11 @@ async function buildBrief(c: import('hono').Context<AppEnv>, tzOffsetMin: number
     seen.add(key);
     chats.push({ provider: m.provider, chatId: m.chatId, title: m.chatTitle || m.sender, last: m.body.slice(0, 140), lastAt: m.createdAt.getTime(), source: PROVIDERS.find((p) => p.id === m.provider)?.name.replace(' bot', '') ?? m.provider });
   }
-  return { mail: mailLists.flat(), events, notes: noteLists.flat(), chats: chats.slice(0, 8), problems };
+  return chats.slice(0, 8);
 }
 
 app.get('/brief', async (c) => c.json(await buildBrief(c, clampNum(Number(c.req.query('tz')), -840, 840, 0))));
+app.get('/brief/chats', async (c) => c.json({ chats: await recentChats(c) }));
 
 // What opens from the workspace: one note, one email or one event, as plain text.
 const opened = (fn: typeof noteDetail, group: string) => async (c: import('hono').Context<AppEnv>) => {
@@ -297,7 +312,12 @@ const opened = (fn: typeof noteDetail, group: string) => async (c: import('hono'
 };
 app.get('/notes/:provider/:id', opened(noteDetail, 'notes'));
 app.get('/mail/:provider/:id', opened(mailDetail as unknown as typeof noteDetail, 'mail'));
-app.get('/events/:provider/:id', opened(eventDetail as unknown as typeof noteDetail, 'calendar'));
+app.get('/events/:provider/:id', async (c) => {
+  const provider = c.req.param('provider');
+  if (PROVIDERS.find((p) => p.id === provider)?.group !== 'calendar') return c.json({ error: 'Unknown connection.' }, 404);
+  try { return c.json(await eventDetail(c.env, c.get('db'), c.get('user').id, provider, c.req.param('id'), clampNum(Number(c.req.query('tz')), -840, 840, 0))); }
+  catch (e) { return c.json({ error: (e as Error).message }, 502); }
+});
 
 app.get('/threads/:provider/:chatId', async (c) => {
   const rows = await c.get('db').select().from(messages)

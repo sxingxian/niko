@@ -46,14 +46,15 @@ Nothing here has run against live services yet. The code typechecks, all three f
 | Per-user colour (shifting or fixed, custom picker) | Built |
 | AI: Workers AI, or your own key (OpenAI-compatible / Anthropic), with fallback | Built |
 | Voices in an order you choose: Cloudflare (free), on-device Kokoro (free), your own voice server, ElevenLabs; device voice always last | Built |
-| Gmail, Outlook mail: read unread, send replies | Built, untested |
-| Google Calendar, Outlook Calendar: today's events | Built, untested |
-| Notion, OneNote: recent pages | Built, untested |
-| Telegram bot: receive, reply, send files, open received files | Built, untested |
+| Gmail, Outlook mail: read unread, open, send replies | Built, untested |
+| Personal mail by app password over IMAP/SMTP: Gmail, iCloud, Synology, others (not Outlook.com) | Built; tested against local test servers only |
+| Google Calendar, Outlook Calendar: today's events, open an event | Built, untested |
+| Calendar links (private iCal address from Google, Outlook, iCloud): read-only | Built; tested with sample calendars only |
+| Notion, OneNote: recent pages (trashed pages left out), open a page | Built, untested |
+| Telegram bot: receive, reply as often as you like, send files, open received files | Built, untested |
 | Slack: receive (Events API), reply | Built, untested |
 | Discord: send messages and files to a channel | Built, untested. Receiving needs a gateway connection and is not built |
 | Make.com, n8n, Power Automate: signed webhooks out and in | Built, untested |
-| iCloud Mail, Synology Mail (IMAP) | Credentials can be saved; **reading mail is not built** |
 | Apple Calendar, Synology Calendar (CalDAV) | Credentials can be saved; **reading events is not built** |
 | Telegram personal account | **Not built** (shown as "Later") |
 | "Respond only to my voice" | **Not built** (switch is disabled). Niko answers anyone who says its name |

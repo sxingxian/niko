@@ -156,9 +156,13 @@ export function Connections() {
       setNote({ ok: true, text: r.readsGroups ? 'Checked. The bot can read group messages.' : 'Checked. Group privacy is still on.' });
     } catch (x: any) { setNote({ ok: false, text: x.message }); }
   };
+  // Errors stay inside the sheet, so nothing typed is lost; mail and calendar links are checked before saving.
+  const [formErr, setFormErr] = useState('');
+  const [formBusy, setFormBusy] = useState(false);
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!form) return;
+    if (!form || formBusy) return;
+    setFormErr(''); setFormBusy(true);
     try {
       const r = await api<{ inboundUrl?: string; signingSecret?: string; readsGroups?: boolean }>(`/connections/${form.id}`, { body: values });
       setValues({});
@@ -166,7 +170,7 @@ export function Connections() {
       await load();
       if (r.inboundUrl && r.signingSecret) setShown({ inboundUrl: r.inboundUrl, signingSecret: r.signingSecret });
       else { dlg.current?.close(); setNote({ ok: true, text: `${form.name} linked.` }); }
-    } catch (x: any) { setNote({ ok: false, text: x.message }); dlg.current?.close(); }
+    } catch (x: any) { setFormErr(x.message ?? 'That did not work.'); } finally { setFormBusy(false); }
   };
   const perm = me?.permissions ?? { draft: true, chatReply: true, files: true };
   const setPerm = async (p: Partial<Permissions>) => { await api('/me', { method: 'PATCH', body: { permissions: p } }); await refreshMe(); };
@@ -250,16 +254,24 @@ export function Connections() {
         )}
       </dialog>
 
-      <dialog ref={dlg} className="sheet" onClose={() => setForm(null)}>
+      <dialog ref={dlg} className={'sheet' + (form?.steps ? ' wide' : '')} onClose={() => { setForm(null); setFormErr(''); }}>
         {form && !shown && (
           <form onSubmit={submit}>
             <h2 style={{ fontWeight: 500, fontSize: 24 }}>Connect {form.name}</h2>
             <p className="sub">{form.how}. Stored encrypted; you can remove it at any time.</p>
             {form.id === 'telegram-bot' && <p className="sub">Tip: so the bot can read whole group chats, turn off its group privacy first: @BotFather → /setprivacy → your bot → Disable.</p>}
+            {form.steps && (
+              <ol className="steps">
+                {form.steps.map((s, i) => (
+                  <li key={i}><span className="n" aria-hidden="true">{i + 1}</span><div className="step"><p>{s.text}</p>{s.link && <a className="bt step-link" href={s.link} target="_blank" rel="noopener noreferrer">{s.linkLabel ?? 'Open'} <Icon name="external" size={16} /></a>}</div></li>
+                ))}
+              </ol>
+            )}
             {form.fields?.map((f) => (
-              <Field key={f.key} label={f.label}><input className="in" type={f.type === 'password' ? 'password' : f.type === 'url' ? 'url' : 'text'} autoComplete="off" placeholder={f.placeholder} value={values[f.key] ?? ''} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} /></Field>
+              <Field key={f.key} label={f.label + (f.optional ? ' · optional' : '')}><input className="in" type={f.type === 'password' ? 'password' : f.type === 'url' ? 'url' : f.key === 'email' || f.placeholder?.includes('@') ? 'email' : 'text'} autoComplete="off" spellCheck={false} placeholder={f.placeholder} value={values[f.key] ?? ''} onChange={(e) => { setFormErr(''); setValues({ ...values, [f.key]: e.target.value }); }} /></Field>
             ))}
-            <div className="sheet-actions"><button type="button" className="sec" onClick={() => dlg.current?.close()}>Cancel</button><button className="pri">Connect</button></div>
+            {formErr && <p className="err" role="alert">{formErr}</p>}
+            <div className="sheet-actions"><button type="button" className="sec" onClick={() => dlg.current?.close()}>Cancel</button><button className="pri" disabled={formBusy}>{formBusy ? 'Checking…' : 'Connect'}</button></div>
           </form>
         )}
         {shown && (

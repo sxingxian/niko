@@ -35,18 +35,44 @@ export interface ProviderDef {
   can: { read: boolean; send: boolean };
   /** Set on the Engine screen, not listed on Connections. */
   hidden?: boolean;
+  /** A short guided setup, shown when connecting. */
+  steps?: AppStep[];
 }
 
 const hostField: ProviderField = { key: 'host', label: 'Server address', type: 'url', placeholder: 'https://' };
 const userField: ProviderField = { key: 'username', label: 'Username', type: 'text' };
 const passField: ProviderField = { key: 'password', label: 'App password', type: 'password' };
+const emailField: ProviderField = { key: 'email', label: 'Email address', type: 'text', placeholder: 'you@example.com' };
 
 export const PROVIDERS: ProviderDef[] = [
   { id: 'gmail', name: 'Gmail', group: 'mail', how: 'Google sign-in', kind: 'oauth', app: 'google', can: { read: true, send: true } },
-  { id: 'icloud-mail', name: 'iCloud Mail', group: 'mail', how: 'App-specific password · IMAP', kind: 'credentials', fields: [userField, passField], can: { read: false, send: false } },
+  { id: 'gmail-imap', name: 'Gmail · app password', group: 'mail', how: 'Personal Gmail without registering a Google app · IMAP', kind: 'credentials', fields: [emailField, { ...passField, placeholder: 'xxxx xxxx xxxx xxxx' }], can: { read: true, send: true }, steps: [
+    { text: 'Turn on 2-Step Verification for the Google account, if it is not on already.', link: 'https://myaccount.google.com/signinoptions/twosv', linkLabel: '2-Step Verification' },
+    { text: 'Create an app password named Niko, and copy the 16 letters Google shows (only once).', link: 'https://myaccount.google.com/apppasswords', linkLabel: 'App passwords' },
+    { text: 'Paste your Gmail address and the app password below. Niko reads unread mail and sends your replies; nothing is marked as read by opening it here.' },
+  ] },
+  { id: 'icloud-mail', name: 'iCloud Mail', group: 'mail', how: 'App-specific password · IMAP', kind: 'credentials', fields: [{ ...emailField, key: 'username', placeholder: 'you@icloud.com' }, passField], can: { read: true, send: true }, steps: [
+    { text: 'Sign in at account.apple.com, open Sign-In and Security → App-Specific Passwords, and create one named Niko.', link: 'https://account.apple.com/account/manage', linkLabel: 'Apple Account' },
+    { text: 'Paste your iCloud email address and that password below.' },
+  ] },
   { id: 'outlook-mail', name: 'Outlook', group: 'mail', how: 'Microsoft sign-in', kind: 'oauth', app: 'microsoft', can: { read: true, send: true } },
-  { id: 'synology-mail', name: 'Synology Mail', group: 'mail', how: 'Your NAS address · IMAP', kind: 'credentials', fields: [hostField, userField, passField], can: { read: false, send: false } },
+  { id: 'synology-mail', name: 'Synology Mail', group: 'mail', how: 'Your NAS mail server · IMAP', kind: 'credentials', fields: [{ key: 'host', label: 'Mail server name', type: 'text', placeholder: 'mail.example.com' }, emailField, { ...userField, optional: true, placeholder: 'Only if it differs from the email address' }, passField], can: { read: true, send: true }, steps: [
+    { text: 'Use the public name of your Synology MailServer, reachable from the internet with a valid certificate (IMAP on port 993, SMTP on 465). Add :143 or :587 to the name if you use those ports instead.' },
+  ] },
+  { id: 'imap-mail', name: 'Other email (IMAP)', group: 'mail', how: 'Yahoo, Fastmail, Zoho, your own domain · app password', kind: 'credentials', fields: [emailField, passField, { key: 'imapHost', label: 'Incoming (IMAP) server', type: 'text', placeholder: 'imap.example.com' }, { key: 'smtpHost', label: 'Outgoing (SMTP) server', type: 'text', placeholder: 'smtp.example.com' }], can: { read: true, send: true }, steps: [
+    { text: 'Find your provider’s IMAP and SMTP server names in its help pages, and create an app password if it offers them. Ports 993 (IMAP) and 465 (SMTP) are assumed: add :143 or :587 if yours differ. Connections are always encrypted.' },
+    { text: 'Outlook.com, Hotmail and Live addresses cannot connect this way: Microsoft switched off app passwords in 2024. Use the Outlook connection.' },
+  ] },
   { id: 'google-calendar', name: 'Google Calendar', group: 'calendar', how: 'Google sign-in', kind: 'oauth', app: 'google', can: { read: true, send: false } },
+  { id: 'ical', name: 'Calendar link (iCal)', group: 'calendar', how: 'Google or Outlook calendar, no sign-in · read-only', kind: 'credentials', fields: [
+    { key: 'url', label: 'Private calendar address', type: 'url', placeholder: 'https://calendar.google.com/calendar/ical/…/basic.ics' },
+    { key: 'url2', label: 'Another calendar address', type: 'url', optional: true, placeholder: 'https://outlook.live.com/owa/calendar/…/calendar.ics' },
+    { key: 'url3', label: 'One more', type: 'url', optional: true, placeholder: 'https://' },
+  ], can: { read: true, send: false }, steps: [
+    { text: 'Google: on a computer, open Google Calendar → Settings → your calendar → Integrate calendar, and copy “Secret address in iCal format”.', link: 'https://calendar.google.com/calendar/r/settings', linkLabel: 'Google Calendar settings' },
+    { text: 'Outlook.com: Settings → Calendar → Shared calendars → Publish a calendar, choose “Can view all details”, publish, and copy the ICS link.', link: 'https://outlook.live.com/calendar/0/options/calendar/SharedCalendars', linkLabel: 'Outlook calendar settings' },
+    { text: 'Paste up to three addresses below. Anyone with such an address can see that calendar, so it is stored encrypted; reset it in Google or Outlook if it ever leaks. New events show within about five minutes.' },
+  ] },
   { id: 'apple-calendar', name: 'Apple Calendar', group: 'calendar', how: 'App-specific password · CalDAV', kind: 'credentials', fields: [userField, passField], can: { read: false, send: false } },
   { id: 'outlook-calendar', name: 'Outlook Calendar', group: 'calendar', how: 'Microsoft sign-in', kind: 'oauth', app: 'microsoft', can: { read: true, send: false } },
   { id: 'synology-calendar', name: 'Synology Calendar', group: 'calendar', how: 'Your NAS address · CalDAV', kind: 'credentials', fields: [hostField, userField, passField], can: { read: false, send: false } },
@@ -205,7 +231,7 @@ export function passwordProblem(v: unknown, email = ''): string | null {
 
 // ---------------------------------------------------------------- the brief, and what opens from it
 export interface MailItem { id: string; from: string; subject: string; source: string; provider: string }
-export interface EventItem { id: string; provider: string; time: string; title: string; source: string; start: number }
+export interface EventItem { id: string; provider: string; time: string; title: string; source: string; start: number; allDay?: boolean }
 export interface NoteItem { id: string; provider: string; title: string; source: string; edited?: number }
 export interface ChatItem { provider: string; chatId: string; title: string; last: string; source: string; lastAt?: number }
 export interface Brief { mail: MailItem[]; events: EventItem[]; notes: NoteItem[]; chats: ChatItem[]; problems: string[] }

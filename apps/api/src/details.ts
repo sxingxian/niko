@@ -4,6 +4,8 @@ import type { Db } from '@niko/db';
 import type { DocBlock, EventDetail, MailDetail, NoteDetail } from '@niko/shared';
 import type { Env } from './env';
 import { api, credentials } from './providers';
+import { icalDetail } from './calendarlink';
+import { imapDetail, isImapProvider } from './mailbox';
 
 const MAX_TEXT = 20_000;
 const MAX_BLOCKS = 300;
@@ -172,6 +174,7 @@ function gmailBody(part: any): { plain?: string; html?: string } {
 export async function mailDetail(env: Env, db: Db, userId: string, provider: string, id: string): Promise<MailDetail> {
   const s = await credentials(env, db, userId, provider);
   if (!s) throw new Error('That connection is not linked.');
+  if (isImapProvider(provider)) return imapDetail(provider, s, id);
   if (provider === 'gmail') {
     if (!/^[0-9a-f]{6,40}$/i.test(id)) throw new Error('That is not a Gmail message.');
     const d = await api(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`, s.accessToken);
@@ -188,10 +191,11 @@ export async function mailDetail(env: Env, db: Db, userId: string, provider: str
 }
 
 // ---------------------------------------------------------------- calendar events
-export async function eventDetail(env: Env, db: Db, userId: string, provider: string, id: string): Promise<EventDetail> {
+export async function eventDetail(env: Env, db: Db, userId: string, provider: string, id: string, tzOffsetMin = 0): Promise<EventDetail> {
   const s = await credentials(env, db, userId, provider);
   if (!s) throw new Error('That connection is not linked.');
   if (id.length > 1024) throw new Error('That is not an event.');
+  if (provider === 'ical') return icalDetail(s, id, tzOffsetMin);
   if (provider === 'google-calendar') {
     const e = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(id)}`, s.accessToken);
     const allDay = !e.start?.dateTime;

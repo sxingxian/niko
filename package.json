@@ -14,12 +14,15 @@
     "deploy": "npm run build:web && npm run deploy -w @niko/api",
     "migrate": "node scripts/migrate.mjs",
     "release": "npm run migrate && node scripts/deploy-worker.mjs",
-    "user": "node scripts/user.mjs"
+    "user": "node scripts/user.mjs",
+    "test:mail": "node tests/run.mjs"
   },
   "devDependencies": {
     "@neondatabase/serverless": "^1.0.0",
     "esbuild": "^0.25.0",
-    "pg": "^8.13.0"
+    "hoodiecrow-imap": "3.3.1",
+    "pg": "^8.13.0",
+    "smtp-server": "3.21.4"
   },
   "engines": {
     "node": ">=20"
@@ -27,6 +30,7 @@
   "overrides": {
     "kokoro-js": {
       "@huggingface/transformers": "3.5.1"
-    }
+    },
+    "nodemailer": "10.5.0"
   }
 }

@@ -252,17 +252,20 @@ export function Workspace() {
   const [eventSel, setEventSel] = useState<EventItem | null>(null);
   const mail = useDetail<MailDetail>(sel?.kind === 'mail' ? `/mail/${sel.provider}/${encodeURIComponent(sel.id)}` : null);
   const note = useDetail<NoteDetail>(noteSel ? `/notes/${noteSel.provider}/${encodeURIComponent(noteSel.id)}` : null);
-  const event = useDetail<EventDetail>(eventSel ? `/events/${eventSel.provider}/${encodeURIComponent(eventSel.id)}` : null);
+  const event = useDetail<EventDetail>(eventSel ? `/events/${eventSel.provider}/${encodeURIComponent(eventSel.id)}?tz=${new Date().getTimezoneOffset()}` : null);
 
-  // The brief is fetched on arrival and again every 30 s while the page is in view, so new chats and mail appear.
-  const loadBrief = useCallback(() => api<Brief>(`/brief?tz=${new Date().getTimezoneOffset()}`).then(setBrief).catch((e) => setErr(e.message)), []);
+  // Chats (kept by Niko itself) are checked every 30 s while the page is in view. Mail, calendars and notes come
+  // from other services, so they refresh every 5 minutes: often enough, and gentle on mail servers' sign-in limits.
+  const fullAt = useRef(0);
+  const loadBrief = useCallback(() => { fullAt.current = Date.now(); return api<Brief>(`/brief?tz=${new Date().getTimezoneOffset()}`).then(setBrief).catch((e) => setErr(e.message)); }, []);
+  const loadChats = useCallback(() => api<{ chats: Brief['chats'] }>('/brief/chats').then((r) => setBrief((b) => (b ? { ...b, chats: r.chats } : b))).catch(() => undefined), []);
   useEffect(() => { void loadBrief(); }, [loadBrief]);
   useEffect(() => {
-    const t = window.setInterval(() => { if (!document.hidden) void loadBrief(); }, 30_000);
-    const onShow = () => { if (!document.hidden) void loadBrief(); };
-    document.addEventListener('visibilitychange', onShow);
-    return () => { window.clearInterval(t); document.removeEventListener('visibilitychange', onShow); };
-  }, [loadBrief]);
+    const tick = () => { if (document.hidden) return; if (Date.now() - fullAt.current > 300_000) void loadBrief(); else void loadChats(); };
+    const t = window.setInterval(tick, 30_000);
+    document.addEventListener('visibilitychange', tick);
+    return () => { window.clearInterval(t); document.removeEventListener('visibilitychange', tick); };
+  }, [loadBrief, loadChats]);
   const items: Sel[] = brief ? [
     ...brief.chats.map((c) => ({ kind: 'chat' as const, provider: c.provider, chatId: c.chatId, title: c.title, source: c.source })),
     ...brief.mail.map((m) => ({ kind: 'mail' as const, provider: m.provider, id: m.id, title: m.from, source: m.source, subject: m.subject })),

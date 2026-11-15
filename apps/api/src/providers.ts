@@ -4,6 +4,8 @@ import { and, eq } from 'drizzle-orm';
 import { connections, providerApps, type Db } from '@niko/db';
 import { PROVIDERS, type AppId, type EventItem, type MailItem, type NoteItem } from '@niko/shared';
 import { notionDeleted, notionTitle } from './details';
+import { icalList } from './calendarlink';
+import { imapList, imapReply, isImapProvider } from './mailbox';
 import type { Env } from './env';
 import { seal, unseal } from './lib/crypto';
 
@@ -125,6 +127,7 @@ export async function api(url: string, token: string, init: RequestInit = {}, sc
 export async function listMail(env: Env, db: Db, userId: string, provider: string): Promise<MailItem[]> {
   const s = await credentials(env, db, userId, provider);
   if (!s) return [];
+  if (isImapProvider(provider)) return imapList(provider, s);
   if (provider === 'gmail') {
     const base = 'https://gmail.googleapis.com/gmail/v1/users/me/messages';
     const list = await api(`${base}?q=${encodeURIComponent('is:unread in:inbox')}&maxResults=6`, s.accessToken);
@@ -143,9 +146,10 @@ export async function listMail(env: Env, db: Db, userId: string, provider: strin
   return [];
 }
 
-export async function listEvents(env: Env, db: Db, userId: string, provider: string, dayStart: Date, dayEnd: Date): Promise<EventItem[]> {
+export async function listEvents(env: Env, db: Db, userId: string, provider: string, dayStart: Date, dayEnd: Date, tzOffsetMin = 0): Promise<EventItem[]> {
   const s = await credentials(env, db, userId, provider);
   if (!s) return [];
+  if (provider === 'ical') return icalList(s, dayStart, dayEnd, tzOffsetMin);
   if (provider === 'google-calendar') {
     const u = new URL('https://www.googleapis.com/calendar/v3/calendars/primary/events');
     u.searchParams.set('timeMin', dayStart.toISOString()); u.searchParams.set('timeMax', dayEnd.toISOString());
@@ -186,6 +190,7 @@ const utf8b64url = (s: string) => btoa(String.fromCharCode(...new TextEncoder().
 export async function sendText(env: Env, db: Db, userId: string, provider: string, chatId: string, body: string): Promise<void> {
   const s = await credentials(env, db, userId, provider);
   if (!s) throw new Error('That connection is not linked.');
+  if (isImapProvider(provider)) return imapReply(provider, s, chatId, body);
   switch (provider) {
     case 'telegram-bot': {
       const j = await (await fetch(`https://api.telegram.org/bot${s.token}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: body }) })).json<any>();
