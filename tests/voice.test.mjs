@@ -49,3 +49,10 @@ ok(pickItem('open the message from Maya', inbox) === 2 && pickItem('open Jun Wei
 const it = takeItemTag('Opening Testing 123021. [[item:notes:Testing 123021]]');
 ok(it.text === 'Opening Testing 123021.' && it.item?.view === 'notes' && it.item.title === 'Testing 123021', 'the AI can name an item to open; the tag is not spoken');
 ok(takeItemTag('Sure [[item:settings:x]]').item === null, 'only inbox, calendar and notes items');
+
+// ---- Rewriting the draft by voice
+import { rewriteRequest } from '../apps/app/src/speech.ts';
+for (const p of ['rewrite the draft', 'Niko, rewrite it', 're-write that', 'try again', 'another version', 'make it shorter', 'make the reply more formal', 'more casual please', 'friendlier', 'shorten it', 'fix the grammar', 'say I will be there at 7', 'tell her thanks for the update', 'reply saying I am in', 'add that I will bring snacks', 'change the draft to mention Friday', "don't mention the price", 'rephrase it'])
+  ok(rewriteRequest(p) !== null, `asks to change the draft: "${p}"`);
+for (const p of ['what is the weather tomorrow', 'open my calendar', 'change to notes', 'send it', 'cancel', 'what time is my next meeting', 'open the second one', 'switch to inbox', 'more about the weather'])
+  ok(rewriteRequest(p) === null, `not a draft change: "${p}"`);

@@ -113,3 +113,24 @@ export function takeItemTag(reply: string): { text: string; item: { view: 'inbox
   const text = reply.replace(/\s*\[\[\s*item\s*:[^\]]*\]\]\s*/gi, ' ').trim();
   return { text, item: m ? { view: m[1]!.toLowerCase() as 'inbox' | 'calendar' | 'notes', title: m[2]!.trim() } : null };
 }
+
+/**
+ * A request to change the reply draft, such as "rewrite the draft", "make it shorter", "more formal please",
+ * "say I'll be there at 7" or "tell her thanks". Returns the request as said, or null for anything else.
+ * Only used while a conversation with a draft box is open.
+ */
+export function rewriteRequest(raw: string): string | null {
+  const p = raw.toLowerCase().replace(/^(niko|nico|hey niko)[,\s]+/, '').replace(/[.!?]+$/, '').trim();
+  if (!p || p.length > 300) return null;
+  // Asking for another go at the whole draft.
+  if (/^(please\s+)?(re-?write|re-?draft|re-?do|re-?phrase|re-?word|regenerate|try (that )?again|another (version|draft|one)|write (it|the (draft|reply)) again)\b/.test(p)) return raw.trim();
+  // Changing how it reads: "make it shorter", "more formal", "less stiff", "friendlier", "fix the grammar".
+  if (/^(please\s+)?(make (it|the (draft|reply|message))|can you make (it|the (draft|reply|message)))\b/.test(p)) return raw.trim();
+  if (/^(please\s+)?(more|less|a bit more|a bit less|much more)\s+\w+/.test(p) && !/\b(about|on|for)\s+(the\s+)?(weather|calendar|events?|notes?)\b/.test(p)) return raw.trim();
+  if (/^(please\s+)?(shorter|longer|friendlier|warmer|firmer|politer|simpler|briefer|nicer|funnier)\b/.test(p)) return raw.trim();
+  if (/^(please\s+)?(change|edit|update|fix|tweak|improve|shorten|lengthen|polish|soften|expand|translate)\s+(it|that|the (draft|reply|message|wording|tone|grammar|spelling))\b/.test(p)) return raw.trim();
+  if (/\b(the|this|my) (draft|reply)\b/.test(p) && /\b(change|edit|rewrite|shorten|make|add|remove|mention|say|include|drop|tone|formal|casual|friendly)\b/.test(p)) return raw.trim();
+  // Saying what the reply should say: "say I'll be late", "tell her thanks", "reply that I'm in", "add that…".
+  if (/^(please\s+)?(say|tell (him|her|them)|reply (that|saying|with)|answer (that|saying|with)|add (that|a line|something)|mention|include|remove|drop|take out|don't mention)\b/.test(p)) return raw.trim();
+  return null;
+}

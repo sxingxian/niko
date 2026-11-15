@@ -492,7 +492,7 @@ app.post('/engine/test', async (c) => {
 
 app.post('/chat', async (c) => {
   const b = await c.req.json<{ message?: string; tz?: number; purpose?: string; where?: unknown }>();
-  const text = String(b.message ?? '').trim().slice(0, 2000);
+  const text = String(b.message ?? '').trim().slice(0, b.purpose === 'draft' ? 5000 : 2000); // a draft being rewritten is sent along with the request
   // A draft for the workspace is a one-off: it neither sees nor joins the spoken conversation.
   const oneOff = b.purpose === 'draft';
   if (!text) return c.json({ error: 'Say or type something first.' }, 400);

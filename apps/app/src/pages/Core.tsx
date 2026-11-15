@@ -4,7 +4,7 @@ import { Link, NavLink, useLocation } from 'react-router-dom';
 import { SEND_COUNTDOWN_SECONDS, VOICE_NAMES, voiceOrder } from '@niko/shared';
 import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
 import { useNiko } from '../niko';
-import { pickItem, screenFor } from '../speech';
+import { pickItem, rewriteRequest, screenFor } from '../speech';
 import { isStacked } from '../flow';
 import type { Brief, BriefPart, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
 
@@ -382,11 +382,45 @@ export function Workspace() {
     setSend({ phase: 'draft' }); n.setStatus('Cancelled', '', 'idle');
   }, [send, n]);
 
-  // Voice: "send it" starts the countdown, "cancel" stops it. Anything else falls through to Niko.
+  // Rewriting the draft, by voice or with the Rewrite button: the current draft and the request go to the brain,
+  // and what comes back replaces the draft (still to be reviewed and sent as usual).
+  const [rewriting, setRewriting] = useState(false);
+  const rewrite = useCallback(async (request: string, spoken: boolean) => {
+    if (!sel || send.phase !== 'draft' || rewriting) return;
+    const lastIn = thread.filter((m) => m.direction === 'in').slice(-1)[0]?.body;
+    const about = sel.kind === 'mail' ? `the email from ${sel.title} with subject "${sel.subject}"` : lastIn ? `the last message from ${sel.title}: "${lastIn.slice(0, 800)}"` : `a conversation with ${sel.title}`;
+    const current = draft.trim();
+    const message = current
+      ? `This is a draft reply to ${about}.\nDRAFT START\n${current.slice(0, 3500)}\nDRAFT END\nRewrite the draft as the user asks: "${request.slice(0, 200)}". Keep what the user did not ask to change. Write only the new reply text, with no preamble and no quotation marks.`
+      : `Write only the text of a reply to ${about}, as the user asks: "${request.slice(0, 200)}". No preamble.`;
+    setRewriting(true);
+    if (spoken) n.setStatus('Rewriting', 'Changing the draft…', 'thinking');
+    try {
+      const r = await api<{ reply: string }>('/chat', { body: { message, tz: new Date().getTimezoneOffset(), purpose: 'draft' } });
+      // Only the reply itself: no "Here's the new draft:" lead-in, no wrapping quotes, no draft markers.
+      const t = (typeof r.reply === 'string' ? r.reply : '').trim()
+        .replace(/^(sure[,!.]?\s*)?(here('|’)s|here is)\s+(the|a|your)\s+[^:\n]{0,40}:\s*/i, '')
+        .replace(/^DRAFT START\s*/i, '').replace(/\s*DRAFT END$/i, '')
+        .replace(/^["“](.*)["”]$/s, '$1').trim();
+      if (!t) throw new Error('Niko couldn’t rewrite the draft just now. Try again.');
+      setDraft(t);
+      if (draftKey.current) draftCache.set(draftKey.current, t);
+      setErr('');
+      if (spoken) n.say(`Here's the new draft. ${t}`); else n.setStatus('Draft rewritten', 'Review it, then send.', 'idle');
+    } catch (e: any) {
+      setErr(e.message);
+      n.setStatus('Problem', e.message, 'idle');
+    } finally { setRewriting(false); }
+  }, [sel, send.phase, rewriting, thread, draft, n]);
+
+  // Voice: "send it" starts the countdown, "cancel" stops it, "make it shorter" and the like rewrite the draft.
+  // Anything else falls through to Niko.
   useEffect(() => {
     n.setCommandHandler((p) => {
       if (/^(send|send it|send that)\b/.test(p) && view === 'inbox') { void start('voice'); return true; }
       if (/^(cancel|stop|don't send)\b/.test(p) && send.phase === 'counting') { void cancel(); return true; }
+      const ask = view === 'inbox' && sel && send.phase === 'draft' ? rewriteRequest(p) : null;
+      if (ask) { void rewrite(ask, true); return true; }
       // "Open Testing 123021", "open the second one", "next": an item in this screen's list. A screen's name
       // ("open calendar") still means the screen.
       if (screenFor(p)) return false;
@@ -396,7 +430,7 @@ export function Workspace() {
       return true;
     });
     return () => n.setCommandHandler(null);
-  }, [n, start, cancel, send.phase, view, listTitles.join('\u0001'), listIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [n, start, cancel, rewrite, sel, send.phase, view, listTitles.join('\u0001'), listIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // An item the AI was asked to open ("[[item:notes:…]]"), once this screen's list has arrived.
   useEffect(() => {
@@ -411,6 +445,7 @@ export function Workspace() {
   // "Draft replies" (Connections → What Niko may do): Niko prepares a reply as soon as a conversation opens, for you to review.
   const [drafting, setDrafting] = useState(false);
   const drafted = useRef('');
+  const draftKey = useRef('');
   useEffect(() => {
     if (!sel || view !== 'inbox' || n.me?.permissions.draft === false) return;
     const lastInMsg = thread.filter((m) => m.direction === 'in').slice(-1)[0];
@@ -418,7 +453,7 @@ export function Workspace() {
     // Each new message from them gets its own draft (once), so a back-and-forth keeps going.
     const key = sel.kind === 'chat' ? `c:${sel.chatId}:${lastInMsg?.id ?? ''}` : 'm:' + sel.id;
     if (drafted.current === key || (sel.kind === 'chat' && !lastIn) || send.phase !== 'draft' || draft.trim()) return;
-    drafted.current = key;
+    drafted.current = key; draftKey.current = key;
     // Already drafted earlier in this visit (the workspace remounts on each screen): reuse it, don't ask the AI again.
     const kept = draftCache.get(key);
     if (kept !== undefined) { setDraft((d) => d || kept); return; }
@@ -497,7 +532,7 @@ export function Workspace() {
                 <div className="draft">
                   <span className="k">{counting ? 'Niko · sending' : 'Niko · draft'}</span>
                   <label className="sr" htmlFor="draft">Reply</label>
-                  <textarea id="draft" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={drafting ? 'Niko is drafting…' : 'Write a reply'} readOnly={counting} rows={2} />
+                  <textarea id="draft" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={drafting || rewriting ? 'Niko is writing…' : (draft.trim() ? 'Write a reply' : 'Write a reply, or tap Draft')} readOnly={counting || rewriting} rows={2} aria-busy={rewriting} />
                   {file && <div className="att"><Icon name="clip" size={18} /><span style={{ flex: 1 }}>{file.name}</span><span className="k">Not stored</span></div>}
                 </div>
               )}
@@ -507,6 +542,7 @@ export function Workspace() {
                     <input ref={fileInput} type="file" hidden onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
                     <button className="ib" onClick={() => (file ? setFile(null) : fileInput.current?.click())} aria-label={file ? 'Remove the attachment' : 'Attach an image or file'} aria-pressed={!!file}><Icon name="clip" size={18} /></button>
                   </>}
+                  <button className="sec" onClick={() => rewrite(draft.trim() ? 'Rewrite it: another version, same meaning.' : 'Write a short, friendly reply.', false)} disabled={rewriting || drafting} title="Ask Niko for another version. You can also say “make it shorter” or “say I’ll be there at 7”.">{rewriting ? 'Rewriting…' : draft.trim() ? 'Rewrite' : 'Draft'}</button>
                   <button className="sec voice" onClick={() => start('voice')} disabled={!draft.trim()}><Icon name="mic" size={18} />“Niko, send it”</button>
                   <button className="pri" onClick={() => start('tap')} disabled={!draft.trim()}>Send</button>
                 </>}
