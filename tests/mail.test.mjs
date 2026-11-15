@@ -1,6 +1,6 @@
 import hoodiecrow from 'hoodiecrow-imap';
 import { SMTPServer } from 'smtp-server';
-import { _allowPlaintextForTests, imapList, imapDetail, imapReply, imapCheck, buildReply, accountFor } from '../apps/api/src/mailbox.ts';
+import { _allowPlaintextForTests, imapList, imapDetail, imapReply, imapCheck, buildReply, accountFor, icloudRefused } from '../apps/api/src/mailbox.ts';
 import { htmlToBlocks } from '../apps/api/src/details.ts';
 
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
@@ -54,6 +54,14 @@ try {
   const r = buildReply({ from: 'a@b.co', to: 'c@d.co', subject: 'Hi\r\nBcc: evil@x.co', body: 'x', domain: 'b.co' });
   ok(!/^Bcc:/m.test(r), 'a line break in a subject cannot add a header');
   try { accountFor('imap-mail', { ...S, email: 'me@outlook.com' }); ok(false, 'outlook refused'); } catch (e) { ok(/Microsoft/.test(e.message), 'Outlook.com address refused with the reason'); }
+  // An Apple Account that signs in with an Outlook address is still iCloud, not Microsoft (reported bug).
+  for (const addr of ['xingxian@outlook.sg', 'me@hotmail.com', 'me@live.com.sg']) {
+    let a = null; try { a = accountFor('icloud-mail', { username: addr, password: 'abcd-efgh-ijkl-mnop' }); } catch (e) { ok(false, `iCloud with ${addr} wrongly refused: ${e.message}`); }
+    if (a) ok(a.imap.host === 'imap.mail.me.com' && a.smtp.host === 'smtp.mail.me.com', `iCloud with an Apple Account email of ${addr} goes to Apple's servers, not refused as Microsoft`);
+  }
+  ok(/iCloud Mail address \(ending in @icloud\.com/.test(icloudRefused('xingxian@outlook.sg')) && /not the email you use for your Apple Account/.test(icloudRefused('xingxian@outlook.sg')), 'if Apple refuses a non-iCloud address, Niko says to use the @icloud.com address');
+  ok(/app-specific password/.test(icloudRefused('me@icloud.com')) && !/@icloud\.com, @me/.test(icloudRefused('me@icloud.com')), 'if Apple refuses an @icloud.com address, it is the password');
+  for (const p of ['gmail-imap', 'synology-mail']) { try { accountFor(p, { email: 'me@outlook.com', username: 'me@outlook.com', password: 'x', host: 'mail.example.com' }); ok(true, `${p}: an Outlook-looking address is not refused (the server decides)`); } catch (e) { ok(!/Microsoft/.test(e.message), `${p}: ${e.message}`); } }
   try { accountFor('imap-mail', { ...S, imapHost: 'imap.example.com:110' }); ok(false, 'port 110'); } catch (e) { ok(/encrypted/.test(e.message), 'unencrypted port refused'); }
   _allowPlaintextForTests(false);
   try { accountFor('imap-mail', S); ok(false, 'ip refused'); } catch (e) { ok(/public name/.test(e.message), 'a bare IP address is refused outside tests'); }

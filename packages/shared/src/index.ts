@@ -51,9 +51,9 @@ export const PROVIDERS: ProviderDef[] = [
     { text: 'Create an app password named Niko, and copy the 16 letters Google shows (only once).', link: 'https://myaccount.google.com/apppasswords', linkLabel: 'App passwords' },
     { text: 'Paste your Gmail address and the app password below. Niko reads unread mail and sends your replies; nothing is marked as read by opening it here.' },
   ] },
-  { id: 'icloud-mail', name: 'iCloud Mail', group: 'mail', how: 'App-specific password · IMAP', kind: 'credentials', fields: [{ ...emailField, key: 'username', placeholder: 'you@icloud.com' }, passField], can: { read: true, send: true }, steps: [
+  { id: 'icloud-mail', name: 'iCloud Mail', group: 'mail', how: 'App-specific password · IMAP', kind: 'credentials', fields: [{ ...emailField, key: 'username', label: 'iCloud Mail address', placeholder: 'you@icloud.com' }, passField], can: { read: true, send: true }, steps: [
     { text: 'Sign in at account.apple.com, open Sign-In and Security → App-Specific Passwords, and create one named Niko.', link: 'https://account.apple.com/account/manage', linkLabel: 'Apple Account' },
-    { text: 'Paste your iCloud email address and that password below.' },
+    { text: 'Enter your iCloud Mail address (ending in @icloud.com, @me.com or @mac.com) and that password below. If your Apple Account uses another email, such as an Outlook address, still use the @icloud.com one: on iPhone, Settings → your name → iCloud → iCloud Mail shows it.' },
   ] },
   { id: 'outlook-mail', name: 'Outlook', group: 'mail', how: 'Microsoft sign-in', kind: 'oauth', app: 'microsoft', can: { read: true, send: true } },
   { id: 'synology-mail', name: 'Synology Mail', group: 'mail', how: 'Your NAS mail server · IMAP', kind: 'credentials', fields: [{ key: 'host', label: 'Mail server name', type: 'text', placeholder: 'mail.example.com' }, emailField, { ...userField, optional: true, placeholder: 'Only if it differs from the email address' }, passField], can: { read: true, send: true }, steps: [

@@ -33,13 +33,23 @@ function endpoint(raw: string | undefined, fallbackPort: number, allowed: number
   if (/(^|\.)(outlook\.office365\.com|outlook\.com|office365\.com|hotmail\.com|live\.com)$/.test(host)) throw new Error(MS_REFUSED);
   return { host, port };
 }
+/** iCloud Mail signs in with the iCloud Mail address (@icloud.com, @me.com, @mac.com), not the Apple Account's own
+ * email when that is another address (Outlook, Gmail…). Said plainly when Apple refuses such an address. */
+export const ICLOUD_ADDRESS = /@(icloud|me|mac)\.com$/i;
+export function icloudRefused(email: string): string {
+  return ICLOUD_ADDRESS.test(email)
+    ? 'Apple refused the app-specific password. Create a new one at account.apple.com (Sign-In and Security → App-Specific Passwords) and paste it in full.'
+    : `Apple refused ${email}. iCloud Mail signs in with your iCloud Mail address (ending in @icloud.com, @me.com or @mac.com), not the email you use for your Apple Account. On iPhone: Settings → your name → iCloud → iCloud Mail shows it.`;
+}
 const MS_REFUSED = 'Microsoft switched off app passwords for Outlook.com, Hotmail and Live mail in September 2024, so they cannot connect this way. Use the Outlook connection, which signs in with Microsoft.';
 
 /** The servers for each kind of account. Secrets come from the encrypted connection; nothing here is user-routable beyond the checks above. */
 export function accountFor(provider: string, s: Record<string, string>): MailAccount {
   const email = String(s.email || s.username || '').trim();
   if (!EMAIL.test(email)) throw new Error('Enter the full email address.');
-  if (MICROSOFT.test(email)) throw new Error(MS_REFUSED);
+  // Only for "Other email (IMAP)", where the address decides which server it is. iCloud, Gmail and Synology always use
+  // their own servers, so an Apple Account that signs in with an Outlook address (common) is not Microsoft at all.
+  if (provider === 'imap-mail' && MICROSOFT.test(email)) throw new Error(MS_REFUSED);
   const pass = String(s.password ?? '').replace(/\s+/g, ''); // Google shows app passwords in groups of four
   if (!pass) throw new Error('Enter the app password.');
   const base = { email, user: email, pass, name: String(s.name ?? '').slice(0, 80) };
@@ -78,7 +88,9 @@ async function withImap<T>(a: MailAccount, fn: (c: ImapFlow) => Promise<T>): Pro
 function signInProblem(e: unknown, a: MailAccount): string {
   const m = String((e as any)?.responseText ?? (e as Error)?.message ?? e);
   if ((e as any)?.authenticationFailed || /auth|credential|password|login|invalid/i.test(m)) {
-    return a.gmail ? 'Gmail refused the app password. Check it was copied in full, and that 2-Step Verification is still on.' : 'The mail server refused the email address or app password.';
+    if (a.gmail) return 'Gmail refused the app password. Check it was copied in full, and that 2-Step Verification is still on.';
+    if (a.imap.host === 'imap.mail.me.com') return icloudRefused(a.email);
+    return 'The mail server refused the email address or app password.';
   }
   if (/timeout|timed out/i.test(m)) return `${a.imap.host} did not answer in time.`;
   return `Could not reach ${a.imap.host}.`;
