@@ -8,24 +8,70 @@ const MAX_BYTES = 5 * 1024 * 1024;
 const CACHE_SECONDS = 300;
 const hex = async (s: string) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map((b) => b.toString(16).padStart(2, '0')).join('');
 
-/** The calendar links saved on a connection, as https addresses ("webcal://" is the same thing). */
+// Microsoft's published-calendar links refuse requests that don't look like a web browser (HTTP 400 or 500, or a
+// redirect to an error page), and a Worker sends no User-Agent at all. Google accepts either. So identify as a browser.
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const MS_HOSTS = /(^|\.)(outlook\.live\.com|outlook\.office365\.com|outlook\.office\.com)$/i;
+const isGoogle = (u: URL) => /(^|\.)calendar\.google\.com$/i.test(u.hostname);
+const ORDINAL = ['first', 'second', 'third'];
+
+/** One pasted address made readable: webcal:// is https://, and Outlook's "HTML" link becomes its ICS twin. */
+export function normalizeLink(raw: string): string {
+  let v = String(raw ?? '').trim().replace(/^webcal:\/\//i, 'https://');
+  const u = publicHttpsUrl(v);
+  if (u && MS_HOSTS.test(u.hostname) && /\/calendar\.html\/?$/i.test(u.pathname)) {
+    u.pathname = u.pathname.replace(/\/calendar\.html\/?$/i, '/calendar.ics');
+    v = u.toString();
+  }
+  return v;
+}
+
+/** The calendar links saved on a connection, as https addresses. */
 export function icalLinks(s: Record<string, string>): string[] {
-  return ['url', 'url2', 'url3'].map((k) => String(s[k] ?? '').trim().replace(/^webcal:\/\//i, 'https://')).filter((u) => !!publicHttpsUrl(u));
+  return ['url', 'url2', 'url3'].map((k) => normalizeLink(s[k] ?? '')).filter((u) => !!publicHttpsUrl(u));
+}
+
+/** Why an address can't be read, in words that say what to copy instead. Never repeats the address (it is a secret). */
+function linkProblem(url: URL, status: number | 'html' | 'signin' | 'page', which: string): string {
+  const name = `The ${which} calendar address`;
+  if (status === 'page') return isGoogle(url)
+    ? `${name} is Google Calendar’s web page, not its calendar file. In Google Calendar → Settings → your calendar → Integrate calendar, copy “Secret address in iCal format”.`
+    : `${name} is a web page, not a calendar file. Copy the iCal address (it usually ends in .ics).`;
+  if (status === 'signin') return `${name} asks for a sign-in, so Niko can’t read it. Use a published or secret iCal address instead.`;
+  if (status === 'html') return MS_HOSTS.test(url.hostname)
+    ? `Outlook didn’t hand over the ${which} calendar. Check it is still published (Settings → Calendar → Shared calendars) and copy its ICS link again.`
+    : `${name} opens a web page, not a calendar file. Copy the iCal address (it usually ends in .ics).`;
+  if (isGoogle(url) && (status === 404 || status === 410)) return /\/public\/[^/]*$/i.test(url.pathname)
+    ? `${name} is Google’s public address, and that calendar isn’t public. Copy “Secret address in iCal format” instead (Settings → your calendar → Integrate calendar).`
+    : `Google says the ${which} calendar address no longer exists. It may have been reset: copy “Secret address in iCal format” again.`;
+  if (MS_HOSTS.test(url.hostname) && [400, 404, 410, 500, 503].includes(status as number)) return `Outlook didn’t hand over the ${which} calendar (it answered ${status}). Check it is still published (Settings → Calendar → Shared calendars, “Can view all details”) and copy its ICS link again.`;
+  if (status === 401 || status === 403) return `${name} needs a sign-in, so Niko can’t read it. Use a published or secret iCal address instead.`;
+  if (status === 404 || status === 410) return `${name} no longer works. It may have been reset: copy it again.`;
+  return `${name} couldn’t be read (the calendar server answered ${status}). Try again in a few minutes.`;
 }
 
 /** Fetches one calendar file, kept for five minutes in Cloudflare's cache under a hash of its address, never the address itself. */
-async function fetchIcs(url: string): Promise<string> {
+async function fetchIcs(url: string, which = 'first'): Promise<string> {
+  const u = new URL(url);
+  // Google's "embed" and app links are pages for people, not files: say so before fetching.
+  if (isGoogle(u) && !/\/ical\//i.test(u.pathname)) throw new Error(linkProblem(u, 'page', which));
   const key = new Request(`https://niko-cache.invalid/ical/${await hex(url)}`);
   const cache = (globalThis as any).caches?.default as Cache | undefined;
   const hit = await cache?.match(key);
   if (hit) return hit.text();
-  const res = await fetch(url, { headers: { accept: 'text/calendar, text/plain' }, signal: AbortSignal.timeout(12_000) });
-  if (res.status === 404 || res.status === 410) throw new Error('That calendar link no longer works. It may have been reset: copy it again.');
-  if (!res.ok) throw new Error(`The calendar link answered ${res.status}.`);
-  if (Number(res.headers.get('content-length')) > MAX_BYTES) throw new Error('That calendar is too large to read.');
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: { 'user-agent': UA, accept: 'text/calendar, text/plain;q=0.9, */*;q=0.8' }, redirect: 'follow', signal: AbortSignal.timeout(12_000) });
+  } catch {
+    throw new Error(`The ${which} calendar address didn’t answer in time. Check it, or try again in a few minutes.`);
+  }
+  // Redirected to a sign-in page: the link is private to an account, not published.
+  if (/(^|\.)(login\.live\.com|login\.microsoftonline\.com|accounts\.google\.com)$/i.test(new URL(res.url || url).hostname)) throw new Error(linkProblem(u, 'signin', which));
+  if (!res.ok) throw new Error(linkProblem(u, res.status, which));
+  if (Number(res.headers.get('content-length')) > MAX_BYTES) throw new Error(`The ${which} calendar is too large to read.`);
   const text = await res.text();
-  if (text.length > MAX_BYTES) throw new Error('That calendar is too large to read.');
-  if (!/BEGIN:VCALENDAR/i.test(text.slice(0, 2000))) throw new Error('That link is not an iCal calendar. Copy the address that ends in .ics.');
+  if (text.length > MAX_BYTES) throw new Error(`The ${which} calendar is too large to read.`);
+  if (!/BEGIN:VCALENDAR/i.test(text.slice(0, 2000))) throw new Error(linkProblem(u, 'html', which));
   await cache?.put(key, new Response(text, { headers: { 'cache-control': `max-age=${CACHE_SECONDS}` } })).catch(() => undefined);
   return text;
 }
@@ -76,11 +122,15 @@ const idOf = (link: number, o: Occ) => `${link}~${o.start}~${o.uid}`.slice(0, 10
 
 export async function icalList(s: Record<string, string>, from: Date, to: Date, tzOffsetMin: number): Promise<EventItem[]> {
   const links = icalLinks(s);
-  const lists = await Promise.all(links.map(async (url, i) => {
-    const occ = occurrences(parse(await fetchIcs(url)), from.getTime(), to.getTime(), tzOffsetMin);
+  // One address failing (reset, unpublished, a slow server) must not hide the events of the others.
+  const lists = await Promise.allSettled(links.map(async (url, i) => {
+    const occ = occurrences(parse(await fetchIcs(url, ORDINAL[i])), from.getTime(), to.getTime(), tzOffsetMin);
     return occ.map((o) => ({ id: idOf(i, o), provider: 'ical', title: String(o.ev.summary || '(no title)'), source: 'Calendar', start: o.start, time: '', allDay: o.allDay } as EventItem));
   }));
-  return lists.flat().sort((a, b) => a.start - b.start).slice(0, 20);
+  const failed = lists.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+  for (const f of failed) console.warn(`ical: ${String(f.reason?.message ?? f.reason).slice(0, 200)}`);
+  if (links.length && failed.length === links.length) throw failed[0]!.reason;
+  return lists.flatMap((r) => (r.status === 'fulfilled' ? r.value : [])).sort((a, b) => a.start - b.start).slice(0, 20);
 }
 
 export async function icalDetail(s: Record<string, string>, id: string, tzOffsetMin = 0): Promise<EventDetail> {
@@ -88,7 +138,7 @@ export async function icalDetail(s: Record<string, string>, id: string, tzOffset
   const url = m ? icalLinks(s)[Number(m[1])] : undefined;
   if (!m || !url) throw new Error('That event is not in your calendar links.');
   const start = Number(m[2]);
-  const o = occurrences(parse(await fetchIcs(url)), start - 86_400_000, start + 86_400_000, tzOffsetMin).find((x) => x.uid === m[3] && x.start === start);
+  const o = occurrences(parse(await fetchIcs(url, ORDINAL[Number(m[1])])), start - 86_400_000, start + 86_400_000, tzOffsetMin).find((x) => x.uid === m[3] && x.start === start);
   if (!o) throw new Error('That event is no longer in the calendar.');
   const attendees = (o.ev.attendees ?? []).map((p: any) => String(p.getParameter?.('cn') || String(p.getFirstValue?.() ?? '').replace(/^mailto:/i, ''))).filter(Boolean).slice(0, 30);
   const desc = String(o.ev.description ?? '').trim();
@@ -99,5 +149,8 @@ export async function icalDetail(s: Record<string, string>, id: string, tzOffset
 export async function icalCheck(s: Record<string, string>): Promise<void> {
   const links = icalLinks(s);
   if (!links.length) throw new Error('Paste the private iCal address of your calendar (it ends in .ics).');
-  for (const url of links) parse(await fetchIcs(url));
+  for (const [i, url] of links.entries()) {
+    const text = await fetchIcs(url, ORDINAL[i]);
+    try { parse(text); } catch { throw new Error(`The ${ORDINAL[i]} calendar address gave a file Niko can’t read as a calendar.`); }
+  }
 }

@@ -69,8 +69,8 @@ export const PROVIDERS: ProviderDef[] = [
     { key: 'url2', label: 'Another calendar address', type: 'url', optional: true, placeholder: 'https://outlook.live.com/owa/calendar/…/calendar.ics' },
     { key: 'url3', label: 'One more', type: 'url', optional: true, placeholder: 'https://' },
   ], can: { read: true, send: false }, steps: [
-    { text: 'Google: on a computer, open Google Calendar → Settings → your calendar → Integrate calendar, and copy “Secret address in iCal format”.', link: 'https://calendar.google.com/calendar/r/settings', linkLabel: 'Google Calendar settings' },
-    { text: 'Outlook.com: Settings → Calendar → Shared calendars → Publish a calendar, choose “Can view all details”, publish, and copy the ICS link.', link: 'https://outlook.live.com/calendar/0/options/calendar/SharedCalendars', linkLabel: 'Outlook calendar settings' },
+    { text: 'Google: on a computer, open Google Calendar → Settings → your calendar → Integrate calendar, and copy “Secret address in iCal format” (not the public address, which only works for public calendars).', link: 'https://calendar.google.com/calendar/r/settings', linkLabel: 'Google Calendar settings' },
+    { text: 'Outlook.com: Settings → Calendar → Shared calendars → Publish a calendar, choose “Can view all details”, publish, and copy the ICS link (the HTML link works too).', link: 'https://outlook.live.com/calendar/0/options/calendar/SharedCalendars', linkLabel: 'Outlook calendar settings' },
     { text: 'Paste up to three addresses below. Anyone with such an address can see that calendar, so it is stored encrypted; reset it in Google or Outlook if it ever leaks. New events show within about five minutes.' },
   ] },
   { id: 'apple-calendar', name: 'Apple Calendar', group: 'calendar', how: 'App-specific password · CalDAV', kind: 'credentials', fields: [userField, passField], can: { read: false, send: false } },

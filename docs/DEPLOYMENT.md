@@ -131,12 +131,23 @@ npm run release    # updates the database, then deploys (npm run migrate -- --dr
 
 The Worker answers only on those three hosts: `workers_dev` and `preview_urls` are off.
 
+## Release checks
+
+`npm run release` (what Cloudflare runs on every push to `main`) does this, in order, and stops at the first failure:
+
+1. **`npm test`**: mail (IMAP/SMTP) and calendar-link tests against stand-in servers that behave like Google and Outlook, including their known refusals. If a test fails, nothing is migrated or deployed.
+2. **Database update** (`npm run migrate`).
+3. **Deploy** (`scripts/deploy-worker.mjs`), then a **live check** of both domains: the page and `/api/auth/config` must answer. If the site answers with an error, the previous version is put back automatically (`wrangler rollback`) and the build is marked failed. If the build machine can't reach the site at all, it only warns.
+
+Run `npm test` locally before pushing to catch the same problems sooner.
+
 ## Troubleshooting
 
 | What you see | Cause | Fix |
 | --- | --- | --- |
 | The app says "Niko can't reach its server", or `/api/...` answers **503** `not_configured` | A required Worker secret is missing. The Worker log (Worker → Observability) names it: `Worker secret(s) missing: …` | `DATABASE_URL`: redeploy (Deployments → Retry build); the deploy sets it. `ENCRYPTION_KEY`: add it as in section 2 |
 | `/api/...` answers **500** "Something went wrong on the server" | The Worker log line `api error <method> <path>: …` gives the reason, including the database error code (e.g. `42P01` = a table is missing → the migration didn't run on this database; `28P01` = wrong password in `DATABASE_URL`) | Fix what it names, then redeploy |
+| A calendar link (iCal) won't connect | The message names which address (first, second, third) and what to copy instead. Google: use “Secret address in iCal format”, not the public one. Outlook: the ICS or HTML link from Shared calendars → Publish | Copy the address it names again |
 | No **Set up Niko** screen on a new install | The app can't read `/api/auth/config` | See the two rows above |
 
 ## 4. First owner and admin

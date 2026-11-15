@@ -28,6 +28,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # Mail and calendar tests against stand-in servers; nothing is deployed if one fails.
+      - run: npm test
       - run: npm run build:web
       # The database is updated first, so the new code never runs against an old database.
       # Migrations only add things, so the code that is still live keeps working in between.

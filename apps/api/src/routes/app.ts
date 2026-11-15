@@ -6,7 +6,7 @@ import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
 import { audit, requireUser, tooMany } from '../lib/session';
 import { eventDetail, mailDetail, noteDetail } from '../details';
-import { icalCheck } from '../calendarlink';
+import { icalCheck, normalizeLink } from '../calendarlink';
 import { IMAP_PROVIDERS, imapCheck, isImapProvider } from '../mailbox';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
@@ -166,7 +166,7 @@ app.post('/connections/:provider', async (c) => {
   const prior = (await credentials(c.env, c.get('db'), u.id, def.id).catch(() => null)) as Record<string, string> | null;
   for (const f of def.fields) {
     let v = typeof b[f.key] === 'string' && b[f.key]!.trim() ? b[f.key]!.trim() : (prior?.[f.key] ?? '');
-    if (f.type === 'url') v = v.replace(/^webcal:\/\//i, 'https://'); // calendar links are often given as webcal://
+    if (f.type === 'url') v = normalizeLink(v); // webcal:// → https://, and Outlook's HTML link → its ICS link
     if (!v && !f.optional && f.key !== 'voiceId' && f.key !== 'channelId') return c.json({ error: `${f.label} is needed.` }, 400);
     if (f.type === 'url' && v && !publicHttpsUrl(v)) return c.json({ error: `${f.label} must be a public https address.` }, 400);
     secret[f.key] = v.slice(0, 2000);
