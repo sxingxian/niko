@@ -1,5 +1,6 @@
 // Settings: one area with a shared sidebar (Appearance, Voice, Connections, Engine, Account) and a way back to Niko.
 import { startRegistration } from '@simplewebauthn/browser';
+import { passkeyError } from '../passkeyError';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { checkAppKey, COLOURS, GROUPS, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
@@ -663,7 +664,7 @@ export function Account() {
       await api('/me/passkeys/verify', { body: { challengeId, response } });
       setNote({ ok: true, text: 'Passkey added. You can use it next time you sign in on this domain.' });
       await load();
-    } catch (x: any) { setNote({ ok: false, text: x?.name === 'NotAllowedError' ? 'Adding the passkey was cancelled.' : x.message ?? 'That did not work.' }); }
+    } catch (x: any) { setNote({ ok: false, text: passkeyError(x, true) }); }
   };
   return (
     <SettingsPage title="Account" sub="Your sign-in details and passkeys.">

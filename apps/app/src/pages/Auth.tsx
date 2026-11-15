@@ -1,4 +1,5 @@
 import { startAuthentication } from '@simplewebauthn/browser';
+import { passkeyError } from '../passkeyError';
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, Field, Icon, ParticleCore, PasswordField } from '@niko/ui';
@@ -61,7 +62,7 @@ export function SignIn() {
       const response = await startAuthentication({ optionsJSON: options });
       await api('/auth/passkey/login/verify', { body: { challengeId, response } });
       await done();
-    } catch (x: any) { setErr(x?.name === 'NotAllowedError' ? 'Passkey sign-in was cancelled.' : x.message ?? 'Passkey sign-in failed.'); }
+    } catch (x: any) { setErr(passkeyError(x, false)); }
   };
   return (
     <Shell tag="Welcome back.">

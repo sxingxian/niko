@@ -204,6 +204,10 @@ myPasskeys.post('/options', async (c) => {
     userID: new TextEncoder().encode(u.id) as Uint8Array<ArrayBuffer>, attestationType: 'none',
     excludeCredentials: existing.map((p) => ({ id: p.credentialId })),
     authenticatorSelection: { residentKey: 'required', userVerification: 'preferred' },
+    // ES256 first: every phone and password manager supports it. Ed25519 is left out, as some Android
+    // credential providers fail on requests that offer it rather than skipping it.
+    supportedAlgorithmIDs: [-7, -257],
+    timeout: 120_000,
   });
   const [row] = await c.get('db').insert(webauthnChallenges).values({ userId: u.id, challenge: options.challenge, rpId: site.rpId, kind: 'register', expiresAt: new Date(Date.now() + 5 * 60_000) }).returning();
   return c.json({ options, challengeId: row!.id });
