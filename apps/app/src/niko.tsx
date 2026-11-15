@@ -2,6 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
+import { isEcho, matchWake } from './speech';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, setAppearance, type CoreMode } from '@niko/ui';
 
@@ -38,14 +39,6 @@ const NAV: [RegExp, string][] = [
   [/\b(inbox|mail|messages?)\b/, '/inbox'], [/\bcalendar\b/, '/calendar'], [/\bnotes?\b/, '/notes'], [/\bconnections?\b/, '/connections'],
   [/\bengine\b/, '/engine'], [/\b(voice|speech)\b/, '/voice'], [/\bsettings\b/, '/appearance'], [/\b(appearance|colou?rs?)\b/, '/appearance'], [/\baccount\b/, '/account'], [/\bhome\b/, '/'],
 ];
-
-/** "Niko" as speech recognisers write it: Niko, Nico, Nikko, Nicko, Neko, Neeko, Nicco, optionally after "hey"/"ok".
- * Returns what was said after the name (empty if the name was said alone), or null if the name wasn't heard. */
-const WAKE = /(?:^|[^a-z])(?:(?:hey|hi|ok|okay)[\s,]+)?n(?:i|ee|e|y)(?:k|c|ck|kk|cc|q)h?o[h]?(?![a-z])[\s,.!?:;-]*(.*)$/i;
-export function matchWake(text: string): { command: string } | null {
-  const m = WAKE.exec(text);
-  return m ? { command: (m[1] ?? '').trim() } : null;
-}
 
 /** One voice made on Niko's server (Cloudflare, the user's own server, ElevenLabs), played as audio. */
 function serverSpeech(source: VoiceSource, text: string): Speech {
@@ -91,6 +84,13 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const wantRec = useRef(false); // keep the recogniser running (wake word on, or the mic was tapped)
   const speaking = useRef(false); // while Niko talks, what the mic hears is Niko itself, so it is ignored
   const followUp = useRef<number | undefined>(undefined);
+  const startRecRef = useRef<() => void>(() => undefined);
+  // Niko's last line and when it finished, so its own voice heard late through the mic is never taken as a question.
+  const lastSaid = useRef<{ text: string; until: number }>({ text: '', until: 0 });
+  const ECHO_MS = 6000;
+  /** The mic is switched off while Niko talks: whatever it was holding (Niko's own voice) is thrown away. */
+  const muteMic = () => { try { rec.current?.abort(); } catch { /* not running */ } rec.current = null; };
+  const unmuteMic = () => { if (wantRec.current && !rec.current) startRecRef.current(); };
   const [voiceProblem, setVoiceProblem] = useState<string | null>(null);
   const SR: any = typeof window !== 'undefined' ? (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition : null;
 
@@ -116,9 +116,11 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const speechId = useRef(0);
   const current = useRef<{ stop: () => void } | null>(null);
   const stopSpeech = () => {
+    const was = speaking.current;
     speechId.current++; speaking.current = false;
     window.speechSynthesis?.cancel(); audio.current?.pause(); audio.current = null;
     current.current?.stop(); current.current = null;
+    if (was) { lastSaid.current.until = Date.now() + ECHO_MS; window.setTimeout(unmuteMic, 300); }
   };
   const endFollowUp = () => { window.clearTimeout(followUp.current); followUp.current = undefined; };
 
@@ -139,8 +141,15 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     stopSpeech(); endFollowUp();
     const id = speechId.current;
     const live = () => id === speechId.current;
-    const done = () => { if (live()) listenForFollowUp(); };
+    // When Niko has finished: a short pause (the speaker's last sound fades), then the mic comes back for the follow-up.
+    const done = () => {
+      if (!live()) return;
+      lastSaid.current = { text, until: Date.now() + ECHO_MS };
+      window.setTimeout(() => { if (!live()) return; speaking.current = false; unmuteMic(); listenForFollowUp(); }, 450);
+    };
     speaking.current = true;
+    lastSaid.current = { text, until: Number.POSITIVE_INFINITY };
+    muteMic();
     setMode('speaking'); setLabel('Speaking'); setLine(text.length > 160 ? text.slice(0, 157) + '…' : text);
     const device = () => {
       if (!window.speechSynthesis) return done();
@@ -203,15 +212,17 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   // Speech recognition: runs while the app is open and the mic is allowed.
   // Interim results let the core react the moment "Niko" is heard; the command itself is taken from the final text.
   const startRec = useCallback(() => {
-    if (!SR || rec.current) return;
+    if (!SR || rec.current || speaking.current) return;
     const r = new SR();
     r.continuous = true; r.interimResults = true; r.maxAlternatives = 3; r.lang = navigator.language || 'en-US';
     r.onresult = (ev: any) => {
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const res = ev.results[i];
-      if (speaking.current) continue; // Niko's own voice
+        if (speaking.current || rec.current !== r) continue; // Niko's own voice, or a recogniser already switched off
         // Recognisers often spell the name differently in their first guess, so check every alternative.
         const alts: string[] = Array.from({ length: res.length }, (_, k) => String(res[k]?.transcript ?? '').trim());
+        // Niko's own last line, heard late through the speaker: never a question.
+        if (res.isFinal && Date.now() < lastSaid.current.until && alts[0] && isEcho(alts[0], lastSaid.current.text) && !alts.some((a) => matchWake(a)?.command)) continue;
         const hit = alts.map(matchWake).find(Boolean);
         if (!res.isFinal) {
           if (hit && !active.current) { setMode('listening'); setLabel('Listening'); setLine('Go ahead.'); }
@@ -223,7 +234,11 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         } else if (active.current && alts[0]) { active.current = false; endFollowUp(); void ask(alts[0]); }
       }
     };
-    r.onend = () => { rec.current = null; if (wantRec.current) setTimeout(startRec, 300); else setMicOn(false); };
+    r.onend = () => {
+      if (rec.current === r) rec.current = null;
+      // Restarts on its own (browsers stop listening after a while), except while Niko talks: say() brings it back.
+      if (wantRec.current && !speaking.current) setTimeout(startRec, 300); else if (!wantRec.current) setMicOn(false);
+    };
     r.onerror = (ev: any) => {
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
         // Some browsers (Safari, iOS) only allow listening after a tap. One tap on the mic keeps it on from then on.
@@ -233,6 +248,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     };
     try { r.start(); rec.current = r; setMicOn(true); } catch { /* already started */ }
   }, [SR, ask]);
+  startRecRef.current = startRec;
 
   useEffect(() => {
     // Wake word listening starts only if the user enabled it, and only after sign-in.
