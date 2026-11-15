@@ -2,7 +2,7 @@
 // The model and voices come from Hugging Face's official repository. The model is checked against a pinned
 // SHA-256 before use, so a changed or tampered file is refused rather than run. The speech runtime
 // (ONNX Runtime WebAssembly) is served from Niko's own site, never a third-party CDN.
-import { KokoroTTS, TextSplitterStream, env } from 'kokoro-web';
+import { KokoroTTS, env } from 'kokoro-web';
 
 const MODEL_ID = 'onnx-community/Kokoro-82M-v1.0-ONNX';
 const MODEL_FILE = /\/onnx\/model_quantized\.onnx(\?|$)/;
@@ -57,7 +57,41 @@ self.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Respo
 };
 
 let tts: Promise<KokoroTTS> | null = null;
-const load = () => (tts ??= KokoroTTS.from_pretrained(MODEL_ID, { dtype: 'q8', device: 'wasm' }).catch((e) => { tts = null; throw e; }));
+// Loading also runs two short warm-up lines. The first run after loading is much slower than the rest, so the
+// first is thrown away; the second's timing says whether this device speaks faster than real time (rtf below 1).
+let rtf: number | null = null;
+const load = () => (tts ??= (async () => {
+  const t = await KokoroTTS.from_pretrained(MODEL_ID, { dtype: 'q8', device: 'wasm' });
+  await t.generate('Hi.', { voice: 'af_heart' as any });
+  const t0 = performance.now();
+  const a = await t.generate('Hello there, how are you?', { voice: 'af_heart' as any });
+  rtf = (performance.now() - t0) / 1000 / Math.max(0.2, a.audio.length / a.sampling_rate);
+  return t;
+})().catch((e) => { tts = null; throw e; }));
+
+/** Splits text into short phrases: sentences, long ones at commas, and a short first phrase so sound starts sooner. */
+export function phrases(text: string): string[] {
+  const out: string[] = [];
+  const sentences = text.replace(/\s+/g, ' ').trim().split(/(?<=[.!?…])\s+(?=\S)/);
+  for (const sen of sentences) {
+    let rest = sen;
+    while (rest.length > 140) {
+      const cut = Math.max(rest.lastIndexOf(', ', 140), rest.lastIndexOf('; ', 140), rest.lastIndexOf(' – ', 140), rest.lastIndexOf(' — ', 140));
+      const at = cut > 40 ? cut + 1 : (rest.lastIndexOf(' ', 140) > 40 ? rest.lastIndexOf(' ', 140) : 140);
+      out.push(rest.slice(0, at).trim()); rest = rest.slice(at).trim();
+    }
+    if (rest) out.push(rest);
+  }
+  // The first phrase decides how long it takes to hear anything, so keep it to a few words when it is long.
+  if (out[0] && out[0].length > 70) {
+    const f = out[0];
+    const comma = f.indexOf(', ', 20);
+    const at = comma > 0 && comma < 70 ? comma + 1 : f.lastIndexOf(' ', 55) > 20 ? f.lastIndexOf(' ', 55) : 0;
+    if (at) out.splice(0, 1, f.slice(0, at).trim(), f.slice(at).trim());
+  }
+  return out.filter(Boolean);
+}
+
 const cancelled = new Set<number>();
 const why = (e: unknown) => {
   const m = String((e as Error)?.message ?? e);
@@ -72,20 +106,20 @@ self.onmessage = async (ev: MessageEvent<In>) => {
   if (m.type === 'cancel') { cancelled.add(m.id); return; }
   if (m.type === 'load') {
     loadingId = m.id;
-    try { await load(); post({ type: 'ready', id: m.id }); } catch (e) { post({ type: 'error', id: m.id, error: why(e) }); }
+    try { await load(); post({ type: 'ready', id: m.id, rtf, threads: (globalThis as any).crossOriginIsolated ? Math.min(4, Math.ceil((navigator.hardwareConcurrency || 2) / 2)) : 1 }); }
+    catch (e) { post({ type: 'error', id: m.id, error: why(e) }); }
     return;
   }
   try {
     const engine = await load();
-    // Text goes in through a splitter that is closed straight away: given a plain string, kokoro-js 1.2.1
-    // never ends the stream and waits for more text, so nothing is ever spoken.
-    const splitter = new TextSplitterStream();
-    const parts = engine.stream(splitter, { voice: m.voice as any });
-    splitter.push(m.text); splitter.close();
-    for await (const part of parts) {
+    // Phrase by phrase: each is played as soon as it is made, while the next one is being made.
+    for (const text of phrases(m.text)) {
       if (cancelled.has(m.id)) break;
-      const samples = part.audio.audio as Float32Array;
-      post({ type: 'chunk', id: m.id, audio: samples, rate: part.audio.sampling_rate }, [samples.buffer]);
+      const t0 = performance.now();
+      const a = await engine.generate(text, { voice: m.voice as any });
+      if (cancelled.has(m.id)) break;
+      const samples = a.audio as Float32Array;
+      post({ type: 'chunk', id: m.id, audio: samples, rate: a.sampling_rate, took: (performance.now() - t0) / 1000 }, [samples.buffer]);
     }
     cancelled.delete(m.id);
     post({ type: 'end', id: m.id });

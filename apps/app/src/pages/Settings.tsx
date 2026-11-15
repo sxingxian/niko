@@ -1,7 +1,7 @@
 // Settings: one area with a shared sidebar (Appearance, Voice, Connections, Engine, Account) and a way back to Niko.
 import { startRegistration } from '@simplewebauthn/browser';
 import { passkeyError } from '../passkeyError';
-import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSpeak, kokoroSupported } from '../kokoro';
+import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSpeak, kokoroSpeed, kokoroSupported, kokoroTooSlow } from '../kokoro';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, VOICE_NAMES, VOICE_SOURCES, voiceOrder, WORKERS_VOICES, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
@@ -40,7 +40,7 @@ export function SettingsLayout() {
           <button className="nv line" onClick={signOut}>Sign out</button>
         </div>
       </aside>
-      <main key={pathname} className="set-main hud-in"><Outlet /></main>
+      <main key={pathname} className="set-main"><Outlet /></main>
     </div>
   );
 }
@@ -619,7 +619,12 @@ export function Voice() {
               <span className="dl-bar"><i style={{ width: `${Math.round(kProgress * 100)}%` }} /></span><span className="k">{kProgress < 1 ? `${Math.round(kProgress * 100)}%` : 'Preparing…'}</span>
             </div>
           ) : kReady ? (
-            <div className="eng-line"><span><b className="ok-dot" aria-hidden="true" />Ready on this device</span><button type="button" className="lnk" onClick={removeKokoro}>Remove from this device</button></div>
+            <>
+              <div className="eng-line"><span><b className="ok-dot" aria-hidden="true" />Ready on this device</span><button type="button" className="lnk" onClick={removeKokoro}>Remove from this device</button></div>
+              {kokoroSpeed() && (kokoroTooSlow()
+                ? <p className="hint vrow-warn">This device makes speech more slowly than it plays ({kokoroSpeed()!.rtf}× real time), so Niko uses the next voice in your list instead. It is measured each time the app opens.</p>
+                : <p className="hint">This device keeps up comfortably ({kokoroSpeed()!.rtf}× real time{kokoroSpeed()!.threads > 1 ? `, ${kokoroSpeed()!.threads} cores` : ''}). The engine starts in the background each time the app opens; until it has, Niko uses the next voice.</p>)}
+            </>
           ) : (
             <button type="button" className="bt fill" style={{ alignSelf: 'flex-start' }} onClick={download}>Download to this device · about {KOKORO_DOWNLOAD_MB} MB</button>
           )}
@@ -666,6 +671,7 @@ export function Voice() {
           <button type="button" className="vrow-title" aria-expanded={open === v} onClick={() => setOpen(open === v ? null : v)}>
             <b>{VOICE_NAMES[v]}</b><span className="sub">{VOICE_INFO[v].sub}</span>
             {v === 'kokoro' && on && !kReady && kokoroSupported() && <span className="sub vrow-warn">Not downloaded on this device yet, so Niko skips it here.</span>}
+            {v === 'kokoro' && on && kReady && kokoroTooSlow() && <span className="sub vrow-warn">Too slow on this device to keep up while speaking, so Niko skips it here.</span>}
             {v === 'kokoro' && !kokoroSupported() && <span className="sub vrow-warn">This browser cannot run it.</span>}
           </button>
           <span className="k tag">{VOICE_INFO[v].tag}</span>

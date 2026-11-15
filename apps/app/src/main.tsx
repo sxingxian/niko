@@ -27,19 +27,23 @@ const WORKSPACE_PATHS = ['/inbox', '/calendar', '/notes'];
 /** HUD sweep on every screen change: a ring opens from the centre, a scan line passes, the corners lock on.
  * Purely decorative (aria-hidden, no pointer events) and skipped when reduced motion is asked for.
  * Not used between Home and the workspace, which have their own particle flow. */
-function HudSweep({ pathname, skip }: { pathname: string; skip: boolean }) {
+function HudSweep({ screen, skip }: { screen: string; skip: boolean }) {
   const [n, setN] = useState(0);
   const first = useRef(true);
-  useEffect(() => { if (first.current) { first.current = false; return; } if (!skip) setN((x) => x + 1); }, [pathname]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (first.current) { first.current = false; return; } if (!skip) setN((x) => x + 1); }, [screen]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Taken off once it has played, so nothing sits over the page.
+  useEffect(() => { if (!n) return; const t = window.setTimeout(() => setN(0), 900); return () => window.clearTimeout(t); }, [n]);
   if (n === 0) return null;
   return (
     <div key={n} className="hud-sweep" aria-hidden="true">
-      <i className="hud-ring" /><i className="hud-ring two" /><i className="hud-scan" />
+      <i className="hud-ring" /><i className="hud-scan" />
       <i className="hud-corner tl" /><i className="hud-corner tr" /><i className="hud-corner bl" /><i className="hud-corner br" />
     </div>
   );
 }
 
+const groupOf = (p: string) => (SETTINGS_PATHS.includes(p) ? 'settings' : p);
+const HUD_OUT_MS = 140;
 const kindOf = (p: string) => (p === '/' ? 'home' : WORKSPACE_PATHS.includes(p) ? 'ws' : 'other');
 const reduced = () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -63,12 +67,20 @@ function Screens() {
       return () => window.clearTimeout(t);
     }
     setFlow(null);
+    // Any other change of screen: the old one fades out quickly, then the new one builds in. Moving between
+    // settings pages keeps the sidebar, so only the page content changes there, with no fade-out.
+    if (!reduced() && groupOf(shown.pathname) !== groupOf(loc.pathname)) {
+      setLeaving(true);
+      const t = window.setTimeout(() => { setLeaving(false); setShown(loc); }, HUD_OUT_MS);
+      return () => window.clearTimeout(t);
+    }
+    setLeaving(false);
     setShown(loc);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loc]);
   // Settings keep their sidebar, so those pages animate inside it, not as a whole screen.
   // Each workspace view is its own screen, so the build replays when moving between them.
-  const group = SETTINGS_PATHS.includes(shown.pathname) ? 'settings' : shown.pathname;
+  const group = groupOf(shown.pathname);
   const flowing = !!flow;
   // How a screen arrives is fixed when it mounts, so the end of the flow never restarts an entrance animation.
   const entry = useMemo(() => (!flow ? 'hud-in' : flow.dir === 'swap' ? 'flow flow-in swap' : 'flow flow-' + flow.dir), [group]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -76,7 +88,7 @@ function Screens() {
   const [settled, setSettled] = useState<string | null>(null);
   const groupNow = useRef(group);
   groupNow.current = group;
-  const cls = 'route ' + (leaving ? (flow?.dir === 'swap' ? 'leaving swap' : 'leaving') : settled === group && entry !== 'hud-in' ? '' : entry);
+  const cls = 'route ' + (leaving ? (!flow ? 'hud-out' : flow.dir === 'swap' ? 'leaving swap' : 'leaving') : settled === group && entry !== 'hud-in' ? '' : entry);
   const vars = { ['--D' as string]: FLOW_SECONDS + 's', ['--el' as string]: LEAVE_MS / 1000 + 's' } as CSSProperties;
   return (
     <>
@@ -100,7 +112,7 @@ function Screens() {
       </Routes>
       </div>
       {flow && <FlowLayer key={flow.at} dir={flow.dir} loose={flow.loose} startedAt={flow.at} onDone={() => { setFlow(null); setSettled(groupNow.current); }} />}
-      <HudSweep pathname={shown.pathname} skip={flowing} />
+      <HudSweep screen={group} skip={flowing} />
     </>
   );
 }

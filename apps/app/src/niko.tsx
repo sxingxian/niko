@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
-import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroWarm, type Speech } from './kokoro';
+import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, setAppearance, type CoreMode } from '@niko/ui';
 
 export type { Brief } from '@niko/shared';
@@ -150,7 +150,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       for (const source of voiceOrder(engine)) {
         if (!live()) return;
         // Never starts a large download by itself, and does not wait while its engine is still starting up.
-        if (source === 'kokoro' && (!kokoroReady() || !kokoroLoaded())) { if (kokoroReady()) kokoroWarm(); continue; }
+        // …and is skipped on a device too slow to keep up with its own speech.
+        if (source === 'kokoro' && (!kokoroReady() || !kokoroLoaded() || kokoroTooSlow())) { if (kokoroReady()) kokoroWarm(); continue; }
         const s = speakWith(source, text, engine);
         current.current = s;
         try {

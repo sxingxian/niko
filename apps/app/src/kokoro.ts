@@ -22,6 +22,22 @@ const store = {
 export const kokoroSupported = () => typeof Worker !== 'undefined' && typeof WebAssembly !== 'undefined' && typeof caches !== 'undefined' && typeof AudioContext !== 'undefined';
 export const kokoroReady = () => kokoroSupported() && store.get() === MODEL_TAG;
 
+// How fast this device makes speech, measured by the warm-up line each time the engine starts:
+// seconds of work per second of speech. Above 1 it falls behind while speaking, so Niko uses the next voice.
+const SPEED_KEY = 'niko.kokoro.rtf';
+const TOO_SLOW = 1.1;
+export function kokoroSpeed(): { rtf: number; threads: number } | null {
+  try { const v = JSON.parse(localStorage.getItem(SPEED_KEY) ?? 'null'); return v && typeof v.rtf === 'number' ? v : null; } catch { return null; }
+}
+export const kokoroTooSlow = () => (kokoroSpeed()?.rtf ?? 0) > TOO_SLOW;
+/** Folds each real line's timing into the stored speed, so one slow or fast moment does not decide alone. */
+function noteSpeed(took: number, seconds: number, threads?: number) {
+  if (!(seconds > 0.3) || !(took > 0)) return;
+  const prev = kokoroSpeed();
+  const rtf = prev ? prev.rtf * 0.7 + (took / seconds) * 0.3 : took / seconds;
+  try { localStorage.setItem(SPEED_KEY, JSON.stringify({ rtf: Math.round(rtf * 100) / 100, threads: threads ?? prev?.threads ?? 1 })); } catch { /* private mode */ }
+}
+
 // Starting the speech engine takes a while (seconds on a laptop, longer on a phone), every time the app opens.
 let loaded = false;
 let loading: Promise<void> | null = null;
@@ -34,7 +50,11 @@ export function kokoroDownload(onProgress?: (p: number) => void): Promise<void> 
   const p = new Promise<void>((resolve, reject) => {
     waiting.set(id, (m) => {
       if (m.type === 'progress') onProgress?.(Math.min(1, m.loaded / m.total));
-      else if (m.type === 'ready') { waiting.delete(id); loaded = true; store.set(MODEL_TAG); resolve(); }
+      else if (m.type === 'ready') {
+        waiting.delete(id); loaded = true; store.set(MODEL_TAG);
+        if (typeof m.rtf === 'number') noteSpeed(m.rtf, 1, m.threads);
+        resolve();
+      }
       else if (m.type === 'error') { waiting.delete(id); reject(new Error(m.error)); }
     });
     getWorker().postMessage({ type: 'load', id });
@@ -55,6 +75,7 @@ export function kokoroWarm(): void {
 export async function kokoroRemove(): Promise<void> {
   worker?.terminate(); worker = null; waiting.clear(); loaded = false; loading = null;
   store.set(null);
+  try { localStorage.removeItem(SPEED_KEY); } catch { /* private mode */ }
   await Promise.all(['transformers-cache', 'niko-kokoro-voices'].map((n) => caches.delete(n).catch(() => false)));
 }
 
@@ -95,6 +116,7 @@ export function kokoroSpeak(text: string, voice: string): Speech {
         src.start(at); at += buf.duration;
         sources.push(src); playing++;
         src.onended = () => { playing--; if (ended && playing === 0) finish(); };
+        if (typeof m.took === 'number') noteSpeed(m.took, buf.duration);
         if (!startedOk) { startedOk = true; resolveStart(); }
       } else if (m.type === 'end') {
         ended = true;

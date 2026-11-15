@@ -109,6 +109,14 @@ export default {
     if (res.status === 404 && !isFile) res = await env.ASSETS.fetch(new Request(new URL(spa, url.origin), request));
     const out = new Response(res.body, res);
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) out.headers.set(k, v);
+    // The app is cross-origin isolated: it lets the on-device voice use several processor cores (WebAssembly
+    // threads need SharedArrayBuffer), and it also stops other sites' windows and resources from reaching into it.
+    // Everything the app loads is its own, except the voice files fetched with CORS from Hugging Face.
+    if (path === '/app' || path.startsWith('/app/')) {
+      out.headers.set('cross-origin-opener-policy', 'same-origin');
+      out.headers.set('cross-origin-embedder-policy', 'require-corp');
+      out.headers.set('cross-origin-resource-policy', 'same-origin');
+    }
     if (path.endsWith('/sw.js')) out.headers.set('service-worker-allowed', '/');
     if (!isFile || path.endsWith('.html')) out.headers.set('cache-control', 'no-cache');
     return out;

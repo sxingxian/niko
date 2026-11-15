@@ -275,7 +275,7 @@ select.in option { color: #04070c; }
 .vrow-title.static { cursor: default; }
 .vrow-title b { font-size: 17px; font-weight: 500; }
 .vrow-title .sub { font-size: 13px; line-height: 1.35; }
-.vrow-title .vrow-warn { color: #ffe0a6; }
+.vrow-title .vrow-warn, .hint.vrow-warn { color: #ffe0a6; }
 .vrow:not(.on) .vrow-title b { color: #c8d0db; }
 .vrow .tag { border: 1px solid rgba(255,255,255,.3); border-radius: 999px; padding: 5px 10px; white-space: nowrap; }
 .vrow-move { display: flex; gap: 6px; }
@@ -332,6 +332,9 @@ select.in option { color: #04070c; }
 .set-head p { font: 400 15px system-ui, sans-serif; color: #b9c2cf; }
 .set-save { height: 48px; font-size: 15px; }
 .set-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 24px; }
+/* Settings sit on a plain dark background, where a frosted-glass blur shows nothing but costs a full redraw of
+   every panel on each frame it moves, so it is switched off here. */
+.set .g { -webkit-backdrop-filter: none; backdrop-filter: none; }
 .set-card { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.18); border-radius: 24px; padding: 26px 28px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
 .set-card .k { color: #b9c2cf; }
 .set-card .grp { display: flex; flex-direction: column; gap: 10px; }
