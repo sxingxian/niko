@@ -2,17 +2,31 @@
   "name": "niko",
   "private": true,
   "version": "0.1.0",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "build:web": "npm run build -w @niko/landing && npm run build -w @niko/app && npm run build -w @niko/admin",
     "build": "npm run build:web && npm run typecheck",
-    "typecheck": "npm run typecheck -w @niko/api",
+    "typecheck": "npm run typecheck -w @niko/api && tsc --noEmit -p apps/app/tsconfig.json && tsc --noEmit -p apps/admin/tsconfig.json",
     "dev:api": "npm run dev -w @niko/api",
     "deploy": "npm run build:web && npm run deploy -w @niko/api",
     "migrate": "node scripts/migrate.mjs",
     "release": "npm run migrate && node scripts/deploy-worker.mjs",
     "user": "node scripts/user.mjs"
   },
-  "devDependencies": { "@neondatabase/serverless": "^1.0.0", "esbuild": "^0.25.0", "pg": "^8.13.0" },
-  "engines": { "node": ">=20" }
+  "devDependencies": {
+    "@neondatabase/serverless": "^1.0.0",
+    "esbuild": "^0.25.0",
+    "pg": "^8.13.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "overrides": {
+    "kokoro-js": {
+      "@huggingface/transformers": "3.5.1"
+    }
+  }
 }

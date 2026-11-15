@@ -66,6 +66,12 @@ export const PROVIDERS: ProviderDef[] = [
     { key: 'apiKey', label: 'API key', type: 'password' },
     { key: 'model', label: 'Model name', type: 'text', shown: true },
   ], can: { read: true, send: false } },
+  { id: 'self-hosted-voice', name: 'Your own voice server', group: 'ai', how: 'A speech server you run · OpenAI-compatible', kind: 'token', hidden: true, fields: [
+    { key: 'baseUrl', label: 'Server address', type: 'url', placeholder: 'https://', shown: true },
+    { key: 'voice', label: 'Voice name', type: 'text', optional: true, shown: true },
+    { key: 'model', label: 'Model name', type: 'text', optional: true, shown: true },
+    { key: 'apiKey', label: 'API key', type: 'password', optional: true },
+  ], can: { read: false, send: false } },
   { id: 'self-hosted-ai', name: 'Self-hosted model', group: 'ai', how: 'A model server you run · OpenAI-compatible', kind: 'token', hidden: true, fields: [
     { key: 'baseUrl', label: 'Server address', type: 'url', placeholder: 'https://', shown: true },
     { key: 'model', label: 'Model name', type: 'text', optional: true, shown: true },
@@ -113,7 +119,45 @@ export const SHIFT_ORDER = ['cyan', 'violet', 'rose', 'amber', 'emerald'];
 
 export interface Appearance { mode: 'shift' | 'single'; colours: string[]; single: string; customHue: number; seconds: number }
 export type Brain = 'workers-ai' | 'custom-ai' | 'self-hosted-ai';
-export interface EnginePrefs { brain: Brain; model?: 'fast' | 'large'; voice: 'elevenlabs' | 'device'; wake: boolean; onlyMyVoice: boolean; fallback: boolean; listen: 'device' }
+/** Where Niko's speech can come from. The device voice is not listed: it is always the last resort. */
+export type VoiceSource = 'workers' | 'kokoro' | 'self-hosted' | 'elevenlabs';
+export const VOICE_SOURCES: VoiceSource[] = ['workers', 'kokoro', 'self-hosted', 'elevenlabs'];
+/** Short names for the voices, as shown on chips and in the voice list. */
+export const VOICE_NAMES: Record<VoiceSource | 'device', string> = { workers: 'Cloudflare voice', kokoro: 'On-device voice', 'self-hosted': 'Your voice server', elevenlabs: 'ElevenLabs', device: 'Device voice' };
+/** The default order: Cloudflare's voice, then the device voice. */
+export const DEFAULT_VOICES: VoiceSource[] = ['workers'];
+
+/** Cloudflare Workers AI voices. MeloTTS costs almost nothing of the daily allowance; Deepgram Aura sounds more natural but uses far more. */
+export const WORKERS_VOICES: { id: string; name: string; model: string; speaker?: string }[] = [
+  { id: 'melo', name: 'Standard (MeloTTS)', model: '@cf/myshell-ai/melotts' },
+  ...([['asteria', 'Asteria · American'], ['luna', 'Luna · American'], ['stella', 'Stella · American'], ['hera', 'Hera · American'], ['athena', 'Athena · British'],
+    ['orion', 'Orion · American'], ['arcas', 'Arcas · American'], ['perseus', 'Perseus · American'], ['orpheus', 'Orpheus · American'], ['zeus', 'Zeus · American'], ['helios', 'Helios · British'], ['angus', 'Angus · Irish']] as const)
+    .map(([speaker, name]) => ({ id: 'aura:' + speaker, name: `Natural · ${name} (Aura)`, model: '@cf/deepgram/aura-1', speaker })),
+];
+
+/** Kokoro voices that run on the device (the higher-rated English ones). */
+export const KOKORO_VOICES: { id: string; name: string }[] = [
+  ['af_heart', 'Heart · American'], ['af_bella', 'Bella · American'], ['af_nicole', 'Nicole · American, soft'], ['af_aoede', 'Aoede · American'], ['af_kore', 'Kore · American'], ['af_sarah', 'Sarah · American'],
+  ['am_fenrir', 'Fenrir · American'], ['am_michael', 'Michael · American'], ['am_puck', 'Puck · American'],
+  ['bf_emma', 'Emma · British'], ['bf_isabella', 'Isabella · British'], ['bm_george', 'George · British'], ['bm_fable', 'Fable · British'],
+].map(([id, name]) => ({ id: id!, name: name! }));
+
+export interface EnginePrefs {
+  brain: Brain; model?: 'fast' | 'large';
+  /** Older single choice, kept so accounts saved before the voice order still work. */
+  voice?: 'elevenlabs' | 'device';
+  /** The voices to try, in order; the device voice always comes after them. */
+  voices?: VoiceSource[];
+  workersVoice?: string;
+  kokoroVoice?: string;
+  wake: boolean; onlyMyVoice: boolean; fallback: boolean; listen: 'device';
+}
+
+/** The order to try voices in, for accounts saved before and after the voice order existed. */
+export function voiceOrder(e: Partial<EnginePrefs> | undefined): VoiceSource[] {
+  if (Array.isArray(e?.voices)) return [...new Set(e!.voices.filter((v): v is VoiceSource => (VOICE_SOURCES as string[]).includes(v)))];
+  return e?.voice === 'elevenlabs' ? ['elevenlabs', 'workers'] : [...DEFAULT_VOICES];
+}
 /** Workers AI models behind the Engine screen's two choices. */
 // Fallback defaults; the live fast list is AI_MODEL in apps/api/wrangler.jsonc. Each is a comma-separated, ordered list.
 // Check https://developers.cloudflare.com/workers-ai/models/ for retirement dates before changing.

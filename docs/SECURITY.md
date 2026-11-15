@@ -6,7 +6,7 @@
 - **Sessions**: random 256-bit token in an `HttpOnly`, `Secure`, `SameSite=Lax`, `__Host-` cookie; only its SHA-256 hash is stored. App sessions last 30 days, admin sessions 8 hours.
 - **Cross-site requests**: every state-changing API call must carry an `Origin` that matches the host. Webhooks and the OAuth return leg are exempt and authenticate by signature, secret or state instead.
 - **Admin**: separate session cookie; password then a time-based code from an authenticator app. Admin routes refuse sessions that have not passed the second factor.
-- **No third-party requests from the pages**: the fonts are bundled with the app, so the Content-Security-Policy allows styles and fonts from Niko itself only.
+- **Third-party requests from the pages**: fonts and the on-device voice's speech runtime are served by Niko itself. The one exception is the on-device voice's model and voice files, which the browser downloads from Hugging Face (`huggingface.co`, `*.hf.co`) only when someone presses *Download to this device*. The model is checked against a pinned SHA-256 before it is used, and each voice file's size is checked; anything else is refused. These hosts are the only ones besides Niko in `connect-src`.
 - **Provider app keys are per account**: each account saves its own Google, Microsoft, Notion and Slack client ID and secret. They are encrypted with `ENCRYPTION_KEY`, used only for that account's sign-ins, never returned to the browser (only the last 4 characters of the client ID are shown), and deleted with the account. Sign-in and token addresses are fixed in code, so saved keys can't point Niko at another server. Slack events are checked with that account's own signing secret.
 - **Sign-in lockout**: counted per email and network address together. After 5 wrong attempts in a row that pair is locked for 1 minute, then 2, 4, 8, 16, 32, up to 60. While locked, even the right password is refused. Unknown emails are counted the same way, so a lock does not reveal which accounts exist. Wrong second-factor and recovery codes count too. A separate per-address cap limits guessing across many emails.
 - **Single-use codes**: each authenticator time step is accepted once per admin (an atomic database update), so a code that was seen or intercepted cannot be used again.
@@ -20,7 +20,8 @@
 - **Files**: relayed in request memory, 20 MB limit, never written to storage. The audit log records name, size, time and recipient only.
 - **Outbound addresses** supplied by users (webhooks, custom AI) must be public `https` URLs; localhost and private ranges are refused.
 - **AI prompt**: mail, events, notes and chats are passed to the model inside a block marked as untrusted, with an instruction not to follow anything inside it. The model has no ability to send; it can only draft.
-- **Headers**: HSTS, a strict Content-Security-Policy (`script-src 'self'`), `frame-ancestors 'none'`, `nosniff`, and microphone limited to the same origin.
+- **Headers**: HSTS, a strict Content-Security-Policy (`script-src 'self' 'wasm-unsafe-eval'`: WebAssembly may run, for the on-device voice, but `eval()` of scripts may not), `frame-ancestors 'none'`, `nosniff`, and microphone limited to the same origin.
+- **Voice servers**: a user's own voice server must be a public https address; redirects are not followed, and replies that are not audio, or over 8 MB, are refused. Server-made speech is limited to 150 lines per account per 15 minutes, since Cloudflare's voice uses the account's shared free allowance.
 
 ## Known gaps and risks
 

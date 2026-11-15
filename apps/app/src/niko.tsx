@@ -1,7 +1,8 @@
 // Shared Niko state: who is signed in, and the voice loop (wake word, commands, speech).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import type { EnginePrefs, Me } from '@niko/shared';
+import { voiceOrder, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
+import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroWarm, type Speech } from './kokoro';
 import { api, setAppearance, type CoreMode } from '@niko/ui';
 
 export interface Brief {
@@ -50,6 +51,33 @@ export function matchWake(text: string): { command: string } | null {
   return m ? { command: (m[1] ?? '').trim() } : null;
 }
 
+/** One voice made on Niko's server (Cloudflare, the user's own server, ElevenLabs), played as audio. */
+function serverSpeech(source: VoiceSource, text: string): Speech {
+  const ctl = new AbortController();
+  let el: HTMLAudioElement | null = null, url = '';
+  let resolveDone!: () => void;
+  const done = new Promise<void>((a) => { resolveDone = a; });
+  const cleanup = () => { if (url) URL.revokeObjectURL(url); url = ''; resolveDone(); };
+  const started = (async () => {
+    const timer = window.setTimeout(() => ctl.abort(), 15_000);
+    try {
+      const r = await fetch('/api/voice/tts', { method: 'POST', credentials: 'same-origin', signal: ctl.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, source }) });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? 'That voice could not speak.');
+      url = URL.createObjectURL(await r.blob());
+      el = new Audio(url);
+      el.onended = cleanup; el.onerror = cleanup;
+      await el.play();
+    } catch (e) {
+      cleanup();
+      throw new Error(ctl.signal.aborted ? 'That voice took too long to answer.' : (e as Error).message);
+    } finally { window.clearTimeout(timer); }
+  })();
+  return { started, done, stop: () => { ctl.abort(); el?.pause(); cleanup(); } };
+}
+function speakWith(source: VoiceSource, text: string, engine: EnginePrefs | undefined): Speech {
+  return source === 'kokoro' ? kokoroSpeak(text, engine?.kokoroVoice ?? 'af_heart') : serverSpeech(source, text);
+}
+
 export function NikoProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null | undefined>(undefined);
   const [mode, setMode] = useState<CoreMode>('idle');
@@ -75,6 +103,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     catch { setMe(null); meRef.current = null; setAppearance(null); }
   }, []);
   useEffect(() => { void refreshMe(); }, [refreshMe]);
+  // The on-device voice's engine starts in the background, so it is ready by the time Niko speaks.
+  useEffect(() => { if (me && voiceOrder(me.engine).includes('kokoro')) kokoroWarm(); }, [me]);
 
   const idle = useCallback(() => {
     setMode('idle'); setLabel('Standing by');
@@ -83,7 +113,14 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, [SR]);
   useEffect(() => { if (me) idle(); }, [me, idle]);
 
-  const stopSpeech = () => { speaking.current = false; window.speechSynthesis?.cancel(); audio.current?.pause(); audio.current = null; };
+  // Each line Niko says gets a number; anything still arriving for an older line is dropped.
+  const speechId = useRef(0);
+  const current = useRef<{ stop: () => void } | null>(null);
+  const stopSpeech = () => {
+    speechId.current++; speaking.current = false;
+    window.speechSynthesis?.cancel(); audio.current?.pause(); audio.current = null;
+    current.current?.stop(); current.current = null;
+  };
   const endFollowUp = () => { window.clearTimeout(followUp.current); followUp.current = undefined; };
 
   /** After Niko answers, keep listening for a few seconds so the conversation can carry on without saying "Niko" again. */
@@ -97,30 +134,44 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     followUp.current = window.setTimeout(() => { active.current = false; followUp.current = undefined; idle(); }, FOLLOW_UP_MS);
   }, [SR, idle]);
 
+  /** Speaks with the first voice in the user's order that works, ending with the device voice. */
   const say = useCallback((text: string) => {
     const engine = meRef.current?.engine as EnginePrefs | undefined;
-    const done = () => listenForFollowUp();
+    stopSpeech(); endFollowUp();
+    const id = speechId.current;
+    const live = () => id === speechId.current;
+    const done = () => { if (live()) listenForFollowUp(); };
+    speaking.current = true;
+    setMode('speaking'); setLabel('Speaking'); setLine(text.length > 160 ? text.slice(0, 157) + '…' : text);
     const device = () => {
       if (!window.speechSynthesis) return done();
       const u = new SpeechSynthesisUtterance(text);
       u.onend = done; u.onerror = done;
       window.speechSynthesis.speak(u);
     };
-    stopSpeech(); endFollowUp();
-    speaking.current = true;
-    setMode('speaking'); setLabel('Speaking'); setLine(text.length > 160 ? text.slice(0, 157) + '…' : text);
-    if (engine?.voice === 'elevenlabs') {
-      fetch('/api/voice/tts', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) })
-        .then(async (r) => {
-          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? 'ElevenLabs could not speak.');
-          setVoiceProblem(null);
-          const url = URL.createObjectURL(await r.blob());
-          const a = new Audio(url);
-          audio.current = a; a.onended = () => { URL.revokeObjectURL(url); done(); }; a.onerror = done;
-          await a.play();
-        })
-        .catch((e: Error) => { setVoiceProblem(e.message); device(); }); // free device voice is the fallback
-    } else device();
+    void (async () => {
+      let first: string | null = null; // why the first choice could not speak, shown on the home screen
+      for (const source of voiceOrder(engine)) {
+        if (!live()) return;
+        // Never starts a large download by itself, and does not wait while its engine is still starting up.
+        if (source === 'kokoro' && (!kokoroReady() || !kokoroLoaded())) { if (kokoroReady()) kokoroWarm(); continue; }
+        const s = speakWith(source, text, engine);
+        current.current = s;
+        try {
+          await s.started;
+          if (!live()) return s.stop();
+          setVoiceProblem(first);
+          await s.done;
+          return done();
+        } catch (e) {
+          if (!live()) return;
+          first ??= (e as Error).message;
+        }
+      }
+      if (!live()) return;
+      setVoiceProblem(first);
+      device();
+    })();
   }, [listenForFollowUp]);
 
   const ask = useCallback(async (raw: string) => {

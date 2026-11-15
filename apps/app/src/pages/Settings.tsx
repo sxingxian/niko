@@ -1,9 +1,10 @@
 // Settings: one area with a shared sidebar (Appearance, Voice, Connections, Engine, Account) and a way back to Niko.
 import { startRegistration } from '@simplewebauthn/browser';
 import { passkeyError } from '../passkeyError';
+import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSpeak, kokoroSupported } from '../kokoro';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { checkAppKey, COLOURS, GROUPS, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
+import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, VOICE_NAMES, VOICE_SOURCES, voiceOrder, WORKERS_VOICES, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
 import { api, Field, Icon, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
 
@@ -477,16 +478,32 @@ export function Engine() {
 }
 
 // ---------------------------------------------------------------- voice (speech out, speech in)
+type Src = VoiceSource;
+const VOICE_INFO: Record<Src, { sub: string; tag: string }> = {
+  workers: { sub: 'Made on Cloudflare, where Niko runs. Nothing to set up.', tag: 'Free' },
+  kokoro: { sub: 'A natural voice made on this device. Private, and works offline once downloaded.', tag: 'Free' },
+  'self-hosted': { sub: 'A speech server you run, such as on a NAS. Can use a cloned voice.', tag: 'Your server' },
+  elevenlabs: { sub: 'Natural speech and your ElevenLabs voices. Needs a paid ElevenLabs plan.', tag: 'Paid plan' },
+};
+const PREVIEW_LINE = (name: string) => `Hi ${name || 'there'}, this is how I sound.`;
+
 export function Voice() {
   const { me, refreshMe } = useNiko();
   const { linked, values, ready, reload } = useLinks();
   const [e, setE] = useState<EnginePrefs | null>(null);
+  const [order, setOrder] = useState<Src[]>([]);
+  const [open, setOpen] = useState<Src | null>(null);
   const [el, setEl] = useState({ apiKey: '', voiceId: '' });
+  const [sh, setSh] = useState({ baseUrl: '', voice: '', model: '', apiKey: '' });
   const [voices, setVoices] = useState<{ id: string; name: string; cloned: boolean }[]>([]);
   const [note, setNote] = useState<Note>(null);
   const [busy, setBusy] = useState('');
-  const [dirty, setDirty] = useState(false);
-  useEffect(() => { if (me && !e) setE({ ...me.engine }); }, [me, e]);
+  const [dirty, setDirty] = useState({ el: false, sh: false });
+  const [kReady, setKReady] = useState(kokoroReady());
+  const [kProgress, setKProgress] = useState<number | null>(null);
+  const playing = useRef<{ stop: () => void } | null>(null);
+  useEffect(() => { if (me && !e) { setE({ ...me.engine }); setOrder(voiceOrder(me.engine)); } }, [me, e]);
+  useEffect(() => () => playing.current?.stop(), []);
   const listVoices = useCallback(async (apiKey?: string) => {
     try {
       const r = await api<{ voices: { id: string; name: string; cloned: boolean }[] }>('/voice/voices', { body: { apiKey: apiKey || undefined } });
@@ -496,64 +513,187 @@ export function Voice() {
       setEl((v) => (!list[0] || list.some((x) => x.id === v.voiceId) ? v : { ...v, voiceId: (list.find((x) => x.cloned) ?? list[0])!.id }));
     } catch (x: any) { setNote({ ok: false, text: x.message }); }
   }, []);
-  // The saved voice is selected before the list arrives, so the list never replaces it with another.
-  useEffect(() => { if (ready && values.elevenlabs?.voiceId && !dirty) setEl((v) => ({ ...v, voiceId: values.elevenlabs!.voiceId! })); }, [ready, values]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Saved settings are shown again, so the page reopens as it was left.
+  useEffect(() => {
+    if (!ready) return;
+    if (values.elevenlabs?.voiceId && !dirty.el) setEl((v) => ({ ...v, voiceId: values.elevenlabs!.voiceId! }));
+    const s = values['self-hosted-voice'];
+    if (s && !dirty.sh) setSh((v) => ({ ...v, baseUrl: s.baseUrl ?? '', voice: s.voice ?? '', model: s.model ?? '' }));
+  }, [ready, values]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (ready && linked.elevenlabs) void listVoices(); }, [ready, linked.elevenlabs, listVoices]);
   if (!me || !e) return null;
   const set = (p: Partial<EnginePrefs>) => setE({ ...e, ...p });
-  const editEl = (p: Partial<typeof el>) => { setDirty(true); setEl({ ...el, ...p }); };
+  const editEl = (p: Partial<typeof el>) => { setDirty((d) => ({ ...d, el: true })); setEl({ ...el, ...p }); };
+  const editSh = (p: Partial<typeof sh>) => { setDirty((d) => ({ ...d, sh: true })); setSh({ ...sh, ...p }); };
+  const others = VOICE_SOURCES.filter((v) => !order.includes(v));
+  const toggle = (v: Src, on: boolean) => { setOrder(on ? [...order, v] : order.filter((x) => x !== v)); if (on) setOpen(v); };
+  const move = (v: Src, by: -1 | 1) => {
+    const i = order.indexOf(v), j = i + by;
+    if (i < 0 || j < 0 || j >= order.length) return;
+    const next = [...order]; [next[i], next[j]] = [next[j]!, next[i]!]; setOrder(next);
+  };
 
   const save = async () => {
     setNote(null); setBusy('save');
     try {
-      if (dirty && (el.apiKey.trim() || linked.elevenlabs)) await api('/connections/elevenlabs', { body: { apiKey: el.apiKey, voiceId: el.voiceId } });
-      if (e.voice === 'elevenlabs' && !linked.elevenlabs && !el.apiKey.trim()) throw new Error('Add your ElevenLabs API key first.');
-      await api('/me', { method: 'PATCH', body: { engine: { voice: e.voice, wake: e.wake } } });
+      if (dirty.el && (el.apiKey.trim() || linked.elevenlabs)) await api('/connections/elevenlabs', { body: { apiKey: el.apiKey, voiceId: el.voiceId } });
+      if (dirty.sh && sh.baseUrl.trim()) await api('/connections/self-hosted-voice', { body: sh });
+      if (order.includes('elevenlabs') && !linked.elevenlabs && !el.apiKey.trim()) throw new Error('Add your ElevenLabs API key, or switch ElevenLabs off.');
+      if (order.includes('self-hosted') && !linked['self-hosted-voice'] && !sh.baseUrl.trim()) throw new Error('Add your voice server’s address, or switch it off.');
+      await api('/me', { method: 'PATCH', body: { engine: { voices: order, workersVoice: e.workersVoice ?? 'melo', kokoroVoice: e.kokoroVoice ?? 'af_heart', wake: e.wake } } });
       await Promise.all([refreshMe(), reload()]);
-      setEl((v) => ({ ...v, apiKey: '' })); setDirty(false);
-      setNote({ ok: true, text: 'Saved.' });
+      setEl((v) => ({ ...v, apiKey: '' })); setSh((v) => ({ ...v, apiKey: '' })); setDirty({ el: false, sh: false });
+      setNote({ ok: true, text: order.includes('kokoro') && !kReady ? 'Saved. The on-device voice is skipped on this device until it is downloaded here.' : 'Saved.' });
     } catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setBusy(''); }
   };
-  const preview = async () => {
-    setNote(null); setBusy('preview');
+
+  // Preview plays the voice as set on this page, saved or not.
+  const preview = async (v: Src | 'device') => {
+    setNote(null); playing.current?.stop(); playing.current = null;
+    const line = PREVIEW_LINE(me.name);
+    if (v === 'device') { window.speechSynthesis?.cancel(); window.speechSynthesis?.speak(new SpeechSynthesisUtterance(line)); return; }
+    setBusy('preview-' + v);
     try {
-      const res = await fetch('/api/voice/tts', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: `Hi ${me.name || 'there'}, this is how I sound.`, apiKey: el.apiKey || undefined, voiceId: el.voiceId || undefined }) });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? 'ElevenLabs could not play that voice.');
-      const url = URL.createObjectURL(await res.blob()); const a = new Audio(url); a.onended = () => URL.revokeObjectURL(url); await a.play();
-    } catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setBusy(''); }
+      if (v === 'kokoro') {
+        const s = kokoroSpeak(line, e.kokoroVoice ?? 'af_heart'); playing.current = s;
+        await s.started; await s.done; return;
+      }
+      const body: Record<string, unknown> = { text: line, source: v };
+      if (v === 'workers') body.workersVoice = e.workersVoice ?? 'melo';
+      if (v === 'elevenlabs') Object.assign(body, { apiKey: el.apiKey || undefined, voiceId: el.voiceId || undefined });
+      if (v === 'self-hosted') Object.assign(body, { baseUrl: sh.baseUrl || undefined, voice: sh.voice || undefined, model: sh.model || undefined, apiKey: sh.apiKey || undefined });
+      const res = await fetch('/api/voice/tts', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? 'That voice could not speak.');
+      const url = URL.createObjectURL(await res.blob()); const a = new Audio(url);
+      playing.current = { stop: () => { a.pause(); URL.revokeObjectURL(url); } };
+      a.onended = () => URL.revokeObjectURL(url); await a.play();
+    } catch (x: any) { if (x?.message !== 'stopped') setNote({ ok: false, text: x.message }); } finally { setBusy(''); }
   };
+  const download = async () => {
+    setNote(null); setKProgress(0);
+    try { await kokoroDownload((p) => setKProgress(p)); setKReady(true); setNote({ ok: true, text: 'The on-device voice is ready on this device.' }); }
+    catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setKProgress(null); }
+  };
+  const removeKokoro = async () => { await kokoroRemove(); setKReady(false); setNote({ ok: true, text: 'Removed the on-device voice from this device.' }); };
+  const previewBtn = (v: Src | 'device', disabled = false) => <button type="button" className="bt" onClick={() => preview(v)} disabled={!!busy || disabled}>{busy === 'preview-' + v ? 'Playing…' : 'Preview'}</button>;
+
+  const settings = (v: Src) => {
+    if (v === 'workers') return (
+      <div className="eng-fields col">
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Voice</span>
+            <select className="in" value={e.workersVoice ?? 'melo'} onChange={(x) => set({ workersVoice: x.target.value })}>
+              {WORKERS_VOICES.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+            </select>
+          </label>
+          {previewBtn('workers')}
+        </div>
+        <p className="hint">Standard can speak for hours a day. Natural voices sound better but use far more of Cloudflare’s free daily allowance, about 30 replies, shared with the Workers AI brain. When it runs out, the next voice in your list is used until midnight UTC.</p>
+      </div>
+    );
+    if (v === 'kokoro') return (
+      <div className="eng-fields col">
+        {!kokoroSupported() ? <p className="hint">This browser cannot run the on-device voice.</p> : <>
+          <div className="eng-fields">
+            <label className="fld"><span className="k">Voice</span>
+              <select className="in" value={e.kokoroVoice ?? 'af_heart'} onChange={(x) => set({ kokoroVoice: x.target.value })}>
+                {KOKORO_VOICES.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}
+              </select>
+            </label>
+            {previewBtn('kokoro', !kReady)}
+          </div>
+          {kProgress !== null ? (
+            <div className="dl" role="progressbar" aria-label="Downloading the on-device voice" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(kProgress * 100)}>
+              <span className="dl-bar"><i style={{ width: `${Math.round(kProgress * 100)}%` }} /></span><span className="k">{kProgress < 1 ? `${Math.round(kProgress * 100)}%` : 'Preparing…'}</span>
+            </div>
+          ) : kReady ? (
+            <div className="eng-line"><span><b className="ok-dot" aria-hidden="true" />Ready on this device</span><button type="button" className="lnk" onClick={removeKokoro}>Remove from this device</button></div>
+          ) : (
+            <button type="button" className="bt fill" style={{ alignSelf: 'flex-start' }} onClick={download}>Download to this device · about {KOKORO_DOWNLOAD_MB} MB</button>
+          )}
+          <p className="hint">Downloaded once on each device, from the model’s official source, and checked before use. What Niko says never leaves the device. Quick on laptops; slower, and harder on the battery, on phones. Until it is downloaded on a device, Niko skips it there.</p>
+        </>}
+      </div>
+    );
+    if (v === 'self-hosted') return (
+      <div className="eng-fields col">
+        <label className="fld"><span className="k">Server address</span><input className="in" type="url" placeholder="https://voice.example.com/v1" value={sh.baseUrl} onChange={(x) => editSh({ baseUrl: x.target.value })} /></label>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Voice name</span><input className="in" type="text" placeholder="af_heart, or your cloned voice" value={sh.voice} onChange={(x) => editSh({ voice: x.target.value })} /></label>
+          <label className="fld"><span className="k">Model · optional</span><input className="in" type="text" placeholder="tts-1" value={sh.model} onChange={(x) => editSh({ model: x.target.value })} /></label>
+        </div>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">API key · optional</span><input className="in" type="password" autoComplete="off" placeholder={linked['self-hosted-voice'] ? 'Saved · type to replace' : 'Only if your server asks for one'} value={sh.apiKey} onChange={(x) => editSh({ apiKey: x.target.value })} /></label>
+          {previewBtn('self-hosted', !sh.baseUrl && !linked['self-hosted-voice'])}
+        </div>
+        <p className="hint">Any server with an OpenAI-compatible speech API works, such as Kokoro-FastAPI, or Chatterbox TTS Server, which can clone a voice from a few seconds of recording. It needs a public https address; Cloudflare Tunnel is a free way to give one to a NAS.</p>
+      </div>
+    );
+    return (
+      <div className="eng-fields col">
+        <label className="fld"><span className="k">ElevenLabs API key</span><input className="in" type="password" autoComplete="off" placeholder={linked.elevenlabs ? 'Saved · type to replace' : 'Paste key'} value={el.apiKey} onChange={(x) => editEl({ apiKey: x.target.value })} onBlur={() => el.apiKey.trim() && listVoices(el.apiKey)} /></label>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Voice</span>
+            <select className="in" value={el.voiceId} onChange={(x) => editEl({ voiceId: x.target.value })} disabled={!voices.length}>
+              {!voices.length && <option value="">Add your key to list your voices</option>}
+              {voices.map((x) => <option key={x.id} value={x.id}>{x.cloned ? `${x.name} · your cloned voice` : x.name}</option>)}
+            </select>
+          </label>
+          {previewBtn('elevenlabs', !el.apiKey && !linked.elevenlabs)}
+        </div>
+        <p className="hint">The key needs the Text to Speech and Voices permissions. ElevenLabs’ free plan refuses requests from cloud servers such as Niko’s, so a paid plan is needed.</p>
+      </div>
+    );
+  };
+  const row = (v: Src, i: number | null) => {
+    const on = i !== null;
+    return (
+      <li key={v} className={'vrow' + (on ? ' on' : '')}>
+        <div className="vrow-head">
+          <span className="n" aria-hidden="true">{on ? i + 1 : '–'}</span>
+          <button type="button" className="vrow-title" aria-expanded={open === v} onClick={() => setOpen(open === v ? null : v)}>
+            <b>{VOICE_NAMES[v]}</b><span className="sub">{VOICE_INFO[v].sub}</span>
+            {v === 'kokoro' && on && !kReady && kokoroSupported() && <span className="sub vrow-warn">Not downloaded on this device yet, so Niko skips it here.</span>}
+            {v === 'kokoro' && !kokoroSupported() && <span className="sub vrow-warn">This browser cannot run it.</span>}
+          </button>
+          <span className="k tag">{VOICE_INFO[v].tag}</span>
+          {on && <span className="vrow-move">
+            <button type="button" className="stp" onClick={() => move(v, -1)} disabled={i === 0} aria-label={`Move ${VOICE_NAMES[v]} up`}>↑</button>
+            <button type="button" className="stp" onClick={() => move(v, 1)} disabled={i === order.length - 1} aria-label={`Move ${VOICE_NAMES[v]} down`}>↓</button>
+          </span>}
+          <Switch on={on} onChange={(x) => toggle(v, x)} label={`Use ${VOICE_NAMES[v]}`} />
+        </div>
+        {open === v && <div className="vrow-body">{settings(v)}</div>}
+      </li>
+    );
+  };
+
   return (
     <SettingsPage title="Voice" sub="How Niko speaks to you, and how it listens." action={<button className="pri set-save" onClick={save} disabled={busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save changes'}</button>}>
       <NoteLine note={note} />
       <div className="eng-grid">
         <section className="g eng-card" aria-label="Speech out">
-          <span className="k" style={{ paddingBottom: 6 }}>Speech out</span>
-          <div className="eng-opt">
-            <Opt on={e.voice === 'elevenlabs'} onClick={() => set({ voice: 'elevenlabs' })} title="ElevenLabs" sub="Natural speech, including a voice you cloned in ElevenLabs. Needs your ElevenLabs key." />
-            {e.voice === 'elevenlabs' && (
-              <div className="eng-fields col">
-                <label className="fld"><span className="k">ElevenLabs API key</span><input className="in" type="password" autoComplete="off" placeholder={linked.elevenlabs ? 'Saved · type to replace' : 'Paste key'} value={el.apiKey} onChange={(x) => editEl({ apiKey: x.target.value })} onBlur={() => el.apiKey.trim() && listVoices(el.apiKey)} /></label>
-                <div className="eng-fields">
-                  <label className="fld"><span className="k">Voice</span>
-                    <select className="in" value={el.voiceId} onChange={(x) => editEl({ voiceId: x.target.value })} disabled={!voices.length}>
-                      {!voices.length && <option value="">Add your key to list your voices</option>}
-                      {voices.map((v) => <option key={v.id} value={v.id}>{v.cloned ? `${v.name} · your cloned voice` : v.name}</option>)}
-                    </select>
-                  </label>
-                  <button className="bt" onClick={preview} disabled={!!busy || (!el.apiKey && !linked.elevenlabs)}>{busy === 'preview' ? 'Playing…' : 'Preview voice'}</button>
-                </div>
-                <p className="hint">The key needs the Text to Speech and Voices permissions. ElevenLabs’ free plan refuses requests from cloud servers such as Niko’s, so a paid plan is needed.</p>
+          <span className="k" style={{ paddingBottom: 6 }}>Speech out · tried in this order</span>
+          <ol className="vlist">
+            {order.map((v, i) => row(v, i))}
+            <li className="vrow on last">
+              <div className="vrow-head">
+                <span className="n" aria-hidden="true">{order.length + 1}</span>
+                <span className="vrow-title static"><b>{VOICE_NAMES.device}</b><span className="sub">Built into this device. Always last, so Niko can always speak.</span></span>
+                <span className="k tag">Free</span>
+                {previewBtn('device')}
               </div>
-            )}
-          </div>
-          <div className="eng-opt last">
-            <Opt on={e.voice === 'device'} onClick={() => set({ voice: 'device' })} title="Device voice" sub="Free and built in. Also used whenever ElevenLabs is unavailable." tag="Free" />
-          </div>
+            </li>
+          </ol>
+          {others.length > 0 && <>
+            <span className="k" style={{ padding: '18px 0 6px' }}>Not in use</span>
+            <ul className="vlist">{others.map((v) => row(v, null))}</ul>
+          </>}
         </section>
         <section className="g eng-card listen" aria-label="Listening">
           <span className="k">Listening · speech in</span>
           <label className="fld"><span className="hint">How your voice is turned into text</span><select className="in" value="device" onChange={() => undefined}><option value="device">Device speech recognition · free</option><option value="workers" disabled>Workers AI speech-to-text · not available yet</option></select></label>
-          <div className="eng-line"><span>Wake when I say “Niko”</span><Switch on={!!e.wake} onChange={(v) => set({ wake: v })} label="Wake when I say Niko" /></div>
+          <div className="eng-line"><span>Wake when I say “Niko”</span><Switch on={!!e.wake} onChange={(x) => set({ wake: x })} label="Wake when I say Niko" /></div>
           <div className="eng-line"><span>After Niko answers, keep listening for a few seconds so you can carry on talking</span><span className="k later">On</span></div>
           <div className="eng-line"><span>Respond only to my voice <span className="k soon">Not available yet</span></span><Switch on={false} onChange={() => undefined} label="Respond only to my voice" disabled /></div>
         </section>

@@ -1,7 +1,7 @@
 // Home (the adaptive core) and the workspace (inbox, calendar, notes with the docked core and countdown).
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
-import { SEND_COUNTDOWN_SECONDS } from '@niko/shared';
+import { SEND_COUNTDOWN_SECONDS, VOICE_NAMES, voiceOrder } from '@niko/shared';
 import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
 import { useNiko, type Brief } from '../niko';
 
@@ -117,7 +117,7 @@ export function Home() {
         <div className={'caption ' + caption} key={caption}>
           <span className="k accent" role="status">{n.label}</span>
           <p>{n.line}</p>
-          {n.voiceProblem && n.me?.engine.voice === 'elevenlabs' && <Link to="/voice" className="voice-note">Using the device voice. {n.voiceProblem}</Link>}
+          {n.voiceProblem && <Link to="/voice" className="voice-note">Your first voice could not speak, so the next one in your list was used. {n.voiceProblem}</Link>}
         </div>
       </div>
       <div className="top">
@@ -125,7 +125,7 @@ export function Home() {
           <button className="ib g" style={{ width: 44, height: 44 }} onClick={() => setNav(!nav)} aria-label="Show or hide navigation" aria-expanded={nav}><Icon name="menu" /></button>
           <span className="wordmark">NIKO</span>
         </div>
-        <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : 'Workers AI'} · {n.me?.engine.voice === 'elevenlabs' ? 'ElevenLabs' : 'Device voice'}</span><span className="short">Engine</span></Link>
+        <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : n.me?.engine.brain === 'self-hosted-ai' ? 'Your model' : 'Workers AI'} · {VOICE_NAMES[voiceOrder(n.me?.engine)[0] ?? 'device']}</span><span className="short">Engine</span></Link>
       </div>
       <Dock className={'dock' + (nav ? ' show' : '')} />
       {wide && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}

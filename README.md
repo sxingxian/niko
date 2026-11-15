@@ -26,7 +26,7 @@ packages/ui    Niko styles, particle core, shared components
 
 ## Stack (free tiers)
 
-Cloudflare Workers + Static Assets + Workers AI · Neon Postgres · Resend · browser speech recognition and speech synthesis · optional ElevenLabs and your own AI key.
+Cloudflare Workers + Static Assets + Workers AI · Neon Postgres · Resend · browser speech recognition and speech synthesis · Workers AI and on-device (Kokoro) voices · optional voice server, ElevenLabs and your own AI key.
 
 ## Status: what works, what is untested, what is not built
 
@@ -45,7 +45,7 @@ Nothing here has run against live services yet. The code typechecks, all three f
 | "Niko, send it" with the 10-second countdown, enforced on the server, replies only | Built |
 | Per-user colour (shifting or fixed, custom picker) | Built |
 | AI: Workers AI, or your own key (OpenAI-compatible / Anthropic), with fallback | Built |
-| ElevenLabs voice, with device voice as fallback | Built |
+| Voices in an order you choose: Cloudflare (free), on-device Kokoro (free), your own voice server, ElevenLabs; device voice always last | Built |
 | Gmail, Outlook mail: read unread, send replies | Built, untested |
 | Google Calendar, Outlook Calendar: today's events | Built, untested |
 | Notion, OneNote: recent pages | Built, untested |

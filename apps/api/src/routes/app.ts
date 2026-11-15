@@ -1,10 +1,10 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
-import { APPS, checkAppKey, MAX_RELAY_BYTES, PROVIDERS, SEND_COUNTDOWN_SECONDS, WORKERS_MODELS, type Appearance, type Brain, type EnginePrefs, type Permissions } from '@niko/shared';
+import { APPS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, VOICE_SOURCES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, WORKERS_MODELS, type Appearance, type Brain, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
-import { audit, requireUser } from '../lib/session';
+import { audit, requireUser, tooMany } from '../lib/session';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
   telegramSetWebhook, type AppKeys, type EventItem, type MailItem, type NoteItem,
@@ -45,6 +45,9 @@ app.patch('/me', async (c) => {
       ...(e.brain ? { brain: (['custom-ai', 'self-hosted-ai'] as string[]).includes(e.brain) ? e.brain : 'workers-ai' } : {}),
       ...(e.model ? { model: e.model === 'large' ? 'large' : 'fast' } : {}),
       ...(e.voice ? { voice: e.voice === 'elevenlabs' ? 'elevenlabs' : 'device' } : {}),
+      ...(Array.isArray(e.voices) ? { voices: voiceOrder({ voices: e.voices }).slice(0, VOICE_SOURCES.length) } : {}),
+      ...(typeof e.workersVoice === 'string' && WORKERS_VOICES.some((v) => v.id === e.workersVoice) ? { workersVoice: e.workersVoice } : {}),
+      ...(typeof e.kokoroVoice === 'string' && KOKORO_VOICES.some((v) => v.id === e.kokoroVoice) ? { kokoroVoice: e.kokoroVoice } : {}),
       ...(typeof e.wake === 'boolean' ? { wake: e.wake } : {}),
       ...(typeof e.onlyMyVoice === 'boolean' ? { onlyMyVoice: e.onlyMyVoice } : {}),
       ...(typeof e.fallback === 'boolean' ? { fallback: e.fallback } : {}),
@@ -539,7 +542,7 @@ async function elevenLabsProblem(res: Response): Promise<{ code: string; message
   const code = String(j?.detail?.status ?? j?.detail?.code ?? res.status);
   const text = String(j?.detail?.message ?? '');
   if (code === 'detected_unusual_activity' || /unusual activity|free tier usage disabled/i.test(text))
-    return { code, message: 'ElevenLabs refused: its free plan blocks requests that come from cloud servers, which is where Niko runs. A paid ElevenLabs plan (Starter or above) works. Until then Niko uses the device voice.' };
+    return { code, message: 'ElevenLabs refused: its free plan blocks requests that come from cloud servers, which is where Niko runs. A paid ElevenLabs plan (Starter or above) works.' };
   if (code === 'missing_permissions' || /permission/i.test(text))
     return { code, message: 'Your ElevenLabs key is missing the Text to Speech permission (and Voices: Read, to list voices). Edit the key in ElevenLabs → API keys, or make a new one.' };
   if (code === 'invalid_api_key' || res.status === 401) return { code, message: 'ElevenLabs did not accept that key. Check it was copied in full.' };
@@ -563,13 +566,93 @@ app.post('/voice/voices', async (c) => {
   return c.json({ voices: voices.filter((v: { id: string }) => VOICE_ID.test(v.id)) });
 });
 
+// ---------------------------------------------------------------- speech out
+// One endpoint for every voice that is made on a server: Cloudflare's own (Workers AI), the user's own voice server,
+// and ElevenLabs. Kokoro runs on the device and the device voice in the browser, so neither comes here.
+// "Preview" may pass settings that are not saved yet; they are used for that one request only.
+const TTS_MAX_CHARS = 800;
+const TTS_MAX_BYTES = 8 * 1024 * 1024;
+type TtsBody = { text?: string; source?: string; workersVoice?: string; apiKey?: string; voiceId?: string; baseUrl?: string; voice?: string; model?: string };
+const mp3 = (body: BodyInit) => new Response(body, { headers: { 'content-type': 'audio/mpeg', 'cache-control': 'no-store' } });
+const ttsError = (c: { json: (b: unknown, s: any) => Response }, error: string, status = 502) => c.json({ error }, status);
+
 app.post('/voice/tts', async (c) => {
-  const b = await c.req.json<{ text?: string; apiKey?: string; voiceId?: string }>();
-  const text = String(b.text ?? '').slice(0, 800);
+  const b = await c.req.json<TtsBody>().catch(() => ({} as TtsBody));
+  const text = String(b.text ?? '').replace(/\s+/g, ' ').trim().slice(0, TTS_MAX_CHARS);
+  if (!text) return ttsError(c, 'Nothing to say.', 400);
+  const u = c.get('user');
+  // Every voice here uses something shared or paid for, so each account gets a generous but finite number of lines.
+  if (await tooMany(c, 'tts:' + u.id, 150, 15)) return ttsError(c, 'Niko has spoken a lot in the last few minutes. The device voice is used for now.', 429);
+  const source = b.source === 'workers' || b.source === 'self-hosted' ? b.source : 'elevenlabs';
+  if (source === 'workers') return workersTts(c, text, typeof b.workersVoice === 'string' ? b.workersVoice : (u.engine as Partial<EnginePrefs>)?.workersVoice);
+  if (source === 'self-hosted') return selfHostedTts(c, text, b);
+  return elevenLabsTts(c, text, b);
+});
+
+/** Workers AI returns audio in different shapes depending on the model and runtime. */
+async function audioBytes(out: unknown): Promise<Uint8Array | null> {
+  if (!out) return null;
+  if (out instanceof Uint8Array) return out;
+  if (out instanceof ArrayBuffer) return new Uint8Array(out);
+  if (out instanceof ReadableStream) return new Uint8Array(await new Response(out).arrayBuffer());
+  if (out instanceof Response) return new Uint8Array(await out.arrayBuffer());
+  const a = typeof out === 'string' ? out : (out as { audio?: unknown }).audio;
+  if (typeof a === 'string') { const bin = atob(a.replace(/^data:[^,]*,/, '')); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return u8; }
+  return null;
+}
+
+async function workersTts(c: any, text: string, voiceId: string | undefined): Promise<Response> {
+  const v = WORKERS_VOICES.find((x) => x.id === voiceId) ?? WORKERS_VOICES[0]!;
+  try {
+    const out = v.speaker
+      ? await c.env.AI.run(v.model as any, { text, speaker: v.speaker, encoding: 'mp3' } as any, { returnRawResponse: true } as any)
+      : await c.env.AI.run(v.model as any, { prompt: text, lang: 'en' } as any);
+    const bytes = await audioBytes(out);
+    if (!bytes?.length) throw new Error('empty audio');
+    return mp3(bytes);
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? e);
+    console.warn(`workers-ai tts ${v.model}: ${msg.slice(0, 200)}`);
+    // Cloudflare stops Workers AI for the day once the free allocation is used.
+    if (/4006|daily free allocation|neurons|quota|limit/i.test(msg)) return ttsError(c, 'Cloudflare’s free voice allowance for today is used up; it resets at midnight UTC.');
+    return ttsError(c, 'Cloudflare’s voice did not answer just now.');
+  }
+}
+
+/** An OpenAI-compatible speech server (for example Kokoro-FastAPI or Chatterbox TTS Server) at a public https address. */
+function speechUrl(base: URL): string {
+  const root = base.toString().replace(/\/+$/, '');
+  if (/\/audio\/speech$/.test(root)) return root;
+  return /\/v1$/.test(root) ? `${root}/audio/speech` : `${root}/v1/audio/speech`;
+}
+async function selfHostedTts(c: any, text: string, b: TtsBody): Promise<Response> {
+  const saved = (await credentials(c.env, c.get('db'), c.get('user').id, 'self-hosted-voice')) as Record<string, string> | null;
+  const pick = (k: 'baseUrl' | 'voice' | 'model' | 'apiKey') => (typeof b[k] === 'string' && b[k]!.trim() ? b[k]!.trim() : saved?.[k] ?? '').slice(0, 500);
+  const base = publicHttpsUrl(pick('baseUrl'));
+  if (!base) return ttsError(c, saved ? 'The voice server address must be a public https address.' : 'Your voice server is not set up yet.', 404);
+  const key = pick('apiKey');
+  let res: Response;
+  try {
+    res = await fetch(speechUrl(base), {
+      method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(20_000),
+      headers: { 'content-type': 'application/json', accept: 'audio/mpeg', ...(key ? { authorization: `Bearer ${key}` } : {}) },
+      body: JSON.stringify({ model: pick('model') || 'tts-1', voice: pick('voice') || 'alloy', input: text, response_format: 'mp3' }),
+    });
+  } catch { return ttsError(c, 'Your voice server did not answer. Check it is running and reachable at its https address.'); }
+  // Redirects are not followed, so a public address cannot bounce the request somewhere else.
+  if (res.status >= 300 && res.status < 400) return ttsError(c, 'Your voice server tried to redirect the request. Use its final https address.');
+  if (res.status === 401 || res.status === 403) return ttsError(c, 'Your voice server refused the request. Check its API key.');
+  if (!res.ok) return ttsError(c, `Your voice server answered ${res.status}. Check the voice and model names.`);
+  if (!/^audio\//.test(res.headers.get('content-type') ?? '')) return ttsError(c, 'Your voice server did not send audio back. Check the address ends at its OpenAI-compatible API.');
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  if (bytes.length > TTS_MAX_BYTES) return ttsError(c, 'Your voice server sent back more audio than expected.');
+  return new Response(bytes, { headers: { 'content-type': res.headers.get('content-type')!, 'cache-control': 'no-store' } });
+}
+
+async function elevenLabsTts(c: any, text: string, b: TtsBody): Promise<Response> {
   const saved = await credentials(c.env, c.get('db'), c.get('user').id, 'elevenlabs');
-  // "Preview voice" can try a key and voice before they are saved.
   const s = { apiKey: (typeof b.apiKey === 'string' && b.apiKey.trim()) || saved?.apiKey, voiceId: (typeof b.voiceId === 'string' && VOICE_ID.test(b.voiceId) && b.voiceId) || saved?.voiceId };
-  if (!s.apiKey || !s.voiceId || !text) return c.json({ error: 'ElevenLabs is not linked.' }, 404);
+  if (!s.apiKey || !s.voiceId) return ttsError(c, 'ElevenLabs is not linked.', 404);
   const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(s.voiceId)}/stream`, {
     method: 'POST', headers: { 'xi-api-key': String(s.apiKey).slice(0, 200), 'content-type': 'application/json', accept: 'audio/mpeg' },
     body: JSON.stringify({ text, model_id: 'eleven_flash_v2_5' }),
@@ -579,7 +662,7 @@ app.post('/voice/tts', async (c) => {
     console.error(`elevenlabs tts ${res.status} ${why.code}`);
     return c.json({ error: why.message, code: why.code }, 502);
   }
-  return new Response(res.body, { headers: { 'content-type': 'audio/mpeg', 'cache-control': 'no-store' } });
-});
+  return mp3(res.body!);
+}
 
 export { getConnection };
