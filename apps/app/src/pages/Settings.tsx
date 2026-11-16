@@ -2,7 +2,7 @@
 import { startRegistration } from '@simplewebauthn/browser';
 import { passkeyError } from '../passkeyError';
 import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSpeak, kokoroSpeed, kokoroSupported, kokoroTooSlow } from '../kokoro';
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { AI_PRESETS, aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, presetOf, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
 import { type CalendarLink } from '@niko/shared';
@@ -34,12 +34,21 @@ export function SettingsLayout() {
   const nav = useNavigate();
   const { pathname } = useLocation();
   const signOut = async () => { await api('/auth/sign-out', { method: 'POST' }); await refreshMe(); nav('/sign-in', { replace: true }); };
+  // Each settings page opens at its top (the browser would otherwise keep the scroll of the page before), and on a
+  // phone the section tabs slide so the open one is in view.
+  const navRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    window.scrollTo(0, 0);
+    for (const el of [document.scrollingElement, document.body, document.getElementById('root')]) if (el) el.scrollTop = 0;
+    const bar = navRef.current, on = bar?.querySelector<HTMLElement>('.nv.active');
+    if (bar && on && bar.scrollWidth > bar.clientWidth) bar.scrollTo({ left: bar.scrollLeft + on.getBoundingClientRect().left - bar.getBoundingClientRect().left - (bar.clientWidth - on.offsetWidth) / 2, behavior: 'smooth' });
+  }, [pathname]);
   return (
     <div className="set">
       <aside className="set-side">
         <Link to="/" className="set-back"><span aria-hidden="true">←</span> Back to Niko</Link>
         <div className="set-brand"><span className="wordmark">NIKO</span><span className="k pill">Settings</span></div>
-        <nav aria-label="Settings sections" className="set-nav">
+        <nav ref={navRef} aria-label="Settings sections" className="set-nav">
           {SETTINGS.map(([to, name]) => <NavLink key={to} to={to} className="nv">{name}</NavLink>)}
         </nav>
         <div className="set-foot">
