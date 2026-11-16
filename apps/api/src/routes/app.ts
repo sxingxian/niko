@@ -1,11 +1,13 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
-import { cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
+import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, sessions, users } from '@niko/db';
+import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
 import { accessState, APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
 import { audit, requireUser, tooMany } from '../lib/session';
+import { hashPassword, verifyPassword } from '../lib/password';
+import { sendEmail } from '../lib/email';
 import { accessFor, paymentSettings } from '../billing';
 import { eventDetail, mailDetail, noteDetail } from '../details';
 import { BrainFail, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveKeys, testEntry, think } from '../brains';
@@ -42,6 +44,29 @@ app.get('/me', async (c) => {
   const u = c.get('user');
   const weather = !!(await getConnection(c.get('db'), u.id, 'open-meteo').catch(() => null));
   return c.json({ id: u.id, email: u.email, name: u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: await offFor(c.get('db'), u), glanceLimits: await limitsFor(c.get('db'), u), access: await accessFor(c.env, c.get('db'), u) });
+});
+
+// Changing the password while signed in: the current one is needed. Every other session (other devices, the admin
+// portal) is signed out, this one stays, and the account's email is told.
+app.post('/me/password', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  if (await tooMany(c, 'pw-change:' + u.id, 5, 15)) return c.json({ error: 'Too many tries. Wait 15 minutes and try again.' }, 429);
+  const b = await c.req.json<{ current?: unknown; password?: unknown }>().catch(() => ({} as { current?: unknown; password?: unknown }));
+  if (typeof b.current !== 'string' || !b.current || !(await verifyPassword(db, b.current, u.passwordHash ?? null))) {
+    await audit(c, 'password.change_failed', {}, u.id);
+    return c.json({ error: 'Your current password is not correct.' }, 400);
+  }
+  const next = typeof b.password === 'string' ? b.password : '';
+  const bad = passwordProblem(next, u.email);
+  if (bad) return c.json({ error: bad }, 400);
+  if (next === b.current) return c.json({ error: 'Choose a password different from your current one.' }, 400);
+  await db.update(users).set({ passwordHash: await hashPassword(db, next) }).where(eq(users.id, u.id));
+  await db.delete(sessions).where(and(eq(sessions.userId, u.id), ne(sessions.id, c.get('sessionId'))));
+  await audit(c, 'password.changed', {}, u.id);
+  c.executionCtx.waitUntil(sendEmail(c.env, u.email, 'Your Niko password was changed', 'Your password was changed',
+    'The password for your Niko account was just changed, and every other device was signed out. If this wasn’t you, reset your password now.',
+    { label: 'Reset my password', url: `${c.get('site').appUrl}/forgot` }).then(() => undefined, () => undefined));
+  return c.json({ ok: true });
 });
 
 app.patch('/me', async (c) => {

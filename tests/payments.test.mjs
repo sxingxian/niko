@@ -635,6 +635,30 @@ await ok('the admin list shows each account’s payment state', async () => {
   assert.equal(by['alex@example.com'].access.kind, 'admin');
 });
 
+await ok('a signed-in person changes their password; other devices are signed out and they are told', async () => {
+  const here = new Browser(), there = new Browser();
+  assert.equal((await here.post('/auth/sign-in', { email: 'jun@example.com', password: PW })).status, 200);
+  assert.equal((await there.post('/auth/sign-in', { email: 'jun@example.com', password: PW })).status, 200);
+  let r = await here.post('/me/password', { current: 'not-my-password', password: 'a brand new long passphrase 42' });
+  assert.equal(r.status, 400); assert.match(r.data.error, /current password is not correct/);
+  r = await here.post('/me/password', { current: PW, password: PW });
+  assert.equal(r.status, 400, 'the same password again is refused');
+  r = await here.post('/me/password', { current: PW, password: 'short' });
+  assert.equal(r.status, 400, 'a weak new password is refused');
+  const before = emails.length;
+  r = await here.post('/me/password', { current: PW, password: 'a brand new long passphrase 42' });
+  assert.equal(r.status, 200);
+  await new Promise((res) => setTimeout(res, 50));
+  assert.equal((await here.get('/me')).status, 200, 'this device stays signed in');
+  assert.equal((await there.get('/me')).status, 401, 'other devices are signed out');
+  assert.ok(emails.slice(before).some((m) => m.to === 'jun@example.com' && /password was changed/i.test(m.subject)), 'an email tells them');
+  assert.equal((await new Browser().post('/auth/sign-in', { email: 'jun@example.com', password: PW })).status, 401, 'the old password no longer works');
+  assert.equal((await new Browser().post('/auth/sign-in', { email: 'jun@example.com', password: 'a brand new long passphrase 42' })).status, 200, 'the new one does');
+  const log = await q("select action from audit_log where action like 'password.%' order by created_at");
+  assert.deepEqual(log.map((x) => x.action).filter((a) => a !== 'password.reset'), ['password.change_failed', 'password.changed']);
+  assert.equal((await new Browser().post('/me/password', { current: 'x', password: 'y' })).status, 401, 'signed out: refused');
+});
+
 await sqlc.end();
 await closePools();
 try { run('pg_ctl', ['-D', join(dir, 'data'), '-m', 'immediate', 'stop']); } catch { /* already stopping */ }

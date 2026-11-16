@@ -417,6 +417,15 @@ select.in option { color: #04070c; }
 .set-head p { font: 400 15px system-ui, sans-serif; color: #b9c2cf; }
 .set-save { height: 48px; font-size: 15px; }
 .set-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 24px; }
+/* Account: You and Passkeys on the left, Billing on the right; cards as tall as their content. */
+.set-grid.acct-grid { flex: none; align-items: start; grid-template-areas: 'you bill' 'keys bill'; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto 1fr; }
+/* A long plan button wraps inside the card on a narrow screen instead of running past it. */
+.acct-grid > [aria-label='Billing'] .pri { max-width: 100%; white-space: normal; height: auto; min-height: 52px; padding-top: 12px; padding-bottom: 12px; text-align: center; line-height: 1.3; }
+.acct-grid > [aria-label='You'] { grid-area: you; }
+.acct-grid > [aria-label='Billing'] { grid-area: bill; }
+.acct-grid > [aria-label='Passkeys'] { grid-area: keys; }
+.acct-grid .set-note { margin-top: 0; }
+.acct-name { display: flex; flex-direction: column; gap: 12px; }
 /* Settings sit on a plain dark background, where a frosted-glass blur shows nothing but costs a full redraw of
    every panel on each frame it moves, so it is switched off here. */
 .set .g { -webkit-backdrop-filter: none; backdrop-filter: none; }
@@ -444,6 +453,7 @@ select.in option { color: #04070c; }
   .set-foot { display: none; }
   .set-main { padding: 24px 16px; }
   .set-grid { grid-template-columns: 1fr; }
+  .set-grid.acct-grid { grid-template-columns: 1fr; grid-template-areas: 'you' 'bill' 'keys'; }
 }
 
 /* ---- settings pages */

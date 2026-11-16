@@ -12,7 +12,7 @@ import { AI_OPTION_GROUPS, aiAllowed, brainOption, hearOption, imageOption, voic
 import { IMAGE_PROVIDERS, imageOrder, imagePresetOf, MAX_IMAGE_KEYS, type ImageKeyInfo, type ImageProvider, type ImageSource } from '@niko/shared';
 import { HEAR_PROVIDERS, hearOrder, hearPresetOf, MAX_HEAR_KEYS, type HearKeyInfo, type HearProvider, type HearSource } from '@niko/shared';
 import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, PAGE_SIZES, VOICE_NAMES, VOICE_PROVIDERS, VOICE_SOURCES, voiceName, voiceOrder, voicePresetOf, WORKERS_VOICES, type VoiceKeyInfo, type VoiceProvider, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
-import { api, Field, Icon, setAppearance, Switch } from '@niko/ui';
+import { api, Field, Icon, PasswordField, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
 import { captureSupported, captureUtterance, transcribe, type Capture } from '../listen';
 
@@ -1618,9 +1618,51 @@ export function Appearance() {
   );
 }
 
+// Changing the password: the current one first. Other devices are signed out; this one stays signed in.
+function ChangePassword({ email, onDone, onCancel }: { email: string; onDone: () => void; onCancel: () => void }) {
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    setErr(''); setBusy(true);
+    try { await api('/me/password', { body: { current, password: next } }); onDone(); }
+    catch (x: any) { setErr(x.message ?? 'That did not work.'); } finally { setBusy(false); }
+  };
+  return (
+    <form onSubmit={save} className="cal-form">
+      <h2 className="sheet-h">Change password</h2>
+      <p className="sub">Other devices are signed out when you change it. This one stays signed in.</p>
+      {/* For password managers: which account this is. */}
+      <input type="email" name="username" autoComplete="username" value={email} readOnly hidden />
+      <PasswordField label="Current password" autoComplete="current-password" value={current} onChange={(v) => { setErr(''); setCurrent(v); }} />
+      <PasswordField label="New password" autoComplete="new-password" value={next} onChange={(v) => { setErr(''); setNext(v); }} meter />
+      {err && <p className="err" role="alert">{err}</p>}
+      <div className="sheet-actions">
+        <button type="button" className="sec" onClick={onCancel}>Cancel</button>
+        <button className="pri" disabled={busy || !current || !next}>{busy ? 'Saving…' : 'Change password'}</button>
+      </div>
+      {sent ? <p className="ok cal-keep" role="status">A reset link is on its way to {email}. It works once, for 30 minutes.</p>
+        : <button type="button" className="lnk cal-keep" style={{ alignSelf: 'flex-start' }} onClick={async () => { await api('/auth/forgot', { body: { email } }).catch(() => undefined); setSent(true); }}>Forgot your current password? Email me a reset link</button>}
+    </form>
+  );
+}
+
 export function Account() {
   const [keys, setKeys] = useState<{ id: string; label: string; rpId: string }[]>([]);
-  const { me } = useNiko();
+  const { me, refreshMe } = useNiko();
+  const pwDlg = useRef<HTMLDialogElement>(null);
+  const [pwOpen, setPwOpen] = useState(false);
+  const [naming, setNaming] = useState<string | null>(null);
+  const saveName = async (e: FormEvent) => {
+    e.preventDefault();
+    if (naming === null) return;
+    try { await api('/me', { method: 'PATCH', body: { name: naming.trim() } }); await refreshMe(); setNaming(null); setNote({ ok: true, text: 'Name saved.' }); }
+    catch (x: any) { setNote({ ok: false, text: x.message }); }
+  };
   const [rpId, setRpId] = useState('');
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const load = useCallback(() => api('/me/passkeys').then((r) => { setKeys(r.passkeys); setRpId(r.rpId); }).catch(() => undefined), []);
@@ -1638,10 +1680,23 @@ export function Account() {
   return (
     <SettingsPage title="Account" sub="Your sign-in details, billing and passkeys.">
       {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
-      <div className="set-grid">
+      <div className="set-grid acct-grid">
         <section className="set-card" aria-label="You">
-          <span className="k">You</span>
-          <div className="row"><span className="txt"><b>{me?.name || 'No name set'}</b><span className="sub">{me?.email}</span></span><span className="k">{me?.role}</span></div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}><span className="k">You</span>{me?.role === 'admin' && <span className="k">Admin</span>}</div>
+          {naming === null ? (
+            <div className="row"><span className="txt"><b>{me?.name || 'No name set'}</b><span className="sub">{me?.email}</span></span>
+              <button className="bt" onClick={() => setNaming(me?.name ?? '')}>Edit name</button></div>
+          ) : (
+            <form className="acct-name" onSubmit={saveName}>
+              <Field label="Name"><input className="in" autoFocus maxLength={80} autoComplete="name" value={naming} onChange={(e) => setNaming(e.target.value)} /></Field>
+              <div className="sheet-actions"><button type="button" className="sec" onClick={() => setNaming(null)}>Cancel</button><button className="pri">Save</button></div>
+            </form>
+          )}
+          <div className="row"><Icon name="lock" /><span className="txt"><b>Password</b><span className="sub">Used with your email to sign in</span></span>
+            <button className="bt" onClick={() => { setNote(null); setPwOpen(true); pwDlg.current?.showModal(); }}>Change</button></div>
+          <dialog ref={pwDlg} className="sheet" onClose={() => setPwOpen(false)}>
+            {pwOpen && me && <ChangePassword email={me.email} onCancel={() => pwDlg.current?.close()} onDone={() => { pwDlg.current?.close(); setNote({ ok: true, text: 'Password changed. Other devices were signed out, and an email was sent to confirm it.' }); }} />}
+          </dialog>
         </section>
         <BillingCard />
         <section className="set-card" aria-label="Passkeys">
