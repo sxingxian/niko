@@ -54,6 +54,8 @@ const unflat = (params) => {
   return out;
 };
 globalThis.fetch = async (input, init = {}) => {
+  // Like Cloudflare Workers: redirect must be 'follow' or 'manual'.
+  if (init.redirect && !['follow', 'manual'].includes(init.redirect)) throw new TypeError(`Invalid redirect value, must be one of "follow" or "manual"`);
   const u = new URL(String(input));
   if (u.hostname === 'api.resend.com') { const b = JSON.parse(init.body); emails.push({ to: b.to[0], subject: b.subject, html: b.html }); return Response.json({ id: 'em_' + emails.length }); }
   if (u.hostname !== 'api.stripe.com') throw new Error('unexpected fetch ' + u);

@@ -73,8 +73,14 @@ export async function stripe<T = any>(env: StripeEnv, method: 'GET' | 'POST' | '
       ...(idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}),
     },
     body: method === 'POST' ? body : undefined,
-    redirect: 'error',
+    // Workers' fetch has no redirect: 'error'. Don't follow redirects: Stripe never sends one, so any 3xx is refused
+    // below, and the secret key is never carried to another address.
+    redirect: 'manual',
   });
+  if (res.status >= 300 && res.status < 400) {
+    console.error('stripe redirect refused', method, res.status);
+    throw new StripeError('Stripe answered in an unexpected way. Try again in a moment.', 502);
+  }
   const data = await res.json().catch(() => ({})) as any;
   if (!res.ok) {
     console.error('stripe error', method, path.replace(/\/(cs|sub|pi|cus)_[A-Za-z0-9]+/g, '/$1_…'), res.status, data?.error?.code ?? '', data?.error?.message ?? '');
