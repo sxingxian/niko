@@ -1,7 +1,7 @@
 // Pictures: each image service is called the way it expects, only real pictures come back, a service that declines a
 // picture hands it to the next without resting, and the order switches and rests on failure like the brains and voices.
 import assert from 'node:assert/strict';
-import { Declined, imageKeyProblem, paint, paintWithKey, sniffImage, workersImage } from '../apps/api/src/images.ts';
+import { Declined, imageKeyProblem, paint, paintWithKey, serverKey, sniffImage, workersImage } from '../apps/api/src/images.ts';
 import { pictureCommand, takeImageTag } from '../apps/app/src/speech.ts';
 import { store, fakeDb } from './brains-stubs.mjs';
 
@@ -171,6 +171,21 @@ await ok('Cloudflare is used until the order is set; an empty order means pictur
 await ok('a resting service is tried last', async () => {
   reply = () => jpegRes();
   const r = await paint(env, fakeDb, { id: 'u', engine: { images: ['ikey:k2', 'workers'], imageRest: { 'ikey:k2': { until: Date.now() + 60_000, why: 'limit' } } } }, 'x', 'square');
+  assert.equal(r.used, 'workers');
+});
+
+await ok('your own image server: the saved address (with /v1 added), no key header when it has no key', async () => {
+  store.creds = { 'self-hosted-image': { baseUrl: 'https://nas.example.com', model: 'flux-dev' } };
+  calls = []; reply = () => Response.json({ data: [{ b64_json: b64(JPEG) }] });
+  const r = await paint(env, fakeDb, { id: 'u', engine: { images: ['self-hosted', 'workers'] } }, 'x', 'square');
+  assert.equal(r.used, 'self-hosted'); assert.equal(r.label, 'Your image server');
+  assert.equal(calls[0].url, 'https://nas.example.com/v1/images/generations'); assert.equal(calls[0].init.headers.authorization, undefined);
+  assert.equal(JSON.parse(calls[0].init.body).model, 'flux-dev');
+  assert.equal(serverKey({ baseUrl: 'https://x.example.com/api/v2/', apiKey: 'K' }, 'S').baseUrl, 'https://x.example.com/api/v2');
+});
+await ok('your own image server not set up: the next one paints', async () => {
+  store.creds = {};
+  const r = await paint(env, fakeDb, { id: 'u', engine: { images: ['self-hosted', 'workers'] } }, 'x', 'square');
   assert.equal(r.used, 'workers');
 });
 

@@ -89,12 +89,13 @@ function toWav(chunks: Float32Array[], rate: number): Blob {
 }
 
 /** Sends a recording to Niko's server to be turned into text. `source`/`key` try one service (the Test button). */
-export async function transcribe(wav: Blob, extra: { source?: string; key?: unknown } = {}): Promise<{ text: string; used: string }> {
+export async function transcribe(wav: Blob, extra: { source?: string; key?: unknown; server?: unknown } = {}): Promise<{ text: string; used: string }> {
   const form = new FormData();
   form.set('audio', wav, 'speech.wav');
   form.set('lang', (navigator.language || 'en').replace(/[^A-Za-z-]/g, '').slice(0, 10));
   if (extra.source) form.set('source', extra.source);
   if (extra.key) form.set('key', JSON.stringify(extra.key));
+  if (extra.server) form.set('server', JSON.stringify(extra.server));
   const res = await fetch('/api/voice/stt', { method: 'POST', credentials: 'same-origin', body: form });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(j.error ?? 'That could not be heard.');

@@ -107,6 +107,16 @@ export const PROVIDERS: ProviderDef[] = [
     { key: 'model', label: 'Model name', type: 'text', optional: true, shown: true },
     { key: 'apiKey', label: 'API key', type: 'password', optional: true },
   ], can: { read: false, send: false } },
+  { id: 'self-hosted-image', name: 'Your own image server', group: 'ai', how: 'An image model server you run · OpenAI-compatible', kind: 'token', hidden: true, fields: [
+    { key: 'baseUrl', label: 'Server address', type: 'url', placeholder: 'https://', shown: true },
+    { key: 'model', label: 'Model name', type: 'text', optional: true, shown: true },
+    { key: 'apiKey', label: 'API key', type: 'password', optional: true },
+  ], can: { read: false, send: false } },
+  { id: 'self-hosted-hear', name: 'Your own speech-to-text server', group: 'ai', how: 'A speech-to-text server you run · OpenAI-compatible', kind: 'token', hidden: true, fields: [
+    { key: 'baseUrl', label: 'Server address', type: 'url', placeholder: 'https://', shown: true },
+    { key: 'model', label: 'Model name', type: 'text', optional: true, shown: true },
+    { key: 'apiKey', label: 'API key', type: 'password', optional: true },
+  ], can: { read: false, send: false } },
   { id: 'self-hosted-ai', name: 'Self-hosted model', group: 'ai', how: 'A model server you run · OpenAI-compatible', kind: 'token', hidden: true, fields: [
     { key: 'baseUrl', label: 'Server address', type: 'url', placeholder: 'https://', shown: true },
     { key: 'model', label: 'Model name', type: 'text', optional: true, shown: true },
@@ -185,8 +195,8 @@ export const VOICE_PROVIDERS: { id: string; provider: VoiceProvider; name: strin
 ];
 /** Where speech in (your voice, turned into text) can come from: Cloudflare's own, or any number of the user's
  * speech-to-text keys ("skey:<id>"). The device's own speech recognition is always last, and always listens for "Niko". */
-export type HearSource = 'workers' | `skey:${string}`;
-export const HEAR_ENTRY = /^(workers|skey:[a-z0-9]{1,16})$/;
+export type HearSource = 'workers' | 'self-hosted' | `skey:${string}`;
+export const HEAR_ENTRY = /^(workers|self-hosted|skey:[a-z0-9]{1,16})$/;
 export type HearProvider = 'openai' | 'deepgram' | 'elevenlabs' | 'fishaudio' | 'google' | 'azure';
 export interface HearKeyInfo { id: string; label: string; provider: HearProvider; model: string; baseUrl: string; region: string }
 export const HEAR_PROVIDERS: { id: string; provider: HearProvider; name: string; baseUrl?: string; models?: string[]; note: string }[] = [
@@ -212,8 +222,8 @@ export function hearOrder(e: Partial<EnginePrefs> | undefined): HearSource[] {
 
 /** Where Niko's pictures come from: Cloudflare's own (FLUX.1 schnell, on the free daily allowance), or any number of
  * the user's image keys ("ikey:<id>"), tried in the order set on the Engine screen. */
-export type ImageSource = 'workers' | `ikey:${string}`;
-export const IMAGE_ENTRY = /^(workers|ikey:[a-z0-9]{1,16})$/;
+export type ImageSource = 'workers' | 'self-hosted' | `ikey:${string}`;
+export const IMAGE_ENTRY = /^(workers|self-hosted|ikey:[a-z0-9]{1,16})$/;
 export const MAX_IMAGE_KEYS = 10;
 /** Image services a key can be added for. "openai" also covers any service with an OpenAI-compatible images API. */
 export type ImageProvider = 'openai' | 'google' | 'stability' | 'fal' | 'replicate' | 'bfl' | 'ideogram';

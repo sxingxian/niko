@@ -91,7 +91,8 @@ export async function transcribeWithKey(k: HearKey, audio: Uint8Array, lang: str
     const root = publicHttpsUrl(k.baseUrl)!.toString().replace(/\/+$/, '');
     const form = new FormData();
     form.set('file', wavFile(audio)); form.set('model', k.model || 'gpt-4o-mini-transcribe'); if (short) form.set('language', short);
-    return String((await call(`${root}/audio/transcriptions`, { method: 'POST', headers: { authorization: `Bearer ${k.apiKey}` }, body: form }))?.text ?? '').trim();
+    // A server of the user's own may have no key at all.
+    return String((await call(`${root}/audio/transcriptions`, { method: 'POST', headers: k.apiKey ? { authorization: `Bearer ${k.apiKey}` } : {}, body: form }))?.text ?? '').trim();
   }
   if (k.provider === 'deepgram') {
     const j = await call(`https://api.deepgram.com/v1/listen?model=${encodeURIComponent(k.model || 'nova-3')}&smart_format=true${short ? `&language=${encodeURIComponent(short)}` : ''}`, {
@@ -118,6 +119,14 @@ export async function transcribeWithKey(k: HearKey, audio: Uint8Array, lang: str
     method: 'POST', headers: { 'ocp-apim-subscription-key': k.apiKey, 'content-type': 'audio/wav; codecs=audio/pcm; samplerate=16000', accept: 'application/json' }, body: audio });
   if (j?.RecognitionStatus && j.RecognitionStatus !== 'Success' && j.RecognitionStatus !== 'NoMatch') throw new BrainFail(`azure ${j.RecognitionStatus}`, 'down', MIN, `Azure said: ${j.RecognitionStatus}.`);
   return String(j?.DisplayText ?? '').trim();
+}
+
+/** The user's own speech-to-text server, as saved in Connections (or typed on the Voice screen, for Test). An address
+ * without a version path gets /v1; with no model named, "whisper-1", the name such servers commonly answer to. */
+export function hearServerKey(s: { baseUrl?: string; model?: string; apiKey?: string } | null): HearKey | null {
+  if (!s?.baseUrl) return null;
+  const t = s.baseUrl.trim().replace(/\/+$/, '');
+  return { id: 'self', label: 'Your speech-to-text server', provider: 'openai', baseUrl: /\/v\d+(\/|$)/.test(t) ? t : `${t}/v1`, model: String(s.model ?? '') || 'whisper-1', region: '', apiKey: String(s.apiKey ?? '') };
 }
 
 /** Checks the upload is a WAV file of sensible size. */
@@ -147,7 +156,11 @@ export async function hear(env: Env, db: Db, user: { id: string; engine: unknown
       try {
         let text: string;
         if (entry === 'workers') text = await workersStt(env, audio, lang.split('-')[0]!.toLowerCase());
-        else {
+        else if (entry === 'self-hosted') {
+          const k = only?.key ?? hearServerKey((await credentials(env, db, user.id, 'self-hosted-hear').catch(() => null)) as any);
+          if (!k) throw new BrainFail('no server', 'refused', 6 * HOUR, 'Your speech-to-text server is not set up yet.');
+          text = await transcribeWithKey(k, audio, lang);
+        } else {
           const k = only?.key ?? (keys ??= await loadHearKeys(env, db, user.id)).find((x) => `skey:${x.id}` === entry);
           if (!k) throw new BrainFail('key not found', 'refused', 6 * HOUR, 'That key is no longer saved.');
           text = await transcribeWithKey(k, audio, lang);

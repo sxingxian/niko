@@ -9,8 +9,8 @@ import { audit, requireUser, tooMany } from '../lib/session';
 import { eventDetail, mailDetail, noteDetail } from '../details';
 import { BrainFail, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveKeys, testEntry, think } from '../brains';
 import { cleanWhere, forecastText, geocode, stripWeatherTags, weatherTags } from '../weather';
-import { audioProblem, defaultHearLabel, hear, HEAR_PROVIDERS_LIST, hearKeyInfo, hearKeyProblem, loadHearKeys, MAX_AUDIO_BYTES, saveHearKeys, type HearKey } from '../hears';
-import { Declined, defaultImageLabel, IMAGE_PROVIDERS_LIST, imageKeyInfo, imageKeyProblem, loadImageKeys, MAX_PROMPT, paint, saveImageKeys, type ImageKey } from '../images';
+import { audioProblem, defaultHearLabel, hear, hearServerKey, HEAR_PROVIDERS_LIST, hearKeyInfo, hearKeyProblem, loadHearKeys, MAX_AUDIO_BYTES, saveHearKeys, type HearKey } from '../hears';
+import { Declined, defaultImageLabel, serverKey, IMAGE_PROVIDERS_LIST, imageKeyInfo, imageKeyProblem, loadImageKeys, MAX_PROMPT, paint, saveImageKeys, type ImageKey } from '../images';
 import { defaultVoiceLabel, listVoices, loadVoiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
 import { icalCheck, normalizeLink } from '../calendarlink';
 import { IMAP_PROVIDERS, imapCheck, isImapProvider } from '../mailbox';
@@ -209,6 +209,13 @@ app.post('/connections/:provider', async (c) => {
     if (!v && !f.optional && f.key !== 'voiceId' && f.key !== 'channelId') return c.json({ error: `${f.label} is needed.` }, 400);
     if (f.type === 'url' && v && !publicHttpsUrl(v)) return c.json({ error: `${f.label} must be a public https address.` }, 400);
     secret[f.key] = v.slice(0, 2000);
+  }
+  // A saved key or password is only ever sent to the address it was saved with: when an address changes, a key not
+  // typed again is dropped rather than carried over to the new address.
+  const moved = def.fields.some((f) => f.type === 'url' && prior?.[f.key] && secret[f.key] && !sameOrigin(prior[f.key]!, secret[f.key]!));
+  if (moved) for (const f of def.fields) if (f.type === 'password' && !(typeof b[f.key] === 'string' && b[f.key]!.trim())) {
+    if (!f.optional) return c.json({ error: `Type the ${f.label.toLowerCase()} again when you change the address.` }, 400);
+    secret[f.key] = '';
   }
   // Mail and calendar links are checked before they are saved, so a wrong password or link is caught now.
   try {
@@ -838,6 +845,19 @@ app.post('/voice/stt', async (c) => {
       if (!apiKey) return c.json({ error: 'Paste the API key to test it.' }, 400);
       only.key = { ...k, id: 'test', apiKey };
     }
+    const server = form!.get('server');
+    if (source === 'self-hosted' && typeof server === 'string' && server) {
+      // The server as typed on the screen; the saved key goes along only to the address it was saved with.
+      let t: any = {};
+      try { t = JSON.parse(server.slice(0, 6000)); } catch { return c.json({ error: 'Those settings could not be read. Reload the page and try again.' }, 400); }
+      const saved = (await credentials(c.env, db, u.id, 'self-hosted-hear').catch(() => null)) as Record<string, string> | null;
+      const baseUrl = clip(t?.baseUrl, 500) || saved?.baseUrl || '';
+      if (!publicHttpsUrl(baseUrl)) return c.json({ error: 'The server address must be a public https address.' }, 400);
+      const apiKey = clip(t?.apiKey, 4000) || (saved && sameOrigin(saved.baseUrl ?? '', baseUrl) ? saved.apiKey ?? '' : '');
+      only.key = hearServerKey({ baseUrl, model: clip(t?.model, 80), apiKey })!;
+      const problem = hearKeyProblem(only.key);
+      if (problem) return c.json({ error: problem }, 400);
+    }
   }
   try {
     const r = await hear(c.env, db, u, audio, lang, only);
@@ -924,6 +944,16 @@ app.post('/image', async (c) => {
       const apiKey = k.apiKey || savedImageKey(prior, k);
       if (!apiKey) return c.json({ error: 'Paste the API key to test it.' }, 400);
       only.key = { ...k, id: 'test', apiKey, label: k.label || defaultImageLabel(k) };
+    }
+    if (source === 'self-hosted' && b.server && typeof b.server === 'object') {
+      // The server as typed on the screen; the saved key goes along only to the address it was saved with.
+      const saved = (await credentials(c.env, db, u.id, 'self-hosted-image').catch(() => null)) as Record<string, string> | null;
+      const baseUrl = clip(b.server.baseUrl, 500) || saved?.baseUrl || '';
+      if (!publicHttpsUrl(baseUrl)) return c.json({ error: 'The image server address must be a public https address.' }, 400);
+      const apiKey = clip(b.server.apiKey, 4000) || (saved && sameOrigin(saved.baseUrl ?? '', baseUrl) ? saved.apiKey ?? '' : '');
+      only.key = serverKey({ baseUrl, model: clip(b.server.model, 120), apiKey }, 'Your image server')!;
+      const problem = imageKeyProblem(only.key);
+      if (problem) return c.json({ error: problem }, 400);
     }
   }
   try {

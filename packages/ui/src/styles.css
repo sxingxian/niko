@@ -44,6 +44,8 @@ h1, h2, h3, p { margin: 0; }
 .pri { height: 52px; padding: 0 26px; border-radius: 999px; border: 0; background: #fff; color: #05070d; font-size: 16px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 10px; text-decoration: none; }
 .pri:hover { background: #dfe6f2; color: #05070d; }
 .pri:disabled, .sec:disabled, .bt:disabled { opacity: .5; cursor: default; }
+/* Pill buttons are one line tall: their words never wrap inside them (rows of them wrap whole buttons instead). */
+:is(button, a, label).pri, :is(button, a, label).sec, .bt { white-space: nowrap; }
 .sec { height: 52px; padding: 0 22px; border-radius: 999px; border: 1px solid rgba(255,255,255,.4); background: transparent; color: #fff; font-size: 15px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 10px; text-decoration: none; }
 .sec:hover, .bt:hover { background: rgba(255,255,255,.1); color: #fff; }
 .bt { height: 44px; min-width: 96px; padding: 0 16px; border-radius: 999px; border: 1px solid rgba(255,255,255,.35); background: transparent; color: #fff; font-size: 14px; font-weight: 500; cursor: pointer; flex: none; }

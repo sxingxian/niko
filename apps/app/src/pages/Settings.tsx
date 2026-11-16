@@ -438,6 +438,7 @@ export function Engine() {
   const [iKeys, setIKeys] = useState<ImageDraft[]>([]);
   const [iOpen, setIOpen] = useState<ImageSource | null>(null);
   const [sample, setSample] = useState<{ entry: ImageSource; url: string } | null>(null);
+  const [iSelf, setISelf] = useState({ baseUrl: '', model: '', apiKey: '' });
   const loadKeys = useCallback(async () => {
     const r = await api<{ keys: AiKeyInfo[] }>('/engine/keys');
     setKeys((cur) => [...(r.keys ?? []).map((k) => ({ ...k, apiKey: '', saved: true })), ...cur.filter((k) => isNew(k.id))]);
@@ -453,6 +454,8 @@ export function Engine() {
     if (!ready) return;
     const s = values['self-hosted-ai'];
     if (s && !dirty.self) setSelf({ baseUrl: s.baseUrl ?? '', model: s.model ?? '' });
+    const si = values['self-hosted-image'];
+    if (si && !dirty.iself) setISelf({ baseUrl: si.baseUrl ?? '', model: si.model ?? '', apiKey: '' });
   }, [ready, values]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!me || !e) return null;
   const set = (p: Partial<EnginePrefs>) => setE({ ...e, ...p });
@@ -523,7 +526,10 @@ export function Engine() {
       }
       setIKeys(iKept); setIOrder(iNext);
       setDirty((d) => Object.fromEntries(Object.entries(d).filter(([k]) => !iSaved.has(k))));
+      if (dirty.iself && iSelf.baseUrl.trim()) await api('/connections/self-hosted-image', { body: iSelf });
+      if (iNext.includes('self-hosted') && !linked['self-hosted-image'] && !iSelf.baseUrl.trim()) throw new Error('Add your image server’s address, or switch it off.');
       await api('/me', { method: 'PATCH', body: { engine: { brains: next, model: e.model, images: iNext } } });
+      setISelf((v) => ({ ...v, apiKey: '' }));
       setDirty({});
       setOpen((o) => (o && isNew(o.slice(4)) ? null : o));
       await Promise.all([refreshMe(), reload()]);
@@ -626,7 +632,8 @@ export function Engine() {
   // ---- pictures
   const editIKey = (id: string, p: Partial<ImageDraft>) => { setDirty((d) => ({ ...d, ['i:' + id]: true })); setIKeys(iKeys.map((k) => (k.id === id ? { ...k, ...p } : k))); };
   const iKeyOf = (v: ImageSource) => iKeys.find((k) => `ikey:${k.id}` === v);
-  const iAll: ImageSource[] = ['workers', ...iKeys.map((k) => `ikey:${k.id}` as ImageSource)];
+  const iAll: ImageSource[] = ['workers', 'self-hosted', ...iKeys.map((k) => `ikey:${k.id}` as ImageSource)];
+  const editISelf = (p: Partial<typeof iSelf>) => { setDirty((d) => ({ ...d, iself: true })); setISelf({ ...iSelf, ...p }); };
   const iOthers = iAll.filter((v) => !iOrder.includes(v));
   const iToggle = (v: ImageSource, on: boolean) => { setIOrder(on ? [...iOrder, v] : iOrder.filter((x) => x !== v)); if (on) setIOpen(v); };
   const iMove = (v: ImageSource, by: -1 | 1) => {
@@ -659,6 +666,7 @@ export function Engine() {
         prompt: TEST_PICTURE, shape: 'square',
         // A key not saved yet has only a temporary id on this page, so it is sent as "ikey:draft" with its settings.
         source: k && isNew(k.id) ? 'ikey:draft' : v, key: k ? { ...k, id: undefined, apiKey: k.apiKey || undefined } : undefined,
+        server: v === 'self-hosted' ? { baseUrl: iSelf.baseUrl || undefined, model: iSelf.model || undefined, apiKey: iSelf.apiKey || undefined } : undefined,
       }) });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? 'It could not make a picture.');
       const blob = await res.blob();
@@ -675,6 +683,20 @@ export function Engine() {
         <div className="eng-fields">{iTestBtn(v)}</div>
         {iSample(v)}
         <p className="hint">FLUX.1 [schnell] by Black Forest Labs, run on Cloudflare. Fast and free within Cloudflare’s daily allowance, shared with the Workers AI brain and voice. Pictures are square.</p>
+      </div>
+    );
+    if (v === 'self-hosted') return (
+      <div className="eng-fields col">
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Server address</span><input className="in" type="url" placeholder="https://" value={iSelf.baseUrl} onChange={(x) => editISelf({ baseUrl: x.target.value })} /></label>
+          <label className="fld"><span className="k">Model name · optional</span><input className="in" type="text" value={iSelf.model} onChange={(x) => editISelf({ model: x.target.value.trim() })} /></label>
+        </div>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">API key · optional</span><input className="in" type="password" autoComplete="off" placeholder={linked['self-hosted-image'] ? 'Saved, or none · type to replace' : 'Only if your server asks for one'} value={iSelf.apiKey} onChange={(x) => editISelf({ apiKey: x.target.value })} /></label>
+          {iTestBtn(v, !iSelf.baseUrl.trim())}
+        </div>
+        {iSample(v)}
+        <p className="hint">Any image server with an OpenAI-compatible images API, such as LocalAI or a Stable Diffusion or FLUX server, on a NAS or your own computer. It needs a public https address; Cloudflare Tunnel is a free way to give one. A key is sent only to the address it was saved with.</p>
       </div>
     );
     const k = iKeyOf(v);
@@ -709,8 +731,11 @@ export function Engine() {
       </div>
     );
   };
-  const iName = (v: ImageSource) => { const k = iKeyOf(v); return k ? k.label || imageInfo(k).name : 'Cloudflare FLUX'; };
-  const iSub = (v: ImageSource) => { const k = iKeyOf(v); return k ? [imageInfo(k).name, k.model || 'default model'].join(' · ') + (k.saved ? '' : ' · not saved yet') : 'FLUX.1 [schnell] on Cloudflare, where Niko runs. Nothing to set up.'; };
+  const iName = (v: ImageSource) => { if (v === 'self-hosted') return 'Your image server'; const k = iKeyOf(v); return k ? k.label || imageInfo(k).name : 'Cloudflare FLUX'; };
+  const iSub = (v: ImageSource) => {
+    if (v === 'self-hosted') return iSelf.baseUrl ? [(() => { try { return new URL(iSelf.baseUrl).hostname; } catch { return iSelf.baseUrl; } })(), iSelf.model].filter(Boolean).join(' · ') : 'An image model server you run, such as on a NAS, at a public https address.';
+    const k = iKeyOf(v); return k ? [imageInfo(k).name, k.model || 'default model'].join(' · ') + (k.saved ? '' : ' · not saved yet') : 'FLUX.1 [schnell] on Cloudflare, where Niko runs. Nothing to set up.';
+  };
   const iRow = (v: ImageSource, i: number | null) => {
     const on = i !== null, resting = on ? imageRestLine(me.engine.imageRest?.[v]) : '';
     return (
@@ -721,7 +746,7 @@ export function Engine() {
             <b>{iName(v)}</b><span className="sub">{iSub(v)}</span>
             {resting && <span className="sub vrow-warn">{resting}</span>}
           </button>
-          <span className="k tag">{iKeyOf(v) ? 'Your key' : 'Free tier'}</span>
+          <span className="k tag">{v === 'self-hosted' ? 'Your server' : iKeyOf(v) ? 'Your key' : 'Free tier'}</span>
           {on && <span className="vrow-move">
             <button type="button" className="stp" onClick={() => iMove(v, -1)} disabled={i === 0} aria-label={`Move ${iName(v)} up`}>↑</button>
             <button type="button" className="stp" onClick={() => iMove(v, 1)} disabled={i === iOrder.length - 1} aria-label={`Move ${iName(v)} down`}>↓</button>
@@ -736,7 +761,7 @@ export function Engine() {
     <SettingsPage title="Engine" sub="What Niko thinks with. You can change it at any time." action={<button className="pri set-save" onClick={save} disabled={busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save changes'}</button>}>
       <NoteLine note={note} />
       <section className="g eng-card wide" aria-label="Brain">
-        <span className="k" style={{ paddingBottom: 6 }}>Brain · tried in this order</span>
+        <span className="k" style={{ paddingBottom: 6 }}>Brain · Niko uses in this order</span>
         <p className="hint" style={{ paddingBottom: 8 }}>Niko answers with the first one that works. When one reaches its usage limit, refuses its key or stops answering, Niko moves to the next straight away, and goes back to it once its limit has reset.</p>
         <ol className="vlist">{order.map((b, i) => row(b, i))}</ol>
         <button type="button" className="bt add-key" onClick={addKey} disabled={keys.length >= MAX_AI_KEYS}><Icon name="plus" size={18} />Add an AI key</button>
@@ -746,7 +771,7 @@ export function Engine() {
         </>}
       </section>
       <section className="g eng-card wide" aria-label="Pictures">
-        <span className="k" style={{ paddingBottom: 6 }}>Pictures · tried in this order</span>
+        <span className="k" style={{ paddingBottom: 6 }}>Pictures · Niko uses in this order</span>
         <p className="hint" style={{ paddingBottom: 8 }}>Ask Niko to paint, draw or make a picture. The first service that works paints it, switching to the next when one reaches its limit, refuses its key or stops answering. Each service checks requests against its own rules: if one declines a picture, the next is asked. Pictures are never stored; Save keeps one on your device. Switch them all off to turn pictures off.</p>
         {iOrder.length ? <ol className="vlist">{iOrder.map((v, i) => iRow(v, i))}</ol> : <p className="hint vrow-warn" style={{ padding: '4px 0 8px' }}>Pictures are off. Switch on a service below to turn them on.</p>}
         <button type="button" className="bt add-key" onClick={addIKey} disabled={iKeys.length >= MAX_IMAGE_KEYS}><Icon name="plus" size={18} />Add an image API key</button>
@@ -802,6 +827,7 @@ export function Voice() {
   const [hKeys, setHKeys] = useState<HearDraft[]>([]);
   const [hOpen, setHOpen] = useState<HearSource | null>(null);
   const [testing, setTesting] = useState<{ entry: string; cap: Capture } | null>(null);
+  const [hSelf, setHSelf] = useState({ baseUrl: '', model: '', apiKey: '' });
   const playing = useRef<{ stop: () => void } | null>(null);
   const loadKeys = useCallback(async () => {
     const r = await api<{ keys: VoiceKeyInfo[] }>('/voice/keys');
@@ -819,6 +845,8 @@ export function Voice() {
     if (!ready) return;
     const s = values['self-hosted-voice'];
     if (s && !dirty.sh) setSh((v) => ({ ...v, baseUrl: s.baseUrl ?? '', voice: s.voice ?? '', model: s.model ?? '' }));
+    const sh2 = values['self-hosted-hear'];
+    if (sh2 && !dirty.hself) setHSelf({ baseUrl: sh2.baseUrl ?? '', model: sh2.model ?? '', apiKey: '' });
   }, [ready, values]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!me || !e) return null;
   const set = (p: Partial<EnginePrefs>) => setE({ ...e, ...p });
@@ -887,10 +915,12 @@ export function Voice() {
       setHKeys(hKept); setHOrder(hNext);
       setDirty((d) => Object.fromEntries(Object.entries(d).filter(([id]) => !hSaved.has(id))));
       if (dirty.sh && sh.baseUrl.trim()) await api('/connections/self-hosted-voice', { body: sh });
+      if (dirty.hself && hSelf.baseUrl.trim()) await api('/connections/self-hosted-hear', { body: hSelf });
+      if (hNext.includes('self-hosted') && !linked['self-hosted-hear'] && !hSelf.baseUrl.trim()) throw new Error('Add your speech-to-text server’s address under Listening, or switch it off.');
       if (next.includes('self-hosted') && !linked['self-hosted-voice'] && !sh.baseUrl.trim()) throw new Error('Add your voice server’s address, or switch it off.');
       await api('/me', { method: 'PATCH', body: { engine: { voices: next, hears: hNext, workersVoice: e.workersVoice ?? 'melo', kokoroVoice: e.kokoroVoice ?? 'af_heart', wake: e.wake } } });
       await Promise.all([refreshMe(), reload()]);
-      setSh((v) => ({ ...v, apiKey: '' })); setDirty({});
+      setSh((v) => ({ ...v, apiKey: '' })); setHSelf((v) => ({ ...v, apiKey: '' })); setDirty({});
       setNote({ ok: true, text: next.includes('kokoro') && !kReady ? 'Saved. The on-device voice is skipped on this device until it is downloaded here.' : 'Saved.' });
     } catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setBusy(''); }
   };
@@ -929,7 +959,8 @@ export function Voice() {
   // ---- speech in
   const editHKey = (id: string, p: Partial<HearDraft>) => { setDirty((d) => ({ ...d, ['h:' + id]: true })); setHKeys(hKeys.map((k) => (k.id === id ? { ...k, ...p } : k))); };
   const hKeyOf = (v: HearSource) => hKeys.find((k) => `skey:${k.id}` === v);
-  const hAll: HearSource[] = ['workers', ...hKeys.map((k) => `skey:${k.id}` as HearSource)];
+  const hAll: HearSource[] = ['workers', 'self-hosted', ...hKeys.map((k) => `skey:${k.id}` as HearSource)];
+  const editHSelf = (p: Partial<typeof hSelf>) => { setDirty((d) => ({ ...d, hself: true })); setHSelf({ ...hSelf, ...p }); };
   const hOthers = hAll.filter((v) => !hOrder.includes(v));
   const hToggle = (v: HearSource, on: boolean) => { setHOrder(on ? [...hOrder, v] : hOrder.filter((x) => x !== v)); if (on) setHOpen(v); };
   const hMove = (v: HearSource, by: -1 | 1) => {
@@ -966,7 +997,8 @@ export function Voice() {
       setNote({ ok: true, text: 'Turning that into words…' });
       const k = hKeyOf(v);
       // A key not saved yet has only a temporary id on this page, so it is sent as "skey:draft" with its settings.
-      const r = await transcribe(wav, { source: k && isNew(k.id) ? 'skey:draft' : v, key: k ? { ...k, id: undefined, apiKey: k.apiKey || undefined } : undefined });
+      const r = await transcribe(wav, { source: k && isNew(k.id) ? 'skey:draft' : v, key: k ? { ...k, id: undefined, apiKey: k.apiKey || undefined } : undefined,
+        server: v === 'self-hosted' ? { baseUrl: hSelf.baseUrl || undefined, model: hSelf.model || undefined, apiKey: hSelf.apiKey || undefined } : undefined });
       setNote({ ok: true, text: r.text ? `It heard: “${r.text}”` : 'It answered, but heard no words.' });
     } catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setTesting(null); }
   };
@@ -976,6 +1008,19 @@ export function Voice() {
       <div className="eng-fields col">
         <div className="eng-fields">{testBtn(v)}</div>
         <p className="hint">OpenAI’s Whisper, run on Cloudflare. Free within Cloudflare’s daily allowance, shared with the Workers AI brain and voice. Many languages.</p>
+      </div>
+    );
+    if (v === 'self-hosted') return (
+      <div className="eng-fields col">
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Server address</span><input className="in" type="url" placeholder="https://" value={hSelf.baseUrl} onChange={(x) => editHSelf({ baseUrl: x.target.value })} /></label>
+          <label className="fld"><span className="k">Model name · optional</span><input className="in" type="text" placeholder="whisper-1" value={hSelf.model} onChange={(x) => editHSelf({ model: x.target.value.trim() })} /></label>
+        </div>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">API key · optional</span><input className="in" type="password" autoComplete="off" placeholder={linked['self-hosted-hear'] ? 'Saved, or none · type to replace' : 'Only if your server asks for one'} value={hSelf.apiKey} onChange={(x) => editHSelf({ apiKey: x.target.value })} /></label>
+          {testBtn(v, !hSelf.baseUrl.trim())}
+        </div>
+        <p className="hint">Any speech-to-text server with an OpenAI-compatible transcription API, such as Speaches (faster-whisper), whisper.cpp’s server or LocalAI, on a NAS or your own computer. It needs a public https address; Cloudflare Tunnel is a free way to give one. A key is sent only to the address it was saved with.</p>
       </div>
     );
     const k = hKeyOf(v);
@@ -1009,8 +1054,11 @@ export function Voice() {
       </div>
     );
   };
-  const hName = (v: HearSource) => { const k = hKeyOf(v); return k ? k.label || hearInfo(k).name : 'Cloudflare speech recognition'; };
-  const hSub = (v: HearSource) => { const k = hKeyOf(v); return k ? [hearInfo(k).name, k.model || 'default model'].join(' · ') + (k.saved ? '' : ' · not saved yet') : 'Whisper on Cloudflare, where Niko runs. Nothing to set up.'; };
+  const hName = (v: HearSource) => { if (v === 'self-hosted') return 'Your speech-to-text server'; const k = hKeyOf(v); return k ? k.label || hearInfo(k).name : 'Cloudflare speech recognition'; };
+  const hSub = (v: HearSource) => {
+    if (v === 'self-hosted') return hSelf.baseUrl ? [(() => { try { return new URL(hSelf.baseUrl).hostname; } catch { return hSelf.baseUrl; } })(), hSelf.model].filter(Boolean).join(' · ') : 'A speech-to-text server you run, such as on a NAS, at a public https address.';
+    const k = hKeyOf(v); return k ? [hearInfo(k).name, k.model || 'default model'].join(' · ') + (k.saved ? '' : ' · not saved yet') : 'Whisper on Cloudflare, where Niko runs. Nothing to set up.';
+  };
   const hRow = (v: HearSource, i: number | null) => {
     const on = i !== null, resting = on ? voiceRestLine(me.engine.hearRest?.[v]) : '';
     return (
@@ -1021,7 +1069,7 @@ export function Voice() {
             <b>{hName(v)}</b><span className="sub">{hSub(v)}</span>
             {resting && <span className="sub vrow-warn">{resting.replace('The next voice speaks', 'The next one listens').replace('next voice', 'next one')}</span>}
           </button>
-          <span className="k tag">{hKeyOf(v) ? 'Your key' : 'Free'}</span>
+          <span className="k tag">{v === 'self-hosted' ? 'Your server' : hKeyOf(v) ? 'Your key' : 'Free'}</span>
           {on && <span className="vrow-move">
             <button type="button" className="stp" onClick={() => hMove(v, -1)} disabled={i === 0} aria-label={`Move ${hName(v)} up`}>↑</button>
             <button type="button" className="stp" onClick={() => hMove(v, 1)} disabled={i === hOrder.length - 1} aria-label={`Move ${hName(v)} down`}>↓</button>
@@ -1176,7 +1224,7 @@ export function Voice() {
       <NoteLine note={note} />
       <div className="eng-grid">
         <section className="g eng-card" aria-label="Speech out">
-          <span className="k" style={{ paddingBottom: 6 }}>Speech out · tried in this order</span>
+          <span className="k" style={{ paddingBottom: 6 }}>Speech out · Niko uses in this order</span>
           <p className="hint" style={{ paddingBottom: 8 }}>Niko speaks with the first voice that works. When one reaches its usage limit, refuses its key or stops answering, the next one speaks straight away, and Niko goes back to it once it has reset.</p>
           <ol className="vlist">
             {order.map((v, i) => row(v, i))}
@@ -1196,7 +1244,7 @@ export function Voice() {
           </>}
         </section>
         <section className="g eng-card listen" aria-label="Listening">
-          <span className="k" style={{ paddingBottom: 2 }}>Listening · speech in, tried in this order</span>
+          <span className="k" style={{ paddingBottom: 2 }}>Listening · speech in · Niko uses in this order</span>
           <p className="hint">After you tap the mic or say “Niko”, your request is recorded and turned into words by the first service that works. When one reaches its limit or fails, the next one is used.</p>
           <ol className="vlist">
             {hOrder.map((v, i) => hRow(v, i))}
@@ -1260,7 +1308,7 @@ export function Appearance() {
           <div className="grp">
             <span className="k">Background</span>
             <div style={{ display: 'flex', gap: 10 }}>
-              <button className="seg" aria-pressed={a.mode === 'shift'} onClick={() => up({ mode: 'shift' })}>Shift between colours</button>
+              <button className="seg" aria-pressed={a.mode === 'shift'} onClick={() => up({ mode: 'shift' })}>Shift colours</button>
               <button className="seg" aria-pressed={a.mode === 'single'} onClick={() => up({ mode: 'single' })}>One colour</button>
             </div>
           </div>
@@ -1349,8 +1397,8 @@ export function Account() {
             <div key={k.id} className="row"><Icon name="key" /><span className="txt"><b>{k.label}</b><span className="sub">Works on {k.rpId}</span></span>
               <button className="bt" onClick={async () => { await api(`/me/passkeys/${k.id}`, { method: 'DELETE' }); await load(); }}>Remove</button></div>
           ))}
-          <button className="pri" style={{ alignSelf: 'flex-start' }} onClick={add}><Icon name="key" size={20} />Add a passkey for {rpId || 'this domain'}</button>
-          <p className="set-note">A passkey works on one domain only. Add one on each address you use Niko from.</p>
+          <button className="pri" style={{ alignSelf: 'flex-start' }} onClick={add}><Icon name="key" size={20} />Add a passkey</button>
+          <p className="set-note">This passkey will work on {rpId || 'this address'} only. Add one on each address you use Niko from.</p>
         </section>
       </div>
     </SettingsPage>

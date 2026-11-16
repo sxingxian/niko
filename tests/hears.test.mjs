@@ -72,4 +72,14 @@ await ok('nothing switched on, or everything failing, is an error (the app then 
   reply = () => new Response('down', { status: 503 });
   await assert.rejects(() => hear({}, fakeDb, { id: 'u', engine: { hears: ['skey:k1', 'skey:k2'] } }, wav, 'en'));
 });
+await ok('your own speech-to-text server: the saved address with /v1, whisper-1 by default, no key header without a key', async () => {
+  store.creds = { 'self-hosted-hear': { baseUrl: 'https://whisper.example.com' } };
+  reply = () => Response.json({ text: 'from my server' });
+  const r = await hear({}, fakeDb, { id: 'u', engine: { hears: ['self-hosted'] } }, wav, 'en');
+  assert.equal(r.text, 'from my server'); assert.equal(last.url, 'https://whisper.example.com/v1/audio/transcriptions');
+  assert.equal(last.init.body.get('model'), 'whisper-1'); assert.equal(last.init.headers.authorization, undefined);
+  store.creds = { 'self-hosted-hear': { baseUrl: 'https://whisper.example.com/v1', apiKey: 'S', model: 'Systran/faster-whisper-small' } };
+  await hear({}, fakeDb, { id: 'u', engine: { hears: ['self-hosted'] } }, wav, 'en');
+  assert.equal(last.url, 'https://whisper.example.com/v1/audio/transcriptions'); assert.equal(last.init.headers.authorization, 'Bearer S'); assert.equal(last.init.body.get('model'), 'Systran/faster-whisper-small');
+});
 console.log(`${pass} speech-in checks passed`);

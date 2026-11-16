@@ -1,4 +1,5 @@
-// Pictures: Cloudflare's FLUX.1 schnell is built in (on the free daily allowance); any number of the user's own image
+// Pictures: Cloudflare's FLUX.1 schnell is built in (on the free daily allowance); the user's own image server (any
+// OpenAI-compatible images API at a public https address) and any number of the user's own image
 // keys (OpenAI, Google, Stability AI, Black Forest Labs, fal, Replicate, Ideogram, and any OpenAI-compatible service
 // such as xAI, Together AI or Recraft) can come before or after it. Like the brains and voices, a service that reaches
 // its limit, refuses its key or doesn't answer rests for a while and the next one is used.
@@ -24,6 +25,14 @@ export const MAX_PROMPT = 1500;
 const MIN = 60_000, HOUR = 60 * MIN;
 const SAFE_MODEL = /^[A-Za-z0-9._:\-/]{1,120}$/;
 const WORKERS_IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
+
+/** The user's own image server, as saved in Connections (or typed on the Engine screen, for Test). An address without
+ * a version path gets /v1, as OpenAI-compatible servers expect. */
+export const withV1 = (u: string) => { const t = u.trim().replace(/\/+$/, ''); return /\/v\d+(\/|$)/.test(t) ? t : `${t}/v1`; };
+export function serverKey(s: { baseUrl?: string; model?: string; apiKey?: string } | null, label: string): ImageKey | null {
+  if (!s?.baseUrl) return null;
+  return { id: 'self', label, provider: 'openai', baseUrl: withV1(s.baseUrl), model: String(s.model ?? ''), apiKey: String(s.apiKey ?? '') };
+}
 
 /** A service declined this particular picture under its own rules. The service itself is fine. */
 export class Declined extends Error {
@@ -177,7 +186,8 @@ async function openaiImage(k: ImageKey, prompt: string, shape: ImageShape): Prom
   else if (/(^|\.)together\.(xyz|ai)$/.test(host)) Object.assign(body, { response_format: 'base64', width: PIXELS[shape][0], height: PIXELS[shape][1] });
   else if (host === 'api.x.ai') Object.assign(body, { response_format: 'b64_json', aspect_ratio: RATIO[shape] });
   else Object.assign(body, { response_format: 'b64_json', size: shape === 'square' ? '1024x1024' : shape === 'wide' ? '1792x1024' : '1024x1792' });
-  const send = (b: Record<string, unknown>) => json(url, { method: 'POST', headers: { authorization: `Bearer ${k.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify(b) });
+  // A server of the user's own may have no key at all.
+  const send = (b: Record<string, unknown>) => json(url, { method: 'POST', headers: { ...(k.apiKey ? { authorization: `Bearer ${k.apiKey}` } : {}), 'content-type': 'application/json' }, body: JSON.stringify(b) });
   let j: any;
   try { j = await send(body); }
   catch (e) {
@@ -326,7 +336,12 @@ export async function paint(env: Env, db: Db, user: { id: string; engine: unknow
       try {
         let pic: Picture;
         if (entry === 'workers') pic = await workersImage(env, prompt);
-        else {
+        else if (entry === 'self-hosted') {
+          label = 'Your image server';
+          const k = only?.key ?? serverKey((await credentials(env, db, user.id, 'self-hosted-image').catch(() => null)) as any, label);
+          if (!k) throw new BrainFail('no server', 'refused', 6 * HOUR, 'Your image server is not set up yet.');
+          pic = await paintWithKey(k, prompt, shape);
+        } else {
           const k = only?.key ?? (keys ??= await loadImageKeys(env, db, user.id)).find((x) => `ikey:${x.id}` === entry);
           if (!k) throw new BrainFail('key not found', 'refused', 6 * HOUR, 'That key is no longer saved.');
           label = k.label || defaultImageLabel(k);
