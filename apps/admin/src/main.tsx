@@ -2,7 +2,7 @@
 import { StrictMode, useCallback, useEffect, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api, ApiError, Field, PasswordField, Switch } from '@niko/ui';
-import { AI_OPTION_GROUPS, aiHasBrain, aiOff, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, type GlanceLimits } from '@niko/shared';
+import { AI_OPTION_GROUPS, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, type AccountLimits, type GlanceLimits } from '@niko/shared';
 import '@niko/ui/src/styles.css';
 import './admin.css';
 
@@ -272,8 +272,76 @@ function GlanceAdmin({ guard }: { guard: (e: unknown) => void }) {
   </>;
 }
 
+// ---------------------------------------------------------------- limits (how many calendar links an account may keep)
+type LimitsUser = { id: string; name: string; email: string; role: string; status: string; accountLimits: Partial<AccountLimits> };
+function LimitsAdmin({ guard }: { guard: (e: unknown) => void }) {
+  const [defaults, setDefaults] = useState<AccountLimits | null>(null);
+  const [people, setPeople] = useState<LimitsUser[]>([]);
+  const [sel, setSel] = useState('all');
+  const [draft, setDraft] = useState<Partial<AccountLimits>>({});
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const load = useCallback(async () => {
+    try { const r = await api<{ defaults: AccountLimits; users: LimitsUser[] }>('/admin/limits'); setDefaults(r.defaults); setPeople(r.users); }
+    catch (e) { guard(e); }
+  }, [guard]);
+  useEffect(() => { void load(); }, [load]);
+  const person = people.find((p) => p.id === sel) ?? null;
+  useEffect(() => { if (defaults) { setDraft(person ? { ...person.accountLimits } : { ...defaults }); setDirty(false); } }, [sel, defaults, people]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!defaults) return null;
+  const cals = draft.calendars ?? defaults.calendars;
+  const changed = !!person && draft.calendars !== undefined && draft.calendars !== defaults.calendars;
+  const setCals = (v: number) => { setNote(null); setDirty(true); setDraft(person && v === defaults.calendars ? {} : { calendars: v }); };
+  const save = async () => {
+    setBusy(true); setNote(null);
+    try {
+      if (person) await api(`/admin/limits/users/${person.id}`, { method: 'PUT', body: { limits: draft } });
+      else await api('/admin/limits/default', { method: 'PUT', body: { limits: draft } });
+      await load(); setNote({ ok: true, text: person ? `Saved for ${person.name || person.email}.` : 'Saved. It applies to everyone without their own limit within a minute.' });
+    } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
+  };
+  const count = (p: LimitsUser) => Object.keys(p.accountLimits).length;
+  return <>
+    <header><h1>Limits</h1><p className="sub" style={{ fontSize: 15, maxWidth: 860 }}>How much each account may add. Calendar links are downloaded and unpacked every time Niko builds someone’s day, so many of them make it slower.</p></header>
+    {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
+    <div className="ai-grid">
+      <section className="g card ai-people" aria-label="Applies to">
+        <span className="k" style={{ padding: '0 6px' }}>Applies to</span>
+        <div className="ai-list">
+          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default' }, ...people.map((p) => ({ id: p.id, name: p.name || p.email, sub: p.email, badge: count(p) ? `${p.accountLimits.calendars} calendars` : 'Default' }))].map((p) => (
+            <button key={p.id} className="who-row" aria-pressed={p.id === sel} onClick={() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; setSel(p.id); setNote(null); }}>
+              <span className="who-txt"><b>{p.name}</b><span>{p.sub}</span></span><span className="who-badge">{p.badge}</span>
+            </button>
+          ))}
+        </div>
+        <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>New accounts get the default. These limits apply to admins too.</p>
+      </section>
+      <section className="g card ai-options" aria-label="Limits">
+        <div className="ai-head">
+          <div><h2>{person ? person.name || person.email : 'Everyone · default'}</h2>
+            <p className="sub" style={{ fontSize: 13 }}>{person ? (changed ? 'Different from the default.' : 'Follows the default. Change it to set it for this person only.') : 'What every account gets, unless it is changed for that person.'}</p></div>
+          <div className="ai-acts">
+            {person && <button className="bt" onClick={() => { setDraft({}); setDirty(true); }} disabled={!changed}>Reset to default</button>}
+            <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+        <div className="ai-row">
+          <span className="ai-txt"><span>Calendar links</span><span className="sub">{changed ? `Default is ${defaults.calendars}` : 'Private and public iCal calendars, per account'}</span></span>
+          {changed && <><span className="chg">Changed</span><button className="lnk" onClick={() => setCals(defaults.calendars)}>Reset</button></>}
+          <label className="sr" htmlFor="lim-cal">Calendar links: most per account</label>
+          <select id="lim-cal" className="in gl-sel" value={cals} onChange={(e) => setCals(Number(e.target.value))}>
+            {CALENDAR_LIMIT_STEPS.map((n) => <option key={n} value={n}>{n === 1 ? '1 calendar' : `Up to ${n}`}</option>)}
+          </select>
+        </div>
+        <p className="sub" style={{ fontSize: 12, lineHeight: 1.5 }}>Lowering a limit removes nothing: people keep what they have, but only that many are read, and they can’t add more until they are under it. Every change is written to the audit log.</p>
+      </section>
+    </div>
+  </>;
+}
+
 function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?: { name: string; email: string } | null }) {
-  const [tab, setTab] = useState<'users' | 'ai' | 'glance' | 'security' | 'audit'>('users');
+  const [tab, setTab] = useState<'users' | 'ai' | 'glance' | 'limits' | 'security' | 'audit'>('users');
   const [me, setMe] = useState<{ name: string; email: string } | null>(initialMe ?? null);
   const [users, setUsers] = useState<UserRow[]>([]);
   const [invites, setInvites] = useState<InviteRow[]>([]);
@@ -322,6 +390,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
           <button className="nv" aria-current={tab === 'users' ? 'page' : undefined} onClick={() => setTab('users')}>Users</button>
           <button className="nv" aria-current={tab === 'ai' ? 'page' : undefined} onClick={() => setTab('ai')}>AI options</button>
           <button className="nv" aria-current={tab === 'glance' ? 'page' : undefined} onClick={() => setTab('glance')}>New items</button>
+          <button className="nv" aria-current={tab === 'limits' ? 'page' : undefined} onClick={() => setTab('limits')}>Limits</button>
           <button className="nv" aria-current={tab === 'security' ? 'page' : undefined} onClick={() => setTab('security')}>Security</button>
           <button className="nv" aria-current={tab === 'audit' ? 'page' : undefined} onClick={() => setTab('audit')}>Audit log</button>
         </nav>
@@ -368,7 +437,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
             ))}
           </section>
           <p className="sub" style={{ fontSize: 13 }}>Admin sign-in needs a second factor. Every change here is written to the audit log.</p>
-        </> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'security' ? <>
+        </> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'security' ? <>
           <header><h1>Security</h1><p className="sub" style={{ fontSize: 15 }}>Your own admin sign-in: authenticator app and recovery codes.</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
           <div className="two">

@@ -14,7 +14,8 @@ import { NOT_ON_ACCOUNT, offFor } from '../access';
 import { diffGlance, limitsFor } from '../glance';
 import { Declined, defaultImageLabel, serverKey, IMAGE_PROVIDERS_LIST, imageKeyInfo, imageKeyProblem, loadImageKeys, MAX_PROMPT, paint, saveImageKeys, type ImageKey } from '../images';
 import { defaultVoiceLabel, listVoices, loadVoiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
-import { icalCheck, normalizeLink } from '../calendarlink';
+import { calendarsOf, calendarsSecret, cleanCalName, icalCheckOne, newCalId, normalizeLink, shownCalendars, type Cal } from '../calendarlink';
+import { accountLimitsFor } from '../limits';
 import { IMAP_PROVIDERS, imapCheck, isImapProvider } from '../mailbox';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
@@ -226,7 +227,6 @@ app.post('/connections/:provider', async (c) => {
   // Mail and calendar links are checked before they are saved, so a wrong password or link is caught now.
   try {
     if (isImapProvider(def.id)) await imapCheck(def.id, secret);
-    if (def.id === 'ical') await icalCheck(secret);
     if (def.id === 'open-meteo') {
       secret.units = /^\s*°?f/i.test(secret.units ?? '') ? 'F' : 'C';
       if (secret.home) {
@@ -270,6 +270,92 @@ app.post('/connections/telegram-bot/refresh', async (c) => {
   const meta = { ...(row.meta as Record<string, unknown>), label: '@' + r.username, readsGroups: r.readsGroups };
   await db.update(connections).set({ meta }).where(eq(connections.id, row.id));
   return c.json({ ok: true, readsGroups: r.readsGroups });
+});
+
+// ---------------------------------------------------------------- calendar links (iCal)
+// A list per account, kept in one encrypted connection record. Each address is read once to check it before it is
+// saved. A private address is never sent back in full; replacing it means pasting the new one.
+async function loadCals(c: { env: Env; get: (k: 'db' | 'user') => any }) {
+  const db = c.get('db'), u = c.get('user');
+  const conn = (await db.select().from(connections).where(and(eq(connections.userId, u.id), eq(connections.provider, 'ical'))).limit(1))[0];
+  const secret = conn ? await unseal<Record<string, string>>(c.env.ENCRYPTION_KEY, conn.secretEnc) : null;
+  return { conn, list: calendarsOf(secret), limit: (await accountLimitsFor(db, u)).calendars };
+}
+async function saveCals(c: { env: Env; get: (k: 'db' | 'user') => any }, conn: { id: string } | undefined, list: Cal[]) {
+  const db = c.get('db'), u = c.get('user');
+  forgetChatBrief(u.id);
+  if (!list.length) { if (conn) await db.delete(connections).where(eq(connections.id, conn.id)); return; }
+  const secretEnc = await seal(c.env.ENCRYPTION_KEY, calendarsSecret(list));
+  const meta = { label: `${list.length} ${list.length === 1 ? 'calendar' : 'calendars'}`, values: {} };
+  if (conn) await db.update(connections).set({ secretEnc, meta }).where(eq(connections.id, conn.id));
+  else await db.insert(connections).values({ id: crypto.randomUUID(), userId: u.id, provider: 'ical', secretEnc, meta });
+}
+const calReply = (list: Cal[], limit: number) => ({ calendars: shownCalendars(list), limit });
+/** A pasted address, made readable and checked as a public https address; or why not. */
+function calAddress(raw: unknown): { url?: string; error?: string } {
+  const url = normalizeLink(typeof raw === 'string' ? raw.slice(0, 2000) : '');
+  if (!url) return { error: 'Paste the calendar’s iCal address (it usually ends in .ics).' };
+  if (!publicHttpsUrl(url)) return { error: 'The calendar address must be a public https address.' };
+  return { url };
+}
+app.get('/calendars', async (c) => {
+  const { list, limit } = await loadCals(c);
+  return c.json(calReply(list, limit));
+});
+app.post('/calendars', async (c) => {
+  const u = c.get('user');
+  if (await tooMany(c, 'cal:' + u.id, 30, 15)) return c.json({ error: 'Too many calendar checks just now. Try again in a few minutes.' }, 429);
+  const b = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  const { conn, list, limit } = await loadCals(c);
+  if (list.length >= limit) return c.json({ error: `You can keep up to ${limit} ${limit === 1 ? 'calendar' : 'calendars'}. Remove one to add another.` }, 400);
+  const name = cleanCalName(b.name) || `Calendar ${list.length + 1}`;
+  const { url, error } = calAddress(b.url);
+  if (!url) return c.json({ error }, 400);
+  const twin = list.find((x) => x.url === url);
+  if (twin) return c.json({ error: `That calendar is already in your list, as “${twin.name}”.` }, 400);
+  try { await icalCheckOne(url, name); } catch (e) { return c.json({ error: (e as Error).message }, 400); }
+  const cal: Cal = { id: newCalId(), name, url, kind: b.kind === 'public' ? 'public' : 'private', on: true };
+  await saveCals(c, conn, [...list, cal]);
+  await audit(c, 'calendar.added', { kind: cal.kind }, u.id);
+  return c.json(calReply([...list, cal], limit));
+});
+app.patch('/calendars/:id', async (c) => {
+  const u = c.get('user');
+  const b = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  const { conn, list, limit } = await loadCals(c);
+  const i = list.findIndex((x) => x.id === c.req.param('id'));
+  if (i < 0) return c.json({ error: 'That calendar is no longer in your list.' }, 404);
+  const cal = { ...list[i]! };
+  if (b.name !== undefined) cal.name = cleanCalName(b.name) || cal.name;
+  if (b.kind === 'public' || b.kind === 'private') cal.kind = b.kind;
+  if (typeof b.on === 'boolean') {
+    // Switching one on again counts against the limit if it was lowered meanwhile.
+    if (b.on && !cal.on && list.filter((x) => x.on).length >= limit) return c.json({ error: `You can read up to ${limit} ${limit === 1 ? 'calendar' : 'calendars'} at once. Switch another off first.` }, 400);
+    cal.on = b.on;
+  }
+  if (typeof b.url === 'string' && b.url.trim()) {
+    const { url, error } = calAddress(b.url);
+    if (!url) return c.json({ error }, 400);
+    const twin = list.find((x) => x.url === url && x.id !== cal.id);
+    if (twin) return c.json({ error: `That calendar is already in your list, as “${twin.name}”.` }, 400);
+    if (url !== cal.url) {
+      if (await tooMany(c, 'cal:' + u.id, 30, 15)) return c.json({ error: 'Too many calendar checks just now. Try again in a few minutes.' }, 429);
+      try { await icalCheckOne(url, cal.name); } catch (e) { return c.json({ error: (e as Error).message }, 400); }
+      cal.url = url;
+    }
+  }
+  const next = list.map((x, j) => (j === i ? cal : x));
+  await saveCals(c, conn, next);
+  await audit(c, 'calendar.changed', { changed: Object.keys(b).filter((k) => ['name', 'url', 'kind', 'on'].includes(k)).join(', ') }, u.id);
+  return c.json(calReply(next, limit));
+});
+app.delete('/calendars/:id', async (c) => {
+  const { conn, list, limit } = await loadCals(c);
+  const next = list.filter((x) => x.id !== c.req.param('id'));
+  if (next.length === list.length) return c.json({ error: 'That calendar is no longer in your list.' }, 404);
+  await saveCals(c, conn, next);
+  await audit(c, 'calendar.removed', {}, c.get('user').id);
+  return c.json(calReply(next, limit));
 });
 
 app.delete('/connections/:provider', async (c) => {

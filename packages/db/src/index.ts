@@ -22,6 +22,7 @@ export const users = pgTable('users', {
   aiAccess: jsonb('ai_access').notNull().default({}).$type<Record<string, boolean>>(),
   /** This account's changes to the admin's default limits for new items on Home. Set by an admin only. */
   glanceLimits: jsonb('glance_limits').notNull().default({}).$type<Record<string, unknown>>(),
+  accountLimits: jsonb('account_limits').notNull().default({}).$type<Record<string, unknown>>(),
   createdAt: ts('created_at').notNull().defaultNow(),
   lastActiveAt: ts('last_active_at'),
 });

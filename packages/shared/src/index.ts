@@ -64,14 +64,11 @@ export const PROVIDERS: ProviderDef[] = [
     { text: 'Outlook.com, Hotmail and Live addresses cannot connect this way: Microsoft switched off app passwords in 2024. Use the Outlook connection.' },
   ] },
   { id: 'google-calendar', name: 'Google Calendar', group: 'calendar', how: 'Google sign-in', kind: 'oauth', app: 'google', can: { read: true, send: false } },
-  { id: 'ical', name: 'Calendar link (iCal)', group: 'calendar', how: 'Google or Outlook calendar, no sign-in · read-only', kind: 'credentials', fields: [
-    { key: 'url', label: 'Private calendar address', type: 'url', placeholder: 'https://calendar.google.com/calendar/ical/…/basic.ics' },
-    { key: 'url2', label: 'Another calendar address', type: 'url', optional: true, placeholder: 'https://outlook.live.com/owa/calendar/…/calendar.ics' },
-    { key: 'url3', label: 'One more', type: 'url', optional: true, placeholder: 'https://' },
-  ], can: { read: true, send: false }, steps: [
+  { id: 'ical', name: 'Calendar links (iCal)', group: 'calendar', how: 'Private or public calendars, no sign-in · read-only', kind: 'credentials', can: { read: true, send: false }, steps: [
     { text: 'Google: on a computer, open Google Calendar → Settings → your calendar → Integrate calendar, and copy “Secret address in iCal format” (not the public address, which only works for public calendars).', link: 'https://calendar.google.com/calendar/r/settings', linkLabel: 'Google Calendar settings' },
     { text: 'Outlook.com: Settings → Calendar → Shared calendars → Publish a calendar, choose “Can view all details”, publish, and copy the ICS link (the HTML link works too).', link: 'https://outlook.live.com/calendar/0/options/calendar/SharedCalendars', linkLabel: 'Outlook calendar settings' },
-    { text: 'Paste up to three addresses below. Anyone with such an address can see that calendar, so it is stored encrypted; reset it in Google or Outlook if it ever leaks. New events show within about five minutes.' },
+    { text: 'Public calendars (holidays, a school, a club) work too: paste their iCal address and choose Public.' },
+    { text: 'Anyone with a private address can see that calendar, so it is stored encrypted and never shown back in full; reset it in Google or Outlook if it ever leaks. New events show within about ten minutes.' },
   ] },
   { id: 'apple-calendar', name: 'Apple Calendar', group: 'calendar', how: 'App-specific password · CalDAV', kind: 'credentials', fields: [userField, passField], can: { read: false, send: false } },
   { id: 'outlook-calendar', name: 'Outlook Calendar', group: 'calendar', how: 'Microsoft sign-in', kind: 'oauth', app: 'microsoft', can: { read: true, send: false } },
@@ -472,6 +469,21 @@ export interface EventDetail { title: string; source: string; start: number; end
 export type GlancePart = 'mail' | 'chats' | 'events' | 'notes';
 export const GLANCE_PARTS: GlancePart[] = ['mail', 'chats', 'events', 'notes'];
 export const GLANCE_PART_NAMES: Record<GlancePart, string> = { mail: 'Emails', chats: 'Messages', events: 'Calendar', notes: 'Notes' };
+// ---- Account limits (set by the admin: a default for everyone, and changes for any one account)
+/** Calendar links: each one is downloaded and unpacked when Niko builds the day, so their number is capped. */
+export const CALENDAR_LIMIT_DEFAULT = 20, CALENDAR_LIMIT_MAX = 50;
+export const CALENDAR_LIMIT_STEPS = [1, 3, 5, 10, 15, 20, 30, 40, 50];
+export interface AccountLimits { calendars: number }
+export function cleanAccountLimits(v: unknown): Partial<AccountLimits> {
+  const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+  return typeof o.calendars === 'number' && CALENDAR_LIMIT_STEPS.includes(o.calendars) ? { calendars: o.calendars } : {};
+}
+export function accountLimits(defaults: Partial<AccountLimits>, own: Partial<AccountLimits>): AccountLimits {
+  return { calendars: CALENDAR_LIMIT_DEFAULT, ...defaults, ...own };
+}
+/** One saved calendar link, as shown to its owner. A private address is shown only as its server and file name. */
+export interface CalendarLink { id: string; name: string; kind: 'private' | 'public'; on: boolean; address: string }
+
 /** Check intervals offered, in minutes. */
 export const GLANCE_STEPS = [1, 2, 5, 10, 15, 30, 60];
 export const GLANCE_REMIND_STEPS = [5, 10, 15, 30];

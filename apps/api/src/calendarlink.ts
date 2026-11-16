@@ -1,7 +1,8 @@
-// Calendars read from a private iCal address (Google's "Secret address in iCal format", an Outlook published
-// calendar, iCloud, and so on). Read-only by nature. Repeating events and time zones come from the file itself.
+// Calendars read from iCal addresses: private ones (Google's "Secret address in iCal format", an Outlook published
+// calendar, iCloud) and public ones (holidays, a club, a school). Read-only by nature. Repeating events and time zones
+// come from the file itself. An account keeps a list of them, each with its own name, and can switch one off.
 import ICAL from 'ical.js';
-import type { EventDetail, EventItem } from '@niko/shared';
+import { CALENDAR_LIMIT_MAX, type CalendarLink, type EventDetail, type EventItem } from '@niko/shared';
 import { publicHttpsUrl } from './providers';
 
 const MAX_BYTES = 5 * 1024 * 1024;
@@ -15,7 +16,6 @@ const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const CLIENT_UA = 'Niko-Calendar/1.0 (+https://niko.sxingxian.com)';
 const MS_HOSTS = /(^|\.)(outlook\.live\.com|outlook\.office365\.com|outlook\.office\.com)$/i;
 const isGoogle = (u: URL) => /(^|\.)calendar\.google\.com$/i.test(u.hostname);
-const ORDINAL = ['first', 'second', 'third'];
 
 /** One pasted address made readable: webcal:// is https://, and Outlook's "HTML" link becomes its ICS twin. */
 export function normalizeLink(raw: string): string {
@@ -28,10 +28,61 @@ export function normalizeLink(raw: string): string {
   return v;
 }
 
-/** The calendar links saved on a connection, as https addresses. */
-export function icalLinks(s: Record<string, string>): string[] {
-  return ['url', 'url2', 'url3'].map((k) => normalizeLink(s[k] ?? '')).filter((u) => !!publicHttpsUrl(u));
+// ---- The saved list
+// Stored inside the connection's encrypted secret as JSON under `cals`. Older connections held up to three addresses
+// in url, url2 and url3: those are read as calendars "0", "1" and "2", so their event ids (and what Home has already
+// shown) stay the same.
+export interface Cal { id: string; name: string; url: string; kind: 'private' | 'public'; on: boolean }
+const ID_RE = /^[a-z0-9]{1,12}$/;
+/** A calendar's name: plain, short, and safe to say in a sentence. */
+export const cleanCalName = (v: unknown) => String(v ?? '').replace(/[\u0000-\u001f\u007f“”"<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
+/** Google says which kind an address is; anything else is treated as private (its address is a secret). */
+export function kindOf(url: string): 'private' | 'public' {
+  const u = publicHttpsUrl(url);
+  return u && isGoogle(u) && /\/public\/[^/]*$/i.test(u.pathname) ? 'public' : 'private';
 }
+export function calendarsOf(s: Record<string, string> | null | undefined): Cal[] {
+  if (!s) return [];
+  if (typeof s.cals === 'string') {
+    let raw: unknown;
+    try { raw = JSON.parse(s.cals); } catch { return []; }
+    if (!Array.isArray(raw)) return [];
+    return raw.flatMap((c: any) => {
+      const url = normalizeLink(c?.url ?? '');
+      if (!c || !ID_RE.test(String(c.id)) || !publicHttpsUrl(url)) return [];
+      return [{ id: String(c.id), name: cleanCalName(c.name) || 'Calendar', url, kind: c.kind === 'public' ? 'public' : 'private', on: c.on !== false } as Cal];
+    }).slice(0, CALENDAR_LIMIT_MAX);
+  }
+  return ['url', 'url2', 'url3'].map((k) => normalizeLink(s[k] ?? '')).filter((u) => !!publicHttpsUrl(u))
+    .map((url, i) => ({ id: String(i), name: `Calendar ${i + 1}`, url, kind: kindOf(url), on: true }));
+}
+/** The secret to store for a list. */
+export const calendarsSecret = (list: Cal[]): Record<string, string> => ({ cals: JSON.stringify(list.map(({ id, name, url, kind, on }) => ({ id, name, url, kind, on }))) });
+export const newCalId = () => [...crypto.getRandomValues(new Uint8Array(8))].map((b) => 'abcdefghijklmnopqrstuvwxyz0123456789'[b % 36]).join('');
+/** A private address is a secret: only its server and file name are ever shown back. A public one is shown in full. */
+export function shownAddress(c: Pick<Cal, 'url' | 'kind'>): string {
+  const u = publicHttpsUrl(c.url);
+  if (!u) return '';
+  if (c.kind === 'public') return c.url.slice(0, 300);
+  const last = u.pathname.split('/').filter(Boolean).pop() ?? '';
+  return `${u.hostname}/…${last && last.length <= 40 ? '/' + last : ''}`;
+}
+export const shownCalendars = (list: Cal[]): CalendarLink[] => list.map((c) => ({ id: c.id, name: c.name, kind: c.kind, on: c.on, address: shownAddress(c) }));
+/** The addresses that are switched on (older callers and tests). */
+export const icalLinks = (s: Record<string, string>): string[] => calendarsOf(s).filter((c) => c.on).map((c) => c.url);
+/** Runs at most `n` at a time: a Worker may hold only a few outgoing connections open at once. */
+async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Promise<PromiseSettledResult<R>[]> {
+  const out: PromiseSettledResult<R>[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      try { out[i] = { status: 'fulfilled', value: await fn(items[i]!) }; } catch (e) { out[i] = { status: 'rejected', reason: e }; }
+    }
+  }));
+  return out;
+}
+const quoted = (c: Cal) => `“${c.name}”`;
 
 /** Why an address can't be read, in words that say what to copy instead. Never repeats the address (it is a secret). */
 function linkProblem(url: URL, status: number | 'html' | 'signin' | 'page', which: string): string {
@@ -91,7 +142,7 @@ const serverName = (u: URL) => (isGoogle(u) ? 'Google' : MS_HOSTS.test(u.hostnam
 const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000));
 
 /** One calendar file: from the kept copy when it is recent, otherwise from the server. Never echoes the address. */
-async function fetchIcs(url: string, which = 'first'): Promise<string> {
+async function fetchIcs(url: string, which = '“Calendar”'): Promise<string> {
   const u = new URL(url);
   // Google's "embed" and app links are pages for people, not files: say so before fetching.
   if (isGoogle(u) && !/\/ical\//i.test(u.pathname)) throw new Error(linkProblem(u, 'page', which));
@@ -184,39 +235,42 @@ function occurrences(comp: any, from: number, to: number, tzOffsetMin: number): 
   }
   return out;
 }
-const idOf = (link: number, o: Occ) => `${link}~${o.start}~${o.uid}`.slice(0, 1000);
+const idOf = (cal: string, o: Occ) => `${cal}~${o.start}~${o.uid}`.slice(0, 1000);
 
-export async function icalList(s: Record<string, string>, from: Date, to: Date, tzOffsetMin: number): Promise<EventItem[]> {
-  const links = icalLinks(s);
+export async function icalList(s: Record<string, string>, from: Date, to: Date, tzOffsetMin: number, max = CALENDAR_LIMIT_MAX): Promise<EventItem[]> {
+  // Only as many as the account may keep are read, even if its limit was lowered after they were added.
+  const links = calendarsOf(s).filter((c) => c.on).slice(0, max);
   // One address failing (reset, unpublished, a slow server) must not hide the events of the others.
-  const lists = await Promise.allSettled(links.map(async (url, i) => {
-    const occ = occurrences(parse(await fetchIcs(url, ORDINAL[i])), from.getTime(), to.getTime(), tzOffsetMin);
-    return occ.map((o) => ({ id: idOf(i, o), provider: 'ical', title: String(o.ev.summary || '(no title)'), source: 'Calendar', start: o.start, time: '', allDay: o.allDay } as EventItem));
-  }));
+  const lists = await pool(links, 6, async (cal) => {
+    const occ = occurrences(parse(await fetchIcs(cal.url, quoted(cal))), from.getTime(), to.getTime(), tzOffsetMin);
+    return occ.map((o) => ({ id: idOf(cal.id, o), provider: 'ical', title: String(o.ev.summary || '(no title)'), source: cal.name, start: o.start, time: '', allDay: o.allDay } as EventItem));
+  });
   const failed = lists.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
   for (const f of failed) console.warn(`ical: ${String(f.reason?.message ?? f.reason).slice(0, 200)}`);
   if (links.length && failed.length === links.length) throw failed[0]!.reason;
-  return lists.flatMap((r) => (r.status === 'fulfilled' ? r.value : [])).sort((a, b) => a.start - b.start).slice(0, 50);
+  return lists.flatMap((r) => (r.status === 'fulfilled' ? r.value : [])).sort((a, b) => a.start - b.start).slice(0, 100);
 }
 
 export async function icalDetail(s: Record<string, string>, id: string, tzOffsetMin = 0): Promise<EventDetail> {
-  const m = /^(\d)~(-?\d{1,15})~([\s\S]+)$/.exec(id);
-  const url = m ? icalLinks(s)[Number(m[1])] : undefined;
-  if (!m || !url) throw new Error('That event is not in your calendar links.');
+  const m = /^([a-z0-9]{1,12})~(-?\d{1,15})~([\s\S]+)$/.exec(id);
+  const cal = m ? calendarsOf(s).find((c) => c.id === m[1] && c.on) : undefined;
+  if (!m || !cal) throw new Error('That event is not in your calendar links.');
   const start = Number(m[2]);
-  const o = occurrences(parse(await fetchIcs(url, ORDINAL[Number(m[1])])), start - 86_400_000, start + 86_400_000, tzOffsetMin).find((x) => x.uid === m[3] && x.start === start);
+  const o = occurrences(parse(await fetchIcs(cal.url, quoted(cal))), start - 86_400_000, start + 86_400_000, tzOffsetMin).find((x) => x.uid === m[3] && x.start === start);
   if (!o) throw new Error('That event is no longer in the calendar.');
   const attendees = (o.ev.attendees ?? []).map((p: any) => String(p.getParameter?.('cn') || String(p.getFirstValue?.() ?? '').replace(/^mailto:/i, ''))).filter(Boolean).slice(0, 30);
   const desc = String(o.ev.description ?? '').trim();
-  return { title: String(o.ev.summary || '(no title)'), source: 'Calendar', start: o.start, end: o.end, allDay: o.allDay, location: String(o.ev.location ?? '') || undefined, description: desc ? desc.slice(0, 8000) : undefined, attendees };
+  return { title: String(o.ev.summary || '(no title)'), source: cal.name, start: o.start, end: o.end, allDay: o.allDay, location: String(o.ev.location ?? '') || undefined, description: desc ? desc.slice(0, 8000) : undefined, attendees };
 }
 
-/** Reads the links once to check them before they are saved. */
+/** Reads one address once, to check it before it is saved. */
+export async function icalCheckOne(url: string, name: string): Promise<void> {
+  const text = await fetchIcs(url, `“${name}”`);
+  try { parse(text); } catch { throw new Error(`The “${name}” calendar address gave a file Niko can’t read as a calendar.`); }
+}
+/** Reads every saved address once (older callers and tests). */
 export async function icalCheck(s: Record<string, string>): Promise<void> {
-  const links = icalLinks(s);
-  if (!links.length) throw new Error('Paste the private iCal address of your calendar (it ends in .ics).');
-  for (const [i, url] of links.entries()) {
-    const text = await fetchIcs(url, ORDINAL[i]);
-    try { parse(text); } catch { throw new Error(`The ${ORDINAL[i]} calendar address gave a file Niko can’t read as a calendar.`); }
-  }
+  const list = calendarsOf(s);
+  if (!list.length) throw new Error('Paste the iCal address of your calendar (it usually ends in .ics).');
+  for (const c of list) await icalCheckOne(c.url, c.name);
 }

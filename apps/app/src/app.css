@@ -463,6 +463,25 @@ dialog.sheet { border: 1px solid var(--line); border-radius: 28px; background: #
 dialog.sheet::backdrop { background: rgba(0,0,0,.6); }
 dialog.sheet form { display: flex; flex-direction: column; gap: 16px; }
 dialog.sheet.wide { width: min(580px, calc(100% - 24px)); }
+/* Calendar links */
+.sheet-h { font-weight: 500; font-size: 24px; margin: 0; }
+.cal-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.cal-count { white-space: nowrap; }
+.cal-list { display: flex; flex-direction: column; border-top: 1px solid var(--line); max-height: min(52vh, 460px); overflow-y: auto; }
+.cal-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: 'name sw ed' 'meta sw ed'; align-items: center; column-gap: 14px; row-gap: 6px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.cal-row > .switch, .cal-row > [role=switch] { grid-area: sw; }
+.cal-row > .bt { grid-area: ed; }
+.cal-row.off .cal-name, .cal-row.off .cal-meta { opacity: .5; }
+.cal-name { grid-area: name; font-weight: 500; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.cal-meta { grid-area: meta; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cal-tag { flex: none; font: 500 11px 'JetBrains Mono', monospace; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; }
+.cal-addr { font: 400 12px 'JetBrains Mono', monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.cal-kind-pick { display: flex; gap: 10px; }
+.cal-keep { font-size: 13px; margin-top: -6px; }
+.cal-help summary { cursor: pointer; color: var(--muted); font-size: 14px; padding: 4px 0; }
+.cal-help[open] summary { margin-bottom: 12px; }
+button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; }
+@media (max-width: 520px) { .cal-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'name sw' 'meta ed'; column-gap: 12px; row-gap: 10px; } .cal-row > .bt { height: 36px; padding: 0 14px; } }
 /* Provider app setup: numbered steps, each with its console link and the addresses to copy. */
 .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
 .steps li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 12px; }

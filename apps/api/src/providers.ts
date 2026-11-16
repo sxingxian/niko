@@ -2,10 +2,11 @@
 // None of this has been exercised against live accounts yet: treat each adapter as untested until you link one.
 import { gmailBatch } from './gmail';
 import { and, eq } from 'drizzle-orm';
-import { connections, providerApps, type Db } from '@niko/db';
+import { connections, providerApps, users, type Db } from '@niko/db';
 import { PROVIDERS, type AppId, type EventItem, type MailItem, type NoteItem } from '@niko/shared';
 import { notionDeleted, notionTitle } from './details';
 import { icalList } from './calendarlink';
+import { accountLimitsFor } from './limits';
 import { imapList, imapReply, isImapProvider } from './mailbox';
 import type { Env } from './env';
 import { seal, unseal } from './lib/crypto';
@@ -154,7 +155,10 @@ export async function listMail(env: Env, db: Db, userId: string, provider: strin
 export async function listEvents(env: Env, db: Db, userId: string, provider: string, dayStart: Date, dayEnd: Date, tzOffsetMin = 0): Promise<EventItem[]> {
   const s = await credentials(env, db, userId, provider);
   if (!s) return [];
-  if (provider === 'ical') return icalList(s, dayStart, dayEnd, tzOffsetMin);
+  if (provider === 'ical') {
+    const row = (await db.select({ accountLimits: users.accountLimits }).from(users).where(eq(users.id, userId)).limit(1))[0];
+    return icalList(s, dayStart, dayEnd, tzOffsetMin, (await accountLimitsFor(db, row ?? {})).calendars);
+  }
   if (provider === 'google-calendar') {
     const u = new URL('https://www.googleapis.com/calendar/v3/calendars/primary/events');
     u.searchParams.set('timeMin', dayStart.toISOString()); u.searchParams.set('timeMax', dayEnd.toISOString());

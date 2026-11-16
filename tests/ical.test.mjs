@@ -1,4 +1,4 @@
-import { icalList, icalDetail, icalCheck, icalLinks, normalizeLink, forgetIcsCopies } from '../apps/api/src/calendarlink.ts';
+import { icalList, icalDetail, icalCheck, icalCheckOne, icalLinks, normalizeLink, forgetIcsCopies, calendarsOf, calendarsSecret, shownCalendars, kindOf, cleanCalName, newCalId } from '../apps/api/src/calendarlink.ts';
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 const ICS = [
 'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Google Inc//Google Calendar 70.9054//EN',
@@ -41,7 +41,7 @@ const S = { url: 'webcal://calendar.google.com/calendar/ical/me%40gmail.com/priv
 ok(icalLinks(S)[0] === URL1, 'webcal:// is read as https://');
 await icalCheck(S); ok(true, 'link check passes');
 const fails = async (secret, re, what) => { try { await icalCheck(secret); ok(false, what + ' (was accepted)'); } catch (e) { ok(re.test(e.message) && !/https?:\/\//.test(e.message), `${what}: ${e.message}`); } };
-await fails({ url: 'https://example.com/missing.ics' }, /first calendar address no longer works/, 'a dead link is explained');
+await fails({ url: 'https://example.com/missing.ics' }, /“Calendar 1” calendar address no longer works/, 'a dead link is explained');
 const sgt = (ms) => new Date(ms + 8 * 3600_000).toISOString().slice(11, 16);
 let [a, b] = day(2026, 11, 16);
 let ev = await icalList(S, a, b, tz);
@@ -67,10 +67,10 @@ ok(seen.filter((x) => x.u === OUT).every((x) => browserUA({ 'user-agent': x.ua }
 ok(normalizeLink(OUT.replace('calendar.ics', 'calendar.html')) === OUT, 'Outlook’s HTML link is turned into its ICS link');
 await icalCheck({ url: OUT.replace('calendar.ics', 'calendar.html') }); ok(true, 'pasting Outlook’s HTML link still connects');
 ok(normalizeLink('webcal://outlook.live.com/owa/calendar/x/y/calendar.html') === 'https://outlook.live.com/owa/calendar/x/y/calendar.ics', 'webcal + HTML link both fixed');
-await fails({ url: 'https://outlook.live.com/owa/calendar/00000000-0000-0000-0000-000000000000/gone/cid-1/calendar.ics' }, /Outlook didn’t hand over the first calendar.*still published/, 'an unpublished Outlook calendar is explained');
+await fails({ url: 'https://outlook.live.com/owa/calendar/00000000-0000-0000-0000-000000000000/gone/cid-1/calendar.ics' }, /Outlook didn’t hand over the “Calendar 1” calendar.*still published/, 'an unpublished Outlook calendar is explained');
 await fails({ url: 'https://calendar.google.com/calendar/ical/me%40gmail.com/public/basic.ics' }, /public address.*Secret address in iCal format/, 'Google public address of a private calendar is explained');
 await fails({ url: 'https://calendar.google.com/calendar/embed?src=me%40gmail.com' }, /web page.*Secret address in iCal format/, 'Google embed link is explained');
-await fails({ url: URL1, url2: 'https://calendar.google.com/calendar/ical/x/private-old/basic.ics' }, /second calendar address no longer exists/, 'the failing address is named by position');
+await fails({ url: URL1, url2: 'https://calendar.google.com/calendar/ical/x/private-old/basic.ics' }, /“Calendar 2” calendar address no longer exists/, 'the failing address is named');
 await fails({ url: 'https://slow.example.com/a.ics' }, /didn’t answer in time/, 'a server that times out is explained');
 
 // Google + Outlook together, as in the screenshot
@@ -84,6 +84,32 @@ ok(o.title === 'Team sync' && sgt(o.start) === '14:00', 'an Outlook event (Windo
 ev = await icalList({ url: URL1, url2: 'https://outlook.live.com/owa/calendar/0/gone/cid-1/calendar.ics' }, a, b, tz);
 ok(ev.some((e) => e.title === 'Dentist'), 'a calendar that stops working does not hide the others');
 try { await icalList({ url: 'https://outlook.live.com/owa/calendar/0/gone/cid-1/calendar.ics' }, a, b, tz); ok(false, 'all failed accepted'); } catch { ok(true, 'when every address fails, the problem is reported'); }
+
+// ---- A named list of calendars (private and public), editable
+{
+  const legacy = calendarsOf(BOTH);
+  ok(legacy.length === 2 && legacy[0].id === '0' && legacy[1].id === '1' && legacy[0].name === 'Calendar 1', 'older url/url2 links become a list with ids 0 and 1, so their event ids stay the same');
+  const PUB = 'https://calendar.google.com/calendar/ical/en.singapore%23holiday%40group.v.calendar.google.com/public/basic.ics';
+  ok(kindOf(URL1) === 'private' && kindOf(PUB) === 'public' && kindOf(OUT) === 'private', 'Google public addresses are recognised; everything else is treated as private');
+  const list = [{ id: 'work1', name: 'Work', url: URL1, kind: 'private', on: true }, { id: 'out1', name: 'Family', url: OUT, kind: 'private', on: true }, { id: 'pub1', name: 'Holidays', url: PUB, kind: 'public', on: false }];
+  const S3 = calendarsSecret(list);
+  ok(calendarsOf(S3).length === 3 && calendarsOf(S3)[2].on === false, 'the list is stored and read back, including a switched-off calendar');
+  const shown = shownCalendars(calendarsOf(S3));
+  ok(shown[0].address === 'calendar.google.com/…/basic.ics' && !shown.some((c) => c.kind === 'private' && /private-abc|cid-1234/.test(c.address)), 'a private address is never shown back in full: ' + shown[0].address);
+  ok(shown[2].address === PUB, 'a public address is shown in full');
+  ev = await icalList(S3, a, b, tz);
+  ok(ev.find((e) => e.title === 'Dentist')?.source === 'Work' && ev.find((e) => e.title === 'Team sync')?.source === 'Family', 'events carry their calendar’s name');
+  ok(ev.every((e) => /^(work1|out1)~/.test(e.id)), 'a switched-off calendar is not read');
+  ok((await icalDetail(S3, ev.find((e) => e.title === 'Team sync').id, tz)).source === 'Family', 'an event opens from its own calendar');
+  try { await icalDetail(S3, 'pub1~0~x', tz); ok(false, 'off calendar opened'); } catch { ok(true, 'an event from a switched-off calendar is refused'); }
+  ev = await icalList(S3, a, b, tz, 1);
+  ok(ev.every((e) => e.id.startsWith('work1~')), 'only as many calendars as the account may keep are read');
+  ok(calendarsOf({ cals: '[{"id":"../x","name":"a","url":"https://example.com/a.ics"},{"id":"ok","name":"b","url":"http://10.0.0.1/a.ics"},{"id":"ok2","name":"<b>“Hi”</b>","url":"https://example.com/b.ics"}]' }).map((c) => c.id + ':' + c.name).join() === 'ok2:bHi/b', 'bad ids, private addresses and markup in names are dropped');
+  ok(cleanCalName('  Work\n  stuff  ') === 'Work stuff' && /^[a-z0-9]{8}$/.test(newCalId()), 'names are tidied; new ids are short and plain');
+  await icalCheckOne(URL1, 'Work'); ok(true, 'one address is checked on its own before it is saved');
+  try { await icalCheckOne('https://example.com/missing.ics', 'Gym'); ok(false, 'dead accepted'); } catch (e) { ok(/“Gym” calendar address no longer works/.test(e.message) && !/https?:/.test(e.message), 'a failing check names the calendar and never repeats the address: ' + e.message); }
+  ok(calendarsOf({ cals: JSON.stringify(Array.from({ length: 80 }, (_, i) => ({ id: 'c' + i, name: 'C', url: `https://example.com/${i}.ics` }))) }).length === 50, 'never more than 50 are read from storage');
+}
 
 // ---- Rate limits: read each feed at most every 10 minutes, keep the last good copy, back off when told to
 {
@@ -119,7 +145,7 @@ try { await icalList({ url: 'https://outlook.live.com/owa/calendar/0/gone/cid-1/
   ok((await icalList(S2, x, y, tz)).length > 0, 'a server fault (503) with a saved copy: events still show');
   // No saved copy at all and Google says 429: a plain message, and no hammering.
   forgetIcsCopies(); mode = '429'; retryAfter = null; calls = 0; clock += 60 * 60_000;
-  try { await icalList(S2, x, y, tz); ok(false, '429 without copy accepted'); } catch (e) { ok(/Google is limiting how often the first calendar can be read.*about 15 min/.test(e.message), '429 with no saved copy explains and says when: ' + e.message); }
+  try { await icalList(S2, x, y, tz); ok(false, '429 without copy accepted'); } catch (e) { ok(/Google is limiting how often the “Calendar 1” calendar can be read.*about 15 min/.test(e.message), '429 with no saved copy explains and says when: ' + e.message); }
   try { await icalList(S2, x, y, tz); } catch (e) { ok(calls === 1 && /asked Niko to wait/.test(e.message), 'and asking again right away does not call Google: ' + e.message); }
   Date.now = realNow;
 }

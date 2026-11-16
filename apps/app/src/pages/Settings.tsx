@@ -5,6 +5,7 @@ import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSp
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { AI_PRESETS, aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, presetOf, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
+import { type CalendarLink } from '@niko/shared';
 import { cleanGlancePrefs, GLANCE_LIMIT_DEFAULTS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_REMIND_STEPS, GLANCE_STEPS, glanceEvery, type GlancePart, type GlancePrefs } from '@niko/shared';
 import { AI_OPTION_GROUPS, aiAllowed, brainOption, hearOption, imageOption, voiceOption } from '@niko/shared';
 import { IMAGE_PROVIDERS, imageOrder, imagePresetOf, MAX_IMAGE_KEYS, type ImageKeyInfo, type ImageProvider, type ImageSource } from '@niko/shared';
@@ -102,6 +103,8 @@ export function Connections() {
   const appDlg = useRef<HTMLDialogElement>(null);
   const [manage, setManage] = useState<Prov | null>(null);
   const manageDlg = useRef<HTMLDialogElement>(null);
+  const [cals, setCals] = useState<Prov | null>(null);
+  const calDlg = useRef<HTMLDialogElement>(null);
 
   const load = useCallback(() => api<{ providers: Prov[]; apps: MyApp[]; redirectUrls: string[] }>('/connections')
     .then((r) => { setList(r.providers.filter((p) => p.group !== 'ai')); setApps(r.apps); setRedirects(r.redirectUrls); return r; })
@@ -117,6 +120,8 @@ export function Connections() {
   const appOf = (p: Prov) => apps.find((a) => a.id === p.app);
   const act = (p: Prov) => {
     setNote(null);
+    // Calendar links are a list: one sheet to add, change and remove them, linked or not.
+    if (p.id === 'ical') { setCals(p); calDlg.current?.showModal(); return; }
     if (p.linked) { setConfirmRemove(''); setManage(p); manageDlg.current?.showModal(); return; }
     if (p.kind === 'planned') return setNote({ ok: false, text: `${p.name} is not available yet.` });
     if (p.kind === 'oauth') {
@@ -253,6 +258,10 @@ export function Connections() {
         )}
       </dialog>
 
+      <dialog ref={calDlg} className="sheet wide" onClose={() => setCals(null)}>
+        {cals && <CalendarLinks prov={cals} onChanged={() => void load()} onClose={() => calDlg.current?.close()} />}
+      </dialog>
+
       <dialog ref={appDlg} className="sheet wide" onClose={() => setAppForm(null)}>
         {appForm && (
           <AppKeysForm key={appForm.app.id} app={appForm.app} then={appForm.then} redirects={redirects}
@@ -292,6 +301,124 @@ export function Connections() {
         )}
       </dialog>
     </SettingsPage>
+  );
+}
+
+// ---------------------------------------------------------------- calendar links (iCal): a list to add, change and remove
+// Each address is checked by reading it once before it is saved. A private address is never shown back in full: to
+// change it, paste the new one (left blank, the saved one is kept).
+const guessKind = (url: string): 'private' | 'public' | null => (/calendar\.google\.com\/calendar\/ical\/[^/]+\/public\//i.test(url) ? 'public' : /\/private-[^/]+\//i.test(url) ? 'private' : null);
+function CalendarLinks({ prov, onChanged, onClose }: { prov: Prov; onChanged: () => void; onClose: () => void }) {
+  type Reply = { calendars: CalendarLink[]; limit: number };
+  const [list, setList] = useState<CalendarLink[] | null>(null);
+  const [limit, setLimit] = useState(20);
+  const [editing, setEditing] = useState<CalendarLink | 'new' | null>(null);
+  const [name, setName] = useState('');
+  const [url, setUrl] = useState('');
+  const [kind, setKind] = useState<'private' | 'public'>('private');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [sure, setSure] = useState(false);
+  const [help, setHelp] = useState(false);
+  const open = (c: CalendarLink | 'new') => {
+    setErr(''); setSure(false); setUrl('');
+    setName(c === 'new' ? '' : c.name); setKind(c === 'new' ? 'private' : c.kind);
+    setEditing(c);
+  };
+  const take = (r: Reply) => { setList(r.calendars); setLimit(r.limit); onChanged(); };
+  useEffect(() => {
+    api<Reply>('/calendars').then((r) => { setList(r.calendars); setLimit(r.limit); if (!r.calendars.length) { open('new'); setHelp(true); } })
+      .catch((e) => { setList([]); setErr(e.message); });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!editing || busy) return;
+    setErr(''); setBusy(true);
+    try {
+      take(editing === 'new'
+        ? await api<Reply>('/calendars', { body: { name, url, kind } })
+        : await api<Reply>(`/calendars/${editing.id}`, { method: 'PATCH', body: { name, kind, ...(url.trim() ? { url } : {}) } }));
+      setEditing(null);
+    } catch (x: any) { setErr(x.message ?? 'That did not work.'); } finally { setBusy(false); }
+  };
+  const toggle = async (c: CalendarLink, on: boolean) => {
+    setErr('');
+    setList((l) => l?.map((x) => (x.id === c.id ? { ...x, on } : x)) ?? l);
+    try { take(await api<Reply>(`/calendars/${c.id}`, { method: 'PATCH', body: { on } })); }
+    catch (x: any) { setErr(x.message); setList((l) => l?.map((y) => (y.id === c.id ? { ...y, on: !on } : y)) ?? l); }
+  };
+  const remove = async () => {
+    if (!editing || editing === 'new') return;
+    if (!sure) return setSure(true);
+    setBusy(true);
+    try { take(await api<Reply>(`/calendars/${editing.id}`, { method: 'DELETE' })); setEditing(null); }
+    catch (x: any) { setErr(x.message); } finally { setBusy(false); }
+  };
+  if (!list) return <form method="dialog"><h2 className="sheet-h">Calendar links</h2><p className="sub">Loading…</p></form>;
+  const full = list.length >= limit;
+
+  if (editing) {
+    const isNew = editing === 'new';
+    return (
+      <form onSubmit={save} className="cal-form">
+        <h2 className="sheet-h">{isNew ? 'Add a calendar' : `Edit “${editing.name}”`}</h2>
+        {prov.steps && (isNew || help) && (
+          <details className="cal-help" open={help} onToggle={(e) => setHelp((e.target as HTMLDetailsElement).open)}>
+            <summary>Where to find the address</summary>
+            <ol className="steps">
+              {prov.steps.map((s, i) => (
+                <li key={i}><span className="n" aria-hidden="true">{i + 1}</span><div className="step"><p>{s.text}</p>{s.link && <a className="bt step-link" href={s.link} target="_blank" rel="noopener noreferrer">{s.linkLabel ?? 'Open'} <Icon name="external" size={16} /></a>}</div></li>
+              ))}
+            </ol>
+          </details>
+        )}
+        <Field label="Name"><input className="in" maxLength={40} autoComplete="off" placeholder="Work, Family, Public holidays…" value={name} onChange={(e) => { setErr(''); setName(e.target.value); }} /></Field>
+        <Field label={isNew ? 'iCal address' : 'New iCal address · optional'}>
+          <input className="in" type="url" inputMode="url" autoComplete="off" spellCheck={false} required={isNew}
+            placeholder={isNew ? 'https://calendar.google.com/calendar/ical/…/basic.ics' : editing.address}
+            value={url} onChange={(e) => { setErr(''); setUrl(e.target.value); const g = guessKind(e.target.value); if (g) setKind(g); }} />
+        </Field>
+        {!isNew && <p className="sub cal-keep">{editing.kind === 'private' ? 'The saved address stays hidden. Leave this blank to keep it, or paste a new one to replace it.' : 'Leave this blank to keep the saved address.'}</p>}
+        <div role="group" aria-label="Kind of calendar" className="cal-kind-pick">
+          <button type="button" className="seg" aria-pressed={kind === 'private'} onClick={() => setKind('private')}>Private</button>
+          <button type="button" className="seg" aria-pressed={kind === 'public'} onClick={() => setKind('public')}>Public</button>
+        </div>
+        <p className="sub cal-keep">{kind === 'private' ? 'A secret address: stored encrypted and never shown in full again.' : 'A calendar anyone can subscribe to (holidays, a school, a club). Its address is shown in full.'}</p>
+        {err && <p className="err" role="alert">{err}</p>}
+        <div className="sheet-actions">
+          <button type="button" className="sec" onClick={() => (list.length ? setEditing(null) : onClose())}>{list.length ? 'Back' : 'Cancel'}</button>
+          {!isNew && <button type="button" className={sure ? 'pri danger' : 'sec'} onClick={remove} disabled={busy}>{sure ? 'Yes, remove it' : 'Remove'}</button>}
+          <button className="pri" disabled={busy}>{busy ? 'Checking…' : isNew ? 'Add' : 'Save'}</button>
+        </div>
+        {sure && !isNew && <p className="sub cal-keep" role="status">Removing “{editing.name}” deletes its saved address straight away.</p>}
+      </form>
+    );
+  }
+
+  return (
+    <form method="dialog" className="cal-sheet">
+      <div className="cal-top">
+        <h2 className="sheet-h">Calendar links</h2>
+        <span className="k cal-count">{list.length} of {limit}</span>
+      </div>
+      <p className="sub">Private and public iCal calendars, read-only. Switch one off to hide its events without removing it.</p>
+      <div className="cal-list">
+        {list.map((c) => (
+          <div key={c.id} className={'cal-row' + (c.on ? '' : ' off')}>
+            <b className="cal-name">{c.name}</b>
+            <span className="cal-meta"><span className="cal-tag">{c.kind === 'private' ? 'Private' : 'Public'}</span><span className="cal-addr">{c.address}</span></span>
+            <Switch on={c.on} onChange={(v) => toggle(c, v)} label={`Show ${c.name}`} />
+            <button type="button" className="bt" onClick={() => open(c)} aria-label={`Edit ${c.name}`}>Edit</button>
+          </div>
+        ))}
+      </div>
+      {err && <p className="err" role="alert">{err}</p>}
+      {full && <p className="sub cal-keep">{list.length > limit ? `Your account can keep ${limit}; only the first ${limit} switched on are read. Remove some to add others.` : `That’s the most your account can keep (${limit}). Remove one to add another.`}</p>}
+      <div className="sheet-actions">
+        <button className="sec">Done</button>
+        <button type="button" className="pri" onClick={() => open('new')} disabled={full}>Add calendar</button>
+      </div>
+    </form>
   );
 }
 
