@@ -13,11 +13,14 @@ function Codes({ codes }: { codes: string[] }) {
 }
 interface UserRow {
   id: string; name: string; email: string; role: string; status: string; isOwner: boolean; lastActiveAt: string | null;
-  access: AccessState; lifetime: boolean; accessUntil: string | null; accessKind: string | null; accessPaidUntil: string | null; accessStartMonths: number;
-  sub: { plan: string | null; status: string | null; periodEnd: string | null; cancelAtEnd: boolean } | null;
-  signup: { state: 'verify' | 'pay' | 'waiting'; paid: boolean; priceCents: number | null; months: number | null; removeAt: string | null } | null;
+  access: AccessState; lifetime: boolean; accessUntil: string | null; accessKind: string | null; accessPaidUntil: string | null; accessStartMonths: number; paidMode: Mode | null;
+  sub: { plan: string | null; status: string | null; periodEnd: string | null; cancelAtEnd: boolean; mode: Mode | null } | null;
+  signup: { state: 'verify' | 'pay' | 'waiting'; paid: boolean; mode: Mode | null; priceCents: number | null; months: number | null; removeAt: string | null } | null;
 }
-interface InviteRow { id: string; email: string; role: string; expiresAt: string; access: 'paid' | 'free' | 'life'; priceCents: number | null; months: number | null; paidAt: string | null; codeTries: number; hasCode: boolean }
+interface InviteRow { id: string; email: string; role: string; expiresAt: string; access: 'paid' | 'free' | 'life'; priceCents: number | null; months: number | null; paidAt: string | null; stripeMode: Mode | null; codeTries: number; hasCode: boolean }
+type Mode = 'test' | 'live';
+type ModeStatus = { ready: boolean; secret: boolean; webhook: boolean; problem: string | null };
+const testTag = (m: Mode | null | undefined) => (m === 'test' ? ' · test' : '');
 interface AuditRow { id: string; action: string; detail: Record<string, unknown>; createdAt: string }
 
 
@@ -344,9 +347,79 @@ function LimitsAdmin({ guard }: { guard: (e: unknown) => void }) {
 const fmtDate = (d: string | Date | null | undefined) => (d ? new Date(d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '');
 const centsText = (c: number | null | undefined) => (typeof c === 'number' ? (c / 100).toFixed(2) : '');
 
+/** Shown at the top of Users and Payments while new payments use Stripe's test mode. */
+function TestBanner({ onOpen }: { onOpen?: () => void }) {
+  return (
+    <div className="testbanner" role="note">
+      <span><b>Stripe test mode.</b> New payments use test cards and no real money moves, but anyone who pays with a test card still gets into Niko.</span>
+      {onOpen && <button className="bt sm" onClick={onOpen}>Go live</button>}
+    </div>
+  );
+}
+
+/** Test or live: which Stripe keys new payments use. The keys themselves stay in the server's secrets. */
+function ModeCard({ mode, modes, onSwitched, guard }: { mode: Mode; modes: Record<Mode, ModeStatus>; onSwitched: (m: Mode) => void; guard: (e: unknown) => void }) {
+  const [asking, setAsking] = useState<Mode | null>(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    if (!asking) return;
+    setBusy(true); setErr('');
+    try { await api('/admin/payments/mode', { method: 'PUT', body: { mode: asking } }); onSwitched(asking); setAsking(null); }
+    catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setErr((e as Error).message); } finally { setBusy(false); }
+  };
+  const line = (m: Mode) => {
+    const st = modes[m];
+    return (
+      <div className="mode-row">
+        <span className="pay-txt"><span>{m === 'live' ? 'Live' : 'Test'} keys</span>
+          <span className="sub small">{st.problem ?? [st.secret ? 'Secret key set' : 'Secret key missing', st.webhook ? 'webhook secret set' : 'webhook secret missing'].join(' · ')}</span></span>
+        <span className={'pill-st ' + (st.ready ? 'ok' : 'no')}>{st.ready ? 'Ready' : 'Not ready'}</span>
+      </div>
+    );
+  };
+  return (
+    <section className="g card" aria-label="Stripe mode">
+      <div className="mode-head">
+        <div><span className="k">Stripe mode</span><p className="sub" style={{ marginTop: 6 }}>{mode === 'live' ? 'Live: new invites, sign-ups and plans charge real money.' : 'Test: new payments use Stripe’s test cards. No real money moves.'}</p></div>
+        <div role="group" aria-label="Stripe mode" className="segs">
+          {(['test', 'live'] as Mode[]).map((m) => (
+            <button key={m} className={'seg' + (m === 'live' ? ' live' : '')} aria-pressed={mode === m} disabled={mode !== m && !modes[m].ready} title={mode !== m && !modes[m].ready ? `Add the ${m} keys first` : undefined}
+              onClick={() => { if (mode !== m) { setErr(''); setAsking(m); } }}>{m === 'live' ? 'Live' : 'Test'}</button>
+          ))}
+        </div>
+      </div>
+      <div className="mode-rows">{line('test')}{line('live')}</div>
+      <p className="sub small">Switching changes only new payments. Payments, plans and refunds already made keep working in the mode they were made in, and are labelled “test” in Users when they were test payments. The keys are kept in the server’s secrets, never here.</p>
+      {asking && (
+        <div className="scrim" onClick={(e) => { if (e.target === e.currentTarget) setAsking(null); }}>
+          <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="modeh">
+            <div><h2 id="modeh">{asking === 'live' ? 'Switch to live payments?' : 'Switch to test mode?'}</h2>
+              <p className="sub">{asking === 'live' ? 'From now on, new invites, sign-ups and plans charge real money through your live Stripe account.' : 'New payments will use Stripe’s test cards, and no real money moves.'}</p></div>
+            <ul className="mode-list">
+              {asking === 'live' ? <>
+                <li>Check your prices in Pricing below before you switch.</li>
+                <li>Anything paid in test mode keeps its access until it ends, labelled “test” in Users. Unlock or switch off those accounts if they shouldn’t keep it.</li>
+                <li>Test plans keep renewing in Stripe’s test mode until cancelled there.</li>
+              </> : <>
+                <li>Anyone who pays with a test card gets real access to Niko. Use test mode only while you’re checking things.</li>
+                <li>Live plans keep renewing and charging as normal; refunds of live payments still go to live.</li>
+              </>}
+            </ul>
+            {err && <p className="err" role="alert">{err}</p>}
+            <div className="dialog-acts"><button className="bt" onClick={() => setAsking(null)}>Cancel</button><button className="pri" style={{ height: 44, fontSize: 14 }} onClick={go} disabled={busy}>{busy ? 'Switching…' : asking === 'live' ? 'Switch to live' : 'Switch to test'}</button></div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function PaymentsAdmin({ guard }: { guard: (e: unknown) => void }) {
   const [s, setS] = useState<PaymentSettings | null>(null);
   const [ready, setReady] = useState(true);
+  const [mode, setMode] = useState<Mode>('test');
+  const [modes, setModes] = useState<Record<Mode, ModeStatus> | null>(null);
   const [once, setOnce] = useState('');
   const [mPrice, setMPrice] = useState('');
   const [yPrice, setYPrice] = useState('');
@@ -355,8 +428,8 @@ function PaymentsAdmin({ guard }: { guard: (e: unknown) => void }) {
   const [busy, setBusy] = useState(false);
   const load = useCallback(async () => {
     try {
-      const r = await api<{ settings: PaymentSettings; stripe: boolean }>('/admin/payments');
-      setS(r.settings); setReady(r.stripe);
+      const r = await api<{ settings: PaymentSettings; stripe: boolean; mode: Mode; modes: Record<Mode, ModeStatus> }>('/admin/payments');
+      setS(r.settings); setReady(r.stripe); setMode(r.mode); setModes(r.modes);
       setOnce(centsText(r.settings.onceCents)); setMPrice(centsText(r.settings.monthly.cents)); setYPrice(centsText(r.settings.yearly.cents));
       setLen(String(r.settings.unit === 'years' ? r.settings.months / 12 : r.settings.months));
     } catch (e) { guard(e); }
@@ -396,8 +469,10 @@ function PaymentsAdmin({ guard }: { guard: (e: unknown) => void }) {
   };
   const laterBits = [s.monthly.on && `${toCents(mPrice) ? money(toCents(mPrice)) : 'SGD [MONTHLY]'} a month`, s.yearly.on && `${toCents(yPrice) ? money(toCents(yPrice)) : 'SGD [YEARLY]'} a year`].filter(Boolean).join(' or ');
   return <>
-    <header><h1>Payments</h1><p className="sub" style={{ fontSize: 15, display: 'flex', alignItems: 'center', gap: 10 }}><i className={'dot' + (ready ? ' on' : '')} />{ready ? 'Stripe connected · SGD · pay once for a set time, then a monthly or yearly plan' : 'Stripe isn’t connected: paid invites, paid sign-ups and plans are off until the keys are added (docs/DEPLOYMENT.md).'}</p></header>
+    {mode === 'test' && <TestBanner />}
+    <header><h1>Payments</h1><p className="sub" style={{ fontSize: 15, display: 'flex', alignItems: 'center', gap: 10 }}><i className={'dot' + (ready ? (mode === 'live' ? ' on' : ' test') : '')} />{ready ? `Stripe ${mode === 'live' ? 'live' : 'test mode'} · SGD · pay once for a set time, then a monthly or yearly plan` : `Stripe ${mode} mode isn’t set up: paid invites, paid sign-ups and plans are off until its keys are added (docs/DEPLOYMENT.md).`}</p></header>
     {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
+    {modes && <ModeCard mode={mode} modes={modes} guard={guard} onSwitched={(m) => { setMode(m); setReady(modes[m].ready); setNote({ ok: true, text: m === 'live' ? 'Live. New payments now charge real money.' : 'Test mode. New payments use test cards.' }); }} />}
     <div className="pay-grid">
       <section className="g card" aria-label="Pricing">
         <div><span className="k">Pricing</span><p className="sub" style={{ marginTop: 6 }}>The default for new invites and sign-ups. Each invite can change it.</p></div>
@@ -522,20 +597,21 @@ function payText(u: UserRow): { text: string; tone?: 'await' | 'ended' | 'warn' 
     const removing = removeIn !== null ? ` · removed in ${removeIn} day${removeIn === 1 ? '' : 's'}` : '';
     if (u.signup.state === 'verify') return { text: `Signed up, email not confirmed${removing}`, tone: 'warn' };
     if (u.signup.state === 'pay') return { text: `Signed up, not paid${removing}`, tone: 'warn' };
-    if (u.signup.paid) return { text: `Signed up · paid for ${lengthLabel(u.signup.months ?? 12)}`, tone: 'await' };
+    if (u.signup.paid) return { text: `Signed up · paid for ${lengthLabel(u.signup.months ?? 12)}${testTag(u.signup.mode)}`, tone: 'await' };
     return { text: 'Signed up · email confirmed', tone: 'await' };
   }
   if (u.lifetime) return { text: 'Lifetime' };
   const sub = u.sub;
   if (sub && ['active', 'trialing', 'past_due', 'unpaid'].includes(sub.status ?? '')) {
     const name = sub.plan === 'yearly' ? 'yearly' : 'monthly';
-    if (sub.status === 'trialing') return { text: `${name === 'yearly' ? 'Yearly' : 'Monthly'} plan · starts ${fmtDate(sub.periodEnd)}` };
-    if (sub.status !== 'active') return { text: `${name === 'yearly' ? 'Yearly' : 'Monthly'} plan · payment failed`, tone: 'warn' };
-    return { text: `${name === 'yearly' ? 'Yearly' : 'Monthly'} plan · ${sub.cancelAtEnd ? 'ends' : 'renews'} ${fmtDate(sub.periodEnd)}` };
+    const t = testTag(sub.mode);
+    if (sub.status === 'trialing') return { text: `${name === 'yearly' ? 'Yearly' : 'Monthly'} plan · starts ${fmtDate(sub.periodEnd)}${t}` };
+    if (sub.status !== 'active') return { text: `${name === 'yearly' ? 'Yearly' : 'Monthly'} plan · payment failed${t}`, tone: 'warn' };
+    return { text: `${name === 'yearly' ? 'Yearly' : 'Monthly'} plan · ${sub.cancelAtEnd ? 'ends' : 'renews'} ${fmtDate(sub.periodEnd)}${t}` };
   }
   if (u.access.has && u.accessKind === 'unlocked') return { text: u.accessPaidUntil ? `Paid to ${fmtDate(u.accessPaidUntil)} · then unlocked to ${fmtDate(u.accessUntil)}` : `Unlocked by admin · until ${fmtDate(u.accessUntil)}` };
   if (u.access.has && u.accessKind === 'free') return { text: `Free · until ${fmtDate(u.accessUntil)}` };
-  if (u.access.has) return { text: `Paid once · until ${fmtDate(u.accessUntil)}` };
+  if (u.access.has) return { text: `Paid once · until ${fmtDate(u.accessUntil)}${testTag(u.paidMode)}` };
   return { text: 'Paid time ended · needs a plan', tone: 'ended' };
 }
 function statusText(u: UserRow): string {
@@ -547,7 +623,7 @@ function invitePay(i: InviteRow): { text: string; tone?: 'await' | 'warn' } {
   if (i.hasCode && i.codeTries >= 5) return { text: 'Code locked · 5 wrong tries', tone: 'warn' };
   if (i.access === 'life') return { text: 'Lifetime · invited' };
   if (i.access === 'free') return { text: `Free for ${lengthLabel(i.months ?? 3)} · invited` };
-  if (i.paidAt) return { text: 'Paid · not signed up', tone: 'await' };
+  if (i.paidAt) return { text: `Paid · not signed up${testTag(i.stripeMode)}`, tone: 'await' };
   return { text: `${money(i.priceCents)} for ${lengthLabel(i.months ?? 12)} · awaiting payment`, tone: 'await' };
 }
 const PAID_LENGTHS = [1, 3, 6, 12, 24, 36];
@@ -561,6 +637,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
   const [reg, setReg] = useState<'invite' | 'open'>('invite');
   const [pay, setPay] = useState<PaymentSettings | null>(null);
   const [stripeOn, setStripeOn] = useState(true);
+  const [mode, setMode2] = useState<Mode>('test');
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [email, setEmail] = useState('');
   const [kind, setKind] = useState<'paid' | 'free' | 'life'>('paid');
@@ -575,8 +652,8 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
   const guard = useCallback((e: unknown) => { if (e instanceof ApiError && e.status === 401) onSignedOut(); else setNote({ ok: false, text: (e as Error).message }); }, [onSignedOut]);
   const load = useCallback(async () => {
     try {
-      const r = await api<{ users: UserRow[]; invites: InviteRow[]; registration: 'invite' | 'open'; payments: PaymentSettings; stripe: boolean }>('/admin/users');
-      setUsers(r.users); setInvites(r.invites); setReg(r.registration); setPay(r.payments); setStripeOn(r.stripe);
+      const r = await api<{ users: UserRow[]; invites: InviteRow[]; registration: 'invite' | 'open'; payments: PaymentSettings; stripe: boolean; stripeMode: Mode }>('/admin/users');
+      setUsers(r.users); setInvites(r.invites); setReg(r.registration); setPay(r.payments); setStripeOn(r.stripe); setMode2(r.stripeMode);
     } catch (e) { guard(e); }
   }, [guard]);
   useEffect(() => { void load(); if (!initialMe) api('/admin/me').then(setMe).catch(() => undefined); }, [load]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -645,6 +722,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
       </aside>
       <main key={tab} className="hud-in">
         {tab === 'users' ? <>
+          {mode === 'test' && <TestBanner onOpen={() => setTab('payments')} />}
           <header><h1>Users</h1><p className="sub" style={{ fontSize: 15 }}>{active} active · {waiting} sign-up{waiting === 1 ? '' : 's'} waiting for you · {invites.length} invited · {ended} needing a plan · {reg === 'invite' ? 'invite only' : 'open registration'}</p></header>
           <div className="two">
             <section className="g card" aria-label="Registration">
@@ -654,7 +732,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
                 <button className="seg" aria-pressed={reg === 'open'} onClick={() => setMode('open')}>Open registration</button>
               </div>
               <p className="sub">{reg === 'invite' ? 'Only people you invite can create an account. The sign-up page is hidden.' : pay?.openPay ? 'Anyone can sign up. They confirm their email and pay, then wait for you to switch them on.' : 'Anyone can sign up. They confirm their email, then wait for you to switch them on.'}</p>
-              <div className="stripe-line"><i className={'dot' + (stripeOn ? ' on' : '')} /><span className="sub">{stripeOn ? 'Stripe connected · payments in SGD' : 'Stripe isn’t connected yet: only free and lifetime invites can be sent.'}</span></div>
+              <div className="stripe-line"><i className={'dot' + (stripeOn ? (mode === 'live' ? ' on' : ' test') : '')} /><span className="sub">{stripeOn ? (mode === 'live' ? 'Stripe live · real payments in SGD' : 'Stripe test mode · no real money moves') : `Stripe ${mode} mode isn’t set up yet: only free and lifetime invites can be sent.`}</span></div>
             </section>
             <form className="g card" aria-label="Invite a user" onSubmit={invite}>
               <span className="k">Invite a user</span>

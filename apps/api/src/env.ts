@@ -7,9 +7,14 @@ export interface Env {
   ENCRYPTION_KEY: string;
   BOOTSTRAP_TOKEN?: string;
   RESEND_API_KEY?: string;
-  /** Stripe secret key (sk_live_… or sk_test_…). Without it and the webhook secret, payments are off. */
+  /** Stripe keys for each mode (sk_test_… / sk_live_…) and each mode's webhook signing secret (whsec_…). Admin → Payments
+   * chooses which mode new payments use; both are kept working for payments already made. */
+  STRIPE_TEST_SECRET_KEY?: string;
+  STRIPE_TEST_WEBHOOK_SECRET?: string;
+  STRIPE_LIVE_SECRET_KEY?: string;
+  STRIPE_LIVE_WEBHOOK_SECRET?: string;
+  /** The older single pair, still read for the mode its key belongs to. */
   STRIPE_SECRET_KEY?: string;
-  /** Signing secret of the Stripe webhook endpoint (whsec_…). */
   STRIPE_WEBHOOK_SECRET?: string;
   EMAIL_FROM: string;
   AI_MODEL: string;

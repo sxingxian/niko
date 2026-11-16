@@ -623,3 +623,4 @@ button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; 
   .auth .card { max-height: calc(100dvh - 140px); overflow-y: auto; }
   .codebox span { height: 52px; font-size: 22px; }
 }
+.testnote { font: 400 13px/1.45 system-ui, sans-serif; color: #ffe6c7; border: 1px solid rgba(255,207,154,.5); background: rgba(255,207,154,.08); border-radius: 12px; padding: 10px 14px; margin: 0; }

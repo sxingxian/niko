@@ -58,9 +58,10 @@ globalThis.fetch = async (input, init = {}) => {
   const path = u.pathname.replace(/^\/v1/, '');
   const call = { method, path, p: Object.fromEntries(params), auth: init.headers?.authorization };
   stripeCalls.push(call);
-  assert.equal(call.auth, 'Bearer sk_test_niko');
+  assert.ok(['Bearer sk_test_niko', 'Bearer sk_live_niko'].includes(call.auth), 'only the configured keys are used');
+  call.mode = call.auth.includes('sk_live_') ? 'live' : 'test';
   if (method === 'POST' && path === '/checkout/sessions') {
-    const id = `cs_test_${++seq}`;
+    const id = `cs_${call.mode}_${++seq}`;
     const { metadata, subMeta } = unflat(params);
     const s = { id, url: `https://checkout.stripe.com/c/pay/${id}`, mode: call.p.mode, metadata, subMeta, amount_total: Number(call.p['line_items[0][price_data][unit_amount]']), currency: call.p['line_items[0][price_data][currency]'], payment_status: 'unpaid', status: 'open' };
     sessions.set(id, s);
@@ -84,7 +85,7 @@ globalThis.fetch = async (input, init = {}) => {
 const env = {
   DATABASE_URL: url, ENCRYPTION_KEY: randomBytes(32).toString('base64'), BOOTSTRAP_TOKEN: 'boot-' + randomBytes(12).toString('hex'),
   RESEND_API_KEY: 're_test', EMAIL_FROM: 'Niko <niko-noreply@app.midnightpoetry.studio>', AI_MODEL: '@cf/x',
-  STRIPE_SECRET_KEY: 'sk_test_niko', STRIPE_WEBHOOK_SECRET: 'whsec_test_niko',
+  STRIPE_TEST_SECRET_KEY: 'sk_test_niko', STRIPE_TEST_WEBHOOK_SECRET: 'whsec_test_niko', STRIPE_LIVE_SECRET_KEY: 'sk_live_niko', STRIPE_LIVE_WEBHOOK_SECRET: 'whsec_live_niko',
   ASSETS: { fetch: async () => new Response('page') }, AI: { run: async () => ({ response: 'ok' }) },
 };
 const waits = [];
@@ -113,8 +114,8 @@ class Browser {
   del(p) { return this.call('DELETE', p); }
 }
 let evt = 0;
-async function webhook(type, object, { secret = env.STRIPE_WEBHOOK_SECRET, id } = {}) {
-  const raw = JSON.stringify({ id: id ?? `evt_${++evt}`, type, data: { object } });
+async function webhook(type, object, { secret = env.STRIPE_TEST_WEBHOOK_SECRET, id, livemode } = {}) {
+  const raw = JSON.stringify({ id: id ?? `evt_${++evt}`, type, livemode: livemode ?? secret === env.STRIPE_LIVE_WEBHOOK_SECRET, data: { object } });
   const t = Math.floor(Date.now() / 1000);
   const sig = createHmac('sha256', secret).update(`${t}.${raw}`).digest('hex');
   const res = await worker.fetch(new Request(ORIGIN + '/api/hooks/stripe', { method: 'POST', headers: { 'stripe-signature': `t=${t},v1=${sig}`, 'content-type': 'application/json' }, body: raw }), env, ctx);
@@ -222,7 +223,7 @@ await ok('after paying, the account is made with 12 months of access and the Str
   const r = await priya.post(`/auth/invite/${pToken}`, { name: 'Priya', password: PW });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   const u = await user('priya@example.com');
-  assert.equal(u.lifetime, false); assert.equal(u.access_kind, 'paid'); assert.equal(u.stripe_customer_id, 'cus_priya');
+  assert.equal(u.lifetime, false); assert.equal(u.access_kind, 'paid'); assert.equal(u.stripe_customer_test, 'cus_priya'); assert.equal(u.paid_mode, 'test');
   sameDay(u.access_until, monthsLater(12));
   const me = await priya.get('/me');
   assert.equal(me.data.access.has, true); assert.equal(me.data.access.kind, 'paid'); assert.equal(me.data.access.plans.length, 2);
@@ -316,7 +317,7 @@ await ok('a sign-up pays, then waits for the admin; sign-in is refused until the
   const st = await lee.get(`/auth/sign-up/status?session=${sid}`);
   assert.equal(st.data.state, 'waiting'); assert.equal(st.data.paid, true);
   const u = await user('lee@example.com');
-  assert.equal(u.access_start_months, 12); assert.equal(u.access_until, null, 'the paid months haven’t started'); assert.equal(u.stripe_customer_id, 'cus_lee');
+  assert.equal(u.access_start_months, 12); assert.equal(u.access_until, null, 'the paid months haven’t started'); assert.equal(u.stripe_customer_test, 'cus_lee');
   assert.ok(emails.slice(before).some((e) => e.to === 'alex@example.com' && /paid sign-up is waiting/.test(e.subject)));
   const signin = await new Browser().post('/auth/sign-in', { email: 'lee@example.com', password: PW });
   assert.equal(signin.status, 403);
@@ -464,6 +465,93 @@ await ok('unlock with no time left starts today; lifetime cancels a live plan no
   assert.equal(u.lifetime, true);
   assert.equal((await admin.post(`/admin/users/${lid}/unlock`, { kind: 'set', months: 500 })).status, 400);
 });
+// ---------------------------------------------------------------- test and live
+let testPaidInvite;
+await ok('payments start in test mode; both modes’ keys are reported without the keys themselves', async () => {
+  const r = await admin.get('/admin/payments');
+  assert.equal(r.data.mode, 'test'); assert.equal(r.data.modes.test.ready, true); assert.equal(r.data.modes.live.ready, true);
+  assert.ok(!JSON.stringify(r.data).includes('sk_'), 'no key is sent to the browser');
+  assert.equal((await jun.get('/me')).data.access.testMode, true);
+  // An invite paid in test mode, left open, to refund after switching.
+  await admin.post('/admin/invites', { email: 'tess@example.com', access: 'paid' });
+  const e = lastEmail('tess@example.com');
+  const b = new Browser();
+  await b.post(`/auth/invite/${inviteToken(e.html)}/code`, { code: inviteCode(e.html) });
+  const co = await b.post(`/auth/invite/${inviteToken(e.html)}/checkout`);
+  const sid = co.data.url.split('/').at(-1);
+  assert.match(sid, /^cs_test_/);
+  Object.assign(sessions.get(sid), { payment_status: 'paid', payment_intent: 'pi_tess', customer: 'cus_tess' });
+  await webhook('checkout.session.completed', sessions.get(sid));
+  testPaidInvite = (await q('select id, stripe_mode from invites where email = $1 and revoked_at is null', ['tess@example.com']))[0];
+  assert.equal(testPaidInvite.stripe_mode, 'test');
+  // A test-mode plan on another account.
+  const jid = (await user('jun@example.com')).id;
+  const sub = { id: 'sub_jun', status: 'active', customer: 'cus_jun_test', cancel_at_period_end: false, metadata: { user_id: jid, plan: 'monthly' }, items: { data: [{ current_period_end: Math.floor(Date.now() / 1000) + 20 * 86400 }] } };
+  subs.set(sub.id, sub);
+  await webhook('customer.subscription.created', sub);
+  const u = await user('jun@example.com');
+  assert.equal(u.sub_mode, 'test'); assert.equal(u.stripe_customer_test, 'cus_jun_test'); assert.equal(u.stripe_customer_live, null);
+});
+await ok('switching is refused when that mode’s key is missing or is the other mode’s key', async () => {
+  const keep = env.STRIPE_LIVE_SECRET_KEY;
+  env.STRIPE_LIVE_SECRET_KEY = 'sk_test_oops';
+  let r = await admin.put('/admin/payments/mode', { mode: 'live' });
+  assert.equal(r.status, 400); assert.match(r.data.error, /live secret key is a test key/);
+  assert.equal((await admin.get('/admin/payments')).data.modes.live.ready, false);
+  env.STRIPE_LIVE_SECRET_KEY = undefined;
+  r = await admin.put('/admin/payments/mode', { mode: 'live' });
+  assert.equal(r.status, 400);
+  env.STRIPE_LIVE_SECRET_KEY = keep;
+  assert.equal((await admin.put('/admin/payments/mode', { mode: 'sandbox' })).status, 400);
+});
+await ok('switched to live: new payments use the live key and live webhooks', async () => {
+  let r = await admin.put('/admin/payments/mode', { mode: 'live' });
+  assert.equal(r.status, 200);
+  assert.equal((await q(`select value from app_settings where key = 'stripe-mode'`))[0].value, 'live');
+  assert.equal((await jun.get('/me')).data.access.testMode, false);
+  await admin.post('/admin/invites', { email: 'liv@example.com', access: 'paid' });
+  const e = lastEmail('liv@example.com');
+  const b = new Browser();
+  const tk = inviteToken(e.html);
+  await b.post(`/auth/invite/${tk}/code`, { code: inviteCode(e.html) });
+  assert.equal((await b.get(`/auth/invite/${tk}`)).data.testMode, false);
+  const co = await b.post(`/auth/invite/${tk}/checkout`);
+  assert.equal(stripeCalls.at(-1).auth, 'Bearer sk_live_niko');
+  const sid = co.data.url.split('/').at(-1);
+  assert.match(sid, /^cs_live_/);
+  Object.assign(sessions.get(sid), { payment_status: 'paid', payment_intent: 'pi_liv', customer: 'cus_liv' });
+  // Signed with the test secret, or claiming the wrong mode: refused.
+  assert.equal(await webhook('checkout.session.completed', sessions.get(sid), { secret: env.STRIPE_TEST_WEBHOOK_SECRET, livemode: true }), 400);
+  assert.equal(await webhook('checkout.session.completed', sessions.get(sid), { secret: env.STRIPE_LIVE_WEBHOOK_SECRET, livemode: false }), 400);
+  assert.equal(await webhook('checkout.session.completed', sessions.get(sid), { secret: env.STRIPE_LIVE_WEBHOOK_SECRET }), 200);
+  assert.equal((await b.get(`/auth/invite/${tk}/status`)).data.paid, true);
+  assert.equal((await b.post(`/auth/invite/${tk}`, { name: 'Liv', password: PW })).status, 200);
+  const u = await user('liv@example.com');
+  assert.equal(u.paid_mode, 'live'); assert.equal(u.stripe_customer_live, 'cus_liv'); assert.equal(u.stripe_customer_test, null);
+  assert.equal((await q(`select mode from stripe_events order by created_at desc limit 1`))[0].mode, 'live');
+});
+await ok('after switching, a test payment is refunded and a test plan changed with the test key', async () => {
+  let r = await admin.del(`/admin/invites/${testPaidInvite.id}`);
+  assert.equal(r.status, 200); assert.equal(r.data.refunded, true);
+  assert.equal(stripeCalls.at(-1).path, '/refunds'); assert.equal(stripeCalls.at(-1).auth, 'Bearer sk_test_niko');
+  // The test plan still renews through test webhooks while new payments are live.
+  const sub = subs.get('sub_jun'); sub.items.data[0].current_period_end = Math.floor(Date.now() / 1000) + 50 * 86400;
+  assert.equal(await webhook('customer.subscription.updated', sub, { secret: env.STRIPE_TEST_WEBHOOK_SECRET }), 200);
+  const jid = (await user('jun@example.com')).id;
+  r = await admin.post(`/admin/users/${jid}/unlock`, { kind: 'set', months: 1 });
+  assert.equal(r.status, 200);
+  assert.equal(stripeCalls.at(-1).path, '/subscriptions/sub_jun'); assert.equal(stripeCalls.at(-1).auth, 'Bearer sk_test_niko');
+  // Its billing page opens in test mode too; a plan chosen now is a live one.
+  const jb = new Browser();
+  assert.equal((await jb.post('/auth/sign-in', { email: 'jun@example.com', password: PW })).status, 200);
+  r = await jb.post('/billing/portal');
+  assert.equal(r.status, 200); assert.equal(stripeCalls.at(-1).auth, 'Bearer sk_test_niko'); assert.equal(stripeCalls.at(-1).p.customer, 'cus_jun_test');
+  const list = (await admin.get('/admin/users')).data;
+  assert.equal(list.stripeMode, 'live');
+  assert.equal(list.users.find((x) => x.email === 'jun@example.com').sub.mode, 'test');
+  assert.equal(list.users.find((x) => x.email === 'liv@example.com').paidMode, 'live');
+});
+
 await ok('the admin list shows each account’s payment state', async () => {
   const r = await admin.get('/admin/users');
   const by = Object.fromEntries(r.data.users.map((x) => [x.email, x]));

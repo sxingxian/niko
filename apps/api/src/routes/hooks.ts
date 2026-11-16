@@ -6,7 +6,7 @@ import { loadAppKeys } from '../providers';
 import type { AppEnv } from '../env';
 import { hmacSha256Hex, safeEqual, unseal } from '../lib/crypto';
 import { handleStripeEvent } from '../billing';
-import { verifyStripeSignature } from '../stripe';
+import { verifyStripeEvent } from '../stripe';
 
 export const hooks = new Hono<AppEnv>();
 
@@ -86,14 +86,17 @@ hooks.post('/in/:connId', async (c) => {
   return c.json({ ok: true });
 });
 
-// Stripe: payments, plans and renewals. Trusted only with a valid signature from this endpoint's signing secret.
+// Stripe: payments, plans and renewals, in test and live mode. Trusted only with a valid signature.
 hooks.post('/stripe', async (c) => {
   const raw = await c.req.text();
   if (raw.length > 512_000) return c.json({ ok: false }, 413);
-  if (!c.env.STRIPE_WEBHOOK_SECRET || !(await verifyStripeSignature(c.env.STRIPE_WEBHOOK_SECRET, c.req.header('stripe-signature'), raw))) return c.json({ ok: false }, 400);
   let event: any;
   try { event = JSON.parse(raw); } catch { return c.json({ ok: false }, 400); }
+  // One address for both modes: the event is checked against the live and the test signing secret, and handled in the
+  // mode it was signed for, whichever mode new payments use now (renewals and refunds of the other mode keep working).
+  const mode = await verifyStripeEvent(c.env, c.req.header('stripe-signature'), raw, event);
+  if (!mode) return c.json({ ok: false }, 400);
   // A failure answers 500, so Stripe sends the event again later.
-  await handleStripeEvent(c.env, c.get('db'), event);
+  await handleStripeEvent(c.env, c.get('db'), event, mode);
   return c.json({ ok: true });
 });

@@ -178,6 +178,8 @@ export interface AccessInfo extends AccessState {
   /** Plans offered when paid time ends (with prices), and whether payments are set up. */
   plans: { plan: Plan; cents: number }[];
   payments: boolean;
+  /** Payments are in Stripe's test mode: no real money is charged. */
+  testMode: boolean;
   /** Can open Stripe's billing page (has a Stripe customer). */
   portal: boolean;
   /** When the time they had ended (shown when they need a plan). */

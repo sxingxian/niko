@@ -4,7 +4,7 @@ import { createHmac } from 'node:crypto';
 import {
   accessState, addMonths, cleanPayments, CODE_ALPHABET, isCodeShape, lengthLabel, money, normalizeCode, paidEnd, plansOffered, showCode, toCents, unlockPlan,
 } from '../packages/shared/src/index.ts';
-import { formEncode, invoiceSubscription, periodEnd, planOf, verifyStripeSignature } from '../apps/api/src/stripe.ts';
+import { formEncode, invoiceSubscription, keyMode, keysFor, modeStatus, periodEnd, planOf, verifyStripeEvent, verifyStripeSignature } from '../apps/api/src/stripe.ts';
 import { randomChars } from '../apps/api/src/lib/crypto.ts';
 
 let pass = 0;
@@ -104,5 +104,26 @@ await ok('Stripe form encoding and the fields that moved between API versions', 
   assert.equal(invoiceSubscription({ subscription: 'sub_1' }), 'sub_1');
   assert.equal(invoiceSubscription({ parent: { subscription_details: { subscription: 'sub_2' } } }), 'sub_2');
   assert.equal(invoiceSubscription({}), null);
+});
+await ok('test and live keys: each mode uses only its own keys; the older single pair still works', async () => {
+  const env = { STRIPE_TEST_SECRET_KEY: 'sk_test_a', STRIPE_TEST_WEBHOOK_SECRET: 'whsec_t', STRIPE_LIVE_SECRET_KEY: 'rk_live_b', STRIPE_LIVE_WEBHOOK_SECRET: 'whsec_l' };
+  assert.deepEqual(keysFor(env, 'test'), { STRIPE_SECRET_KEY: 'sk_test_a', STRIPE_WEBHOOK_SECRET: 'whsec_t' });
+  assert.deepEqual(keysFor(env, 'live'), { STRIPE_SECRET_KEY: 'rk_live_b', STRIPE_WEBHOOK_SECRET: 'whsec_l' });
+  assert.equal(keysFor({ STRIPE_LIVE_SECRET_KEY: 'sk_test_x', STRIPE_LIVE_WEBHOOK_SECRET: 'whsec_l' }, 'live').STRIPE_SECRET_KEY, undefined, 'a test key in the live slot is never used');
+  assert.match(modeStatus({ STRIPE_LIVE_SECRET_KEY: 'sk_test_x', STRIPE_LIVE_WEBHOOK_SECRET: 'whsec_l' }, 'live').problem, /is a test key/);
+  assert.match(modeStatus({ STRIPE_TEST_SECRET_KEY: 'sk_test_x', STRIPE_TEST_WEBHOOK_SECRET: 'abc' }, 'test').problem, /whsec_/);
+  assert.deepEqual(modeStatus({}, 'live'), { ready: false, secret: false, webhook: false, problem: null });
+  const old = { STRIPE_SECRET_KEY: 'sk_live_old', STRIPE_WEBHOOK_SECRET: 'whsec_old' };
+  assert.equal(keysFor(old, 'live').STRIPE_SECRET_KEY, 'sk_live_old'); assert.equal(keysFor(old, 'test').STRIPE_SECRET_KEY, undefined);
+  assert.equal(keyMode('sk_live_1'), 'live'); assert.equal(keyMode('rk_test_1'), 'test'); assert.equal(keyMode('pk_live_1'), null);
+});
+await ok('webhooks: told apart by which signing secret matches, and the event must agree', async () => {
+  const env = { STRIPE_TEST_SECRET_KEY: 'sk_test_a', STRIPE_TEST_WEBHOOK_SECRET: 'whsec_t', STRIPE_LIVE_SECRET_KEY: 'sk_live_b', STRIPE_LIVE_WEBHOOK_SECRET: 'whsec_l' };
+  const sign = (secret, raw) => { const t = Math.floor(Date.now() / 1000); return `t=${t},v1=${createHmac('sha256', secret).update(`${t}.${raw}`).digest('hex')}`; };
+  const live = '{"livemode":true}', test = '{"livemode":false}';
+  assert.equal(await verifyStripeEvent(env, sign('whsec_l', live), live, { livemode: true }), 'live');
+  assert.equal(await verifyStripeEvent(env, sign('whsec_t', test), test, { livemode: false }), 'test');
+  assert.equal(await verifyStripeEvent(env, sign('whsec_t', live), live, { livemode: true }), null, 'test secret, live event');
+  assert.equal(await verifyStripeEvent(env, sign('whsec_x', test), test, { livemode: false }), null);
 });
 console.log(`${pass} payment-rule checks passed`);

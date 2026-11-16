@@ -8,7 +8,7 @@ import {
 import type { Env } from './env';
 import { randomChars, sha256 } from './lib/crypto';
 import { esc, sendEmail } from './lib/email';
-import { idOf, invoiceSubscription, periodEnd, planOf, stripe, stripeReady } from './stripe';
+import { idOf, invoiceSubscription, isMode, keysFor, periodEnd, planOf, stripe, stripeReady, type StripeEnv, type StripeMode } from './stripe';
 
 export const PAYMENTS_KEY = 'payments';
 let cache: { at: number; v: PaymentSettings } | null = null;
@@ -21,17 +21,43 @@ export async function paymentSettings(db: Db, fresh = false): Promise<PaymentSet
 }
 export const forgetPayments = () => { cache = null; };
 
+// ---------------------------------------------------------------- test or live
+export const STRIPE_MODE_KEY = 'stripe-mode';
+let modeCache: { at: number; v: StripeMode } | null = null;
+/** Which Stripe mode new payments use, chosen in Admin → Payments. Test until switched. */
+export async function stripeMode(db: Db, fresh = false): Promise<StripeMode> {
+  if (!fresh && modeCache && Date.now() - modeCache.at < 30_000) return modeCache.v;
+  const row = (await db.select().from(appSettings).where(eq(appSettings.key, STRIPE_MODE_KEY)).limit(1).catch(() => []))[0];
+  modeCache = { at: Date.now(), v: row?.value === 'live' ? 'live' : 'test' };
+  return modeCache.v;
+}
+export const forgetStripeMode = () => { modeCache = null; };
+/** The mode and keys new payments use now. */
+export async function payNow(env: Env, db: Db): Promise<{ mode: StripeMode; keys: StripeEnv; ready: boolean }> {
+  const mode = await stripeMode(db);
+  const keys = keysFor(env, mode);
+  return { mode, keys, ready: stripeReady(keys) };
+}
+/** The keys for something made in a given mode (an invite's payment, a plan); test when unknown. */
+export const keysOf = (env: Env, mode: string | null | undefined) => keysFor(env, isMode(mode) ? mode : 'test');
+/** An account's Stripe customer in a mode, and the update that sets it. */
+export const customerIn = (u: { stripeCustomerTest: string | null; stripeCustomerLive: string | null }, mode: StripeMode) => (mode === 'live' ? u.stripeCustomerLive : u.stripeCustomerTest);
+export const setCustomer = (mode: StripeMode, id: string | null) => (!id ? {} : mode === 'live' ? { stripeCustomerLive: id } : { stripeCustomerTest: id });
+
 /** What an account sees about its own access, and the plans it can choose. */
 export async function accessFor(env: Env, db: Db, u: User): Promise<AccessInfo> {
   const s = await paymentSettings(db);
   const st = accessState(u, s.graceDays);
+  const now = await payNow(env, db);
+  const portalMode: StripeMode = isMode(u.subMode) ? u.subMode : now.mode;
   return {
     ...st,
     lifetime: u.lifetime,
     sub: u.subId ? { plan: (u.subPlan as Plan | null) ?? null, status: u.subStatus ?? '', periodEnd: u.subPeriodEnd ? u.subPeriodEnd.toISOString() : null, cancelAtEnd: u.subCancelAtEnd } : null,
     plans: plansOffered(s),
-    payments: stripeReady(env),
-    portal: !!u.stripeCustomerId && stripeReady(env),
+    payments: now.ready,
+    testMode: now.mode === 'test',
+    portal: !!customerIn(u, portalMode) && stripeReady(keysFor(env, portalMode)),
     endedAt: !st.has ? (latest(u.accessUntil, u.subPeriodEnd)?.toISOString() ?? null) : null,
     since: u.createdAt.toISOString(),
   };
@@ -47,7 +73,7 @@ export const emailCodeHash = (userId: string, code: string) => sha256(`niko/emai
 
 // ---------------------------------------------------------------- applying what Stripe confirms
 /** A one-time payment Stripe says is paid: an invite's or a sign-up's. Checked against the price fixed earlier. */
-export async function applyPaidSession(env: Env, db: Db, s: any): Promise<boolean> {
+export async function applyPaidSession(env: Env, db: Db, s: any, mode: StripeMode): Promise<boolean> {
   if (s?.mode !== 'payment' || s?.payment_status !== 'paid') return false;
   const kind = s.metadata?.kind;
   const amountOk = (cents: number | null) => typeof cents === 'number' && s.amount_total === cents && String(s.currency).toLowerCase() === 'sgd';
@@ -59,9 +85,9 @@ export async function applyPaidSession(env: Env, db: Db, s: any): Promise<boolea
     if (inv.paidAt) return true;
     if (!amountOk(inv.priceCents)) { console.error('stripe: invite payment amount does not match', inv.id); return false; }
     // Paid: the link stays open until the account is made (a year at most).
-    const done = await db.update(invites).set({ paidAt: new Date(), paymentIntent: pi, stripeCustomerId: customer, expiresAt: sql`greatest(${invites.expiresAt}, now() + interval '365 days')` })
+    const done = await db.update(invites).set({ paidAt: new Date(), paymentIntent: pi, stripeCustomerId: customer, stripeMode: mode, expiresAt: sql`greatest(${invites.expiresAt}, now() + interval '365 days')` })
       .where(and(eq(invites.id, inv.id), isNull(invites.paidAt))).returning({ id: invites.id });
-    if (done.length) await logAudit(db, null, 'payment.invite', { email: inv.email, amount: money(inv.priceCents) });
+    if (done.length) await logAudit(db, null, 'payment.invite', { email: inv.email, amount: money(inv.priceCents), mode });
     return true;
   }
   if (kind === 'signup' && typeof s.metadata?.user_id === 'string') {
@@ -69,12 +95,12 @@ export async function applyPaidSession(env: Env, db: Db, s: any): Promise<boolea
     if (!su) return false;
     if (su.paidAt) return true;
     if (!amountOk(su.priceCents)) { console.error('stripe: sign-up payment amount does not match', su.userId); return false; }
-    const done = await db.update(signups).set({ paidAt: new Date(), paymentIntent: pi, state: 'waiting' }).where(and(eq(signups.userId, su.userId), isNull(signups.paidAt))).returning({ id: signups.userId });
+    const done = await db.update(signups).set({ paidAt: new Date(), paymentIntent: pi, state: 'waiting', stripeMode: mode }).where(and(eq(signups.userId, su.userId), isNull(signups.paidAt))).returning({ id: signups.userId });
     if (!done.length) return true;
     // The paid months start when an admin switches the account on.
-    await db.update(users).set({ accessStartMonths: su.months ?? 0, ...(customer ? { stripeCustomerId: customer } : {}) }).where(eq(users.id, su.userId));
+    await db.update(users).set({ accessStartMonths: su.months ?? 0, paidMode: mode, ...setCustomer(mode, customer) }).where(eq(users.id, su.userId));
     const u = (await db.select({ email: users.email, name: users.name }).from(users).where(eq(users.id, su.userId)).limit(1))[0];
-    await logAudit(db, su.userId, 'payment.signup', { email: u?.email, amount: money(su.priceCents) });
+    await logAudit(db, su.userId, 'payment.signup', { email: u?.email, amount: money(su.priceCents), mode });
     if (u) await tellAdmins(env, db, 'A paid sign-up is waiting for you', 'A paid sign-up is waiting',
       `${esc(u.name || u.email)} (${esc(u.email)}) confirmed their email and paid. Switch their account on in Admin → Users when you’re ready; their paid time starts then.`);
     return true;
@@ -83,7 +109,7 @@ export async function applyPaidSession(env: Env, db: Db, s: any): Promise<boolea
 }
 
 /** A subscription's latest state from Stripe, written to its account. */
-export async function applySubscription(db: Db, sub: any): Promise<string | null> {
+export async function applySubscription(db: Db, sub: any, mode: StripeMode): Promise<string | null> {
   if (!sub?.id) return null;
   const byMeta = typeof sub.metadata?.user_id === 'string' ? sub.metadata.user_id : null;
   const u = (await db.select().from(users).where(byMeta ? eq(users.id, byMeta) : eq(users.subId, sub.id)).limit(1))[0];
@@ -91,47 +117,49 @@ export async function applySubscription(db: Db, sub: any): Promise<string | null
   // An older subscription finishing must not overwrite a newer one.
   if (u.subId && u.subId !== sub.id && ['canceled', 'incomplete_expired'].includes(sub.status)) return u.id;
   await db.update(users).set({
-    subId: sub.id, subStatus: String(sub.status ?? ''), subPlan: planOf(sub), subPeriodEnd: periodEnd(sub), subCancelAtEnd: !!sub.cancel_at_period_end,
-    ...(idOf(sub.customer) ? { stripeCustomerId: idOf(sub.customer) } : {}),
+    subId: sub.id, subStatus: String(sub.status ?? ''), subPlan: planOf(sub), subPeriodEnd: periodEnd(sub), subCancelAtEnd: !!sub.cancel_at_period_end, subMode: mode,
+    ...setCustomer(mode, idOf(sub.customer)),
   }).where(eq(users.id, u.id));
   return u.id;
 }
 
 /** Asks Stripe about a Checkout it made, and applies it if it is paid. Used when someone returns, in case the
  * webhook is slow; this is Niko asking Stripe, not trusting the returning page. */
-export async function syncCheckout(env: Env, db: Db, id: string): Promise<any | null> {
-  if (!/^cs_[A-Za-z0-9_]{3,250}$/.test(id) || !stripeReady(env)) return null;
-  const s = await stripe(env, 'GET', `/checkout/sessions/${id}`, { expand: ['subscription'] });
-  if (s.mode === 'payment') await applyPaidSession(env, db, s);
+export async function syncCheckout(env: Env, db: Db, id: string, mode: StripeMode): Promise<any | null> {
+  const keys = keysFor(env, mode);
+  if (!/^cs_[A-Za-z0-9_]{3,250}$/.test(id) || !stripeReady(keys)) return null;
+  const s = await stripe(keys, 'GET', `/checkout/sessions/${id}`, { expand: ['subscription'] });
+  if (s.mode === 'payment') await applyPaidSession(env, db, s, mode);
   else if (s.mode === 'subscription' && s.status === 'complete' && s.subscription) {
-    const sub = typeof s.subscription === 'string' ? await stripe(env, 'GET', `/subscriptions/${s.subscription}`) : s.subscription;
-    await applySubscription(db, sub);
+    const sub = typeof s.subscription === 'string' ? await stripe(keys, 'GET', `/subscriptions/${s.subscription}`) : s.subscription;
+    await applySubscription(db, sub, mode);
   }
   return s;
 }
 
 /** One webhook event, at most once. */
-export async function handleStripeEvent(env: Env, db: Db, event: any): Promise<void> {
+export async function handleStripeEvent(env: Env, db: Db, event: any, mode: StripeMode): Promise<void> {
   if (typeof event?.id !== 'string') return;
-  const fresh = await db.insert(stripeEvents).values({ id: event.id, type: String(event.type ?? '') }).onConflictDoNothing().returning({ id: stripeEvents.id });
+  const fresh = await db.insert(stripeEvents).values({ id: event.id, type: String(event.type ?? ''), mode }).onConflictDoNothing().returning({ id: stripeEvents.id });
   if (!fresh.length) return;
+  const keys = keysFor(env, mode);
   try {
     const o = event.data?.object;
     switch (event.type) {
       case 'checkout.session.completed':
       case 'checkout.session.async_payment_succeeded':
-        if (o?.mode === 'payment') await applyPaidSession(env, db, o);
-        else if (o?.mode === 'subscription' && o.subscription) await applySubscription(db, await stripe(env, 'GET', `/subscriptions/${idOf(o.subscription)}`));
+        if (o?.mode === 'payment') await applyPaidSession(env, db, o, mode);
+        else if (o?.mode === 'subscription' && o.subscription) await applySubscription(db, await stripe(keys, 'GET', `/subscriptions/${idOf(o.subscription)}`), mode);
         break;
       case 'customer.subscription.created':
       case 'customer.subscription.updated':
       case 'customer.subscription.deleted':
-        await applySubscription(db, o);
+        await applySubscription(db, o, mode);
         break;
       case 'invoice.paid':
       case 'invoice.payment_failed': {
         const id = invoiceSubscription(o);
-        if (id) await applySubscription(db, await stripe(env, 'GET', `/subscriptions/${id}`));
+        if (id) await applySubscription(db, await stripe(keys, 'GET', `/subscriptions/${id}`), mode);
         break;
       }
     }

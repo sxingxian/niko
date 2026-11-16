@@ -5,7 +5,7 @@ import { useSearchParams } from 'react-router-dom';
 import { api, Icon } from '@niko/ui';
 import { money, type AccessInfo, type Plan } from '@niko/shared';
 import { useNiko } from '../niko';
-import { Shell } from './Auth';
+import { Shell, TestNote } from './Auth';
 
 const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '');
 const per = (p: Plan) => (p === 'monthly' ? '/ month' : '/ year');
@@ -93,6 +93,7 @@ export function PlanGate({ children }: { children: ReactNode }) {
       {ret === 'cancelled' && <p className="ok" role="status">Payment cancelled. Nothing was charged.</p>}
       {err && <p className="err" role="alert">{err}</p>}
       {access.plans.length && access.payments ? <>
+        {access.testMode && <TestNote />}
         <PlanChoice access={access} pick={offer!.plan} setPick={setPick} />
         <button type="button" className="pri" disabled={busy} onClick={async () => { setBusy(true); await checkout(offer!.plan, setErr); setBusy(false); }}>
           <Icon name="lock" size={18} />{busy ? 'Opening Stripe…' : `Subscribe · ${money(offer!.cents)} ${per(offer!.plan)}`}
@@ -132,6 +133,7 @@ export function BillingCard() {
       {err && <p className="err" role="alert">{err}</p>}
       <div className="row"><Icon name="shield" /><span className="txt"><b>{status}</b>{a.until && !sub && !a.lifetime && a.kind !== 'admin' ? <span className="sub">Nothing renews by itself.</span> : null}</span></div>
       {canChoose && offer && <>
+        {a.testMode && <TestNote />}
         <p className="sub">{a.until && Date.parse(a.until) - Date.now() > 2 * 86400_000 + 3600_000 ? 'Choose a plan now and billing starts when your current time ends, so you never lose a day.' : 'Your time ends within two days, so billing for a plan starts right away.'}</p>
         <PlanChoice access={a} pick={offer.plan} setPick={setPick} />
         <button className="pri" style={{ alignSelf: 'flex-start' }} disabled={busy} onClick={async () => { setBusy(true); await checkout(offer.plan, setErr, 'account'); setBusy(false); }}>{busy ? 'Opening Stripe…' : `Choose ${offer.plan === 'monthly' ? 'monthly' : 'yearly'} · ${money(offer.cents)} ${per(offer.plan)}`}</button>

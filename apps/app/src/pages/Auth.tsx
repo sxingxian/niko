@@ -21,7 +21,7 @@ export function Shell({ tag, children, label = 'Listening', mode = 'listening' }
   );
 }
 
-type Config = { registration: 'invite' | 'open'; needsSetup: boolean; signup?: { priceCents: number; months: number; plans: { plan: string; cents: number }[] } | null };
+type Config = { registration: 'invite' | 'open'; needsSetup: boolean; signup?: { priceCents: number; months: number; plans: { plan: string; cents: number }[]; testMode?: boolean } | null };
 const SERVER_DOWN = 'Niko can’t reach its server right now. Sign-in may not work until it’s back.';
 
 /** Sign-in settings. If the server can't answer, say so (instead of quietly guessing "invite only, already
@@ -123,6 +123,11 @@ function monthsFromNow(months: number): Date {
 /** "SGD 9.00 a month or SGD 90.00 a year" */
 export const plansText = (plans?: { plan: string; cents: number }[]) => (plans ?? []).map((p) => `${money(p.cents)} a ${p.plan === 'monthly' ? 'month' : 'year'}`).join(' or ');
 
+/** Payments are in Stripe's test mode: said plainly wherever someone pays. */
+export function TestNote() {
+  return <p className="testnote" role="note"><b>Test mode.</b> Use a Stripe test card such as 4242 4242 4242 4242. No real money is charged.</p>;
+}
+
 function Waiting({ label }: { label: string }) {
   return <div role="progressbar" aria-label={label} className="waitbar"><span /></div>;
 }
@@ -159,7 +164,7 @@ function PayButton({ label, onPay }: { label: string; onPay: () => Promise<void>
 // ---------------------------------------------------------------- invite
 type InviteInfo = {
   invitedBy: string; needsCode: boolean; locked: boolean; access: 'paid' | 'free' | 'life';
-  email?: string; priceCents?: number | null; months?: number | null; paid?: boolean; plans?: { plan: string; cents: number }[]; payments?: boolean;
+  email?: string; priceCents?: number | null; months?: number | null; paid?: boolean; plans?: { plan: string; cents: number }[]; payments?: boolean; testMode?: boolean;
 };
 type InviteStep = 'loading' | 'code' | 'locked' | 'pay' | 'confirming' | 'paid' | 'account' | 'gone';
 
@@ -227,6 +232,7 @@ export function Invite() {
 
       {step === 'pay' && info && <>
         <div className="hd"><h1>One payment, then you’re in</h1><p className="sub">One payment unlocks Niko for {lengthLabel(months)}. Nothing renews by itself.</p></div>
+        {info.testMode && <TestNote />}
         {note && <p className="ok" role="status">{note}</p>}
         {err && <p className="err" role="alert">{err}</p>}
         <dl className="paysum">
@@ -266,7 +272,7 @@ export function Invite() {
 }
 
 // ---------------------------------------------------------------- sign-up
-type SignupView = { state: 'verify' | 'pay' | 'waiting' | null; email?: string; priceCents?: number | null; months?: number | null; paid?: boolean; plans?: { plan: string; cents: number }[] };
+type SignupView = { state: 'verify' | 'pay' | 'waiting' | null; email?: string; priceCents?: number | null; months?: number | null; paid?: boolean; plans?: { plan: string; cents: number }[]; testMode?: boolean };
 type SignupStep = 'account' | 'email' | 'pay' | 'confirming' | 'paid' | 'waiting';
 
 export function SignUp() {
@@ -356,6 +362,7 @@ export function SignUp() {
 
       {step === 'pay' && <>
         <div className="hd"><h1>One payment, then you’re in</h1><p className="sub">One payment unlocks Niko for {lengthLabel(months)}. Nothing renews by itself.</p></div>
+        {(view?.testMode ?? cfg?.signup?.testMode) && <TestNote />}
         {note && <p className="ok" role="status">{note}</p>}
         {err && <p className="err" role="alert">{err}</p>}
         <dl className="paysum">

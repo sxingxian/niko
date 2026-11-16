@@ -29,12 +29,15 @@ export const users = pgTable('users', {
   accessKind: text('access_kind'),
   accessPaidUntil: ts('access_paid_until'),
   accessStartMonths: integer('access_start_months').notNull().default(0),
-  stripeCustomerId: text('stripe_customer_id'),
+  stripeCustomerTest: text('stripe_customer_test'),
+  stripeCustomerLive: text('stripe_customer_live'),
+  paidMode: text('paid_mode'),
   subId: text('sub_id'),
   subStatus: text('sub_status'),
   subPlan: text('sub_plan'),
   subPeriodEnd: ts('sub_period_end'),
   subCancelAtEnd: boolean('sub_cancel_at_end').notNull().default(false),
+  subMode: text('sub_mode'),
   remindedFor: ts('reminded_for'),
   createdAt: ts('created_at').notNull().defaultNow(),
   lastActiveAt: ts('last_active_at'),
@@ -73,6 +76,7 @@ export const invites = pgTable('invites', {
   paymentIntent: text('payment_intent'),
   stripeCustomerId: text('stripe_customer_id'),
   refundedAt: ts('refunded_at'),
+  stripeMode: text('stripe_mode'),
 });
 
 /** Open sign-ups in progress: confirm email, pay, then wait for an admin. */
@@ -88,12 +92,14 @@ export const signups = pgTable('signups', {
   checkoutId: text('checkout_id'),
   paidAt: ts('paid_at'),
   paymentIntent: text('payment_intent'),
+  stripeMode: text('stripe_mode'),
   createdAt: ts('created_at').notNull().defaultNow(),
 });
 
 export const stripeEvents = pgTable('stripe_events', {
   id: text('id').primaryKey(),
   type: text('type').notNull(),
+  mode: text('mode').notNull().default('test'),
   createdAt: ts('created_at').notNull().defaultNow(),
 });
 

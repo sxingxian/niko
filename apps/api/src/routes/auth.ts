@@ -4,8 +4,8 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { appSettings, invites, passkeys, passwordResets, sessions, signups, users, webauthnChallenges, type Invite } from '@niko/db';
 import { addMonths, CODE_TRIES, CURRENCY, isCodeShape, isEmail, lengthLabel, normalizeCode, passwordProblem, plansOffered } from '@niko/shared';
-import { emailCodeHash, inviteCodeHash, makeEmailCode, paymentSettings, syncCheckout, tellAdmins } from '../billing';
-import { NOT_READY, stripe, stripeReady } from '../stripe';
+import { emailCodeHash, inviteCodeHash, makeEmailCode, paymentSettings, payNow, setCustomer, syncCheckout, tellAdmins } from '../billing';
+import { isMode, NOT_READY, stripe } from '../stripe';
 import type { AppEnv } from '../env';
 import { b64url, randomToken, safeEqual, sha256, unb64 } from '../lib/crypto';
 import { hashPassword, verifyPassword } from '../lib/password';
@@ -29,10 +29,11 @@ const findUser = async (db: AppEnv['Variables']['db'], email: string) =>
 auth.get('/config', async (c) => {
   const registration = await registrationMode(c);
   // With open registration, what a sign-up will pay (shown before they start).
-  let signup: { priceCents: number; months: number; plans: { plan: string; cents: number }[] } | null = null;
+  let signup: { priceCents: number; months: number; plans: { plan: string; cents: number }[]; testMode: boolean } | null = null;
   if (registration === 'open') {
     const s = await paymentSettings(c.get('db'));
-    if (s.openPay && s.onceCents && stripeReady(c.env)) signup = { priceCents: s.onceCents, months: s.months, plans: plansOffered(s) };
+    const now = await payNow(c.env, c.get('db'));
+    if (s.openPay && s.onceCents && now.ready) signup = { priceCents: s.onceCents, months: s.months, plans: plansOffered(s), testMode: now.mode === 'test' };
   }
   return c.json({ registration, needsSetup: (await userCount(c)) === 0, rpId: c.get('site').rpId, signup });
 });
@@ -103,7 +104,8 @@ async function mySignup(c: Ctx) {
 async function signupView(c: Ctx, row: Awaited<ReturnType<typeof mySignup>>) {
   if (!row) return { state: null };
   const s = await paymentSettings(c.get('db'));
-  return { state: row.su.state, email: row.u.email, name: row.u.name, priceCents: row.su.priceCents, months: row.su.months, paid: !!row.su.paidAt, plans: plansOffered(s) };
+  const now = await payNow(c.env, c.get('db'));
+  return { state: row.su.state, email: row.u.email, name: row.u.name, priceCents: row.su.priceCents, months: row.su.months, paid: !!row.su.paidAt, plans: plansOffered(s), testMode: (row.su.paidAt ? row.su.stripeMode : now.mode) === 'test' };
 }
 async function sendSignupCode(c: Ctx, userId: string, email: string) {
   const code = makeEmailCode();
@@ -132,7 +134,7 @@ auth.post('/sign-up', async (c) => {
     return c.json({ ok: true, state: 'verify', email: b.email });
   }
   const s = await paymentSettings(db);
-  const pays = s.openPay && stripeReady(c.env) && !!s.onceCents;
+  const pays = s.openPay && (await payNow(c.env, db)).ready && !!s.onceCents;
   const price = { priceCents: pays ? s.onceCents : null, months: pays ? s.months : null };
   const hash = await hashPassword(db, b.password!);
   let userId: string;
@@ -193,17 +195,18 @@ auth.post('/sign-up/restart', async (c) => {
 auth.post('/sign-up/checkout', async (c) => {
   const row = await mySignup(c);
   if (!row || row.su.state !== 'pay' || row.su.paidAt || !row.su.priceCents) return c.json({ error: 'Confirm your email first.' }, 400);
-  if (!stripeReady(c.env)) return c.json({ error: NOT_READY }, 503);
+  const now = await payNow(c.env, c.get('db'));
+  if (!now.ready) return c.json({ error: NOT_READY }, 503);
   if (await tooMany(c, 'checkout:' + row.u.id, 10, 15)) return c.json({ error: 'Too many attempts. Try again later.' }, 429);
   const app = c.get('site').appUrl;
   const months = row.su.months ?? 12;
-  const s = await stripe(c.env, 'POST', '/checkout/sessions', {
+  const s = await stripe(now.keys, 'POST', '/checkout/sessions', {
     mode: 'payment', customer_email: row.u.email, customer_creation: 'always', client_reference_id: row.u.id,
     line_items: [{ quantity: 1, price_data: { currency: CURRENCY, unit_amount: row.su.priceCents, product_data: { name: `Niko · ${lengthLabel(months)} of access` } } }],
     metadata: { kind: 'signup', user_id: row.u.id }, payment_intent_data: { metadata: { kind: 'signup', user_id: row.u.id } },
     success_url: `${app}/sign-up?paid={CHECKOUT_SESSION_ID}`, cancel_url: `${app}/sign-up?cancelled=1`,
   });
-  await c.get('db').update(signups).set({ checkoutId: s.id }).where(eq(signups.userId, row.u.id));
+  await c.get('db').update(signups).set({ checkoutId: s.id, stripeMode: now.mode }).where(eq(signups.userId, row.u.id));
   return c.json({ url: s.url });
 });
 
@@ -212,7 +215,7 @@ auth.get('/sign-up/status', async (c) => {
   if (!row) return c.json({ state: null });
   if (!row.su.paidAt) {
     for (const id of new Set([c.req.query('session'), row.su.checkoutId].filter((x): x is string => !!x))) {
-      try { await syncCheckout(c.env, c.get('db'), id); } catch { /* the webhook will still arrive */ }
+      try { await syncCheckout(c.env, c.get('db'), id, isMode(row.su.stripeMode) ? row.su.stripeMode : (await payNow(c.env, c.get('db'))).mode); } catch { /* the webhook will still arrive */ }
     }
   }
   return c.json(await signupView(c, await mySignup(c)));
@@ -240,7 +243,8 @@ async function inviteView(c: Ctx, inv: Invite, ok: boolean) {
   const base = { invitedBy: by?.name || 'Your admin', needsCode: !ok, locked: !ok && inv.codeTries >= CODE_TRIES, access: inv.access };
   if (!ok) return base;
   const s = await paymentSettings(db);
-  return { ...base, email: inv.email, priceCents: inv.priceCents, months: inv.months, paid: !!inv.paidAt, plans: plansOffered(s), payments: stripeReady(c.env) };
+  const now = await payNow(c.env, db);
+  return { ...base, email: inv.email, priceCents: inv.priceCents, months: inv.months, paid: !!inv.paidAt, plans: plansOffered(s), payments: now.ready, testMode: (inv.paidAt ? inv.stripeMode : now.mode) === 'test' };
 }
 const GONE = 'This invite link has expired or was already used.';
 
@@ -279,18 +283,19 @@ auth.post('/invite/:token/checkout', async (c) => {
   if (!(await passOk(c, inv))) return c.json({ error: 'Enter your invite code first.' }, 403);
   if (inv.access !== 'paid' || !inv.priceCents) return c.json({ error: 'This invite has nothing to pay.' }, 400);
   if (inv.paidAt) return c.json({ error: 'This invite is already paid.' }, 409);
-  if (!stripeReady(c.env)) return c.json({ error: NOT_READY }, 503);
+  const now = await payNow(c.env, db);
+  if (!now.ready) return c.json({ error: NOT_READY }, 503);
   if (await tooMany(c, 'checkout:' + inv.id, 10, 15)) return c.json({ error: 'Too many attempts. Try again later.' }, 429);
   const app = c.get('site').appUrl;
   const token = encodeURIComponent(c.req.param('token'));
   const months = inv.months ?? 12;
-  const s = await stripe(c.env, 'POST', '/checkout/sessions', {
+  const s = await stripe(now.keys, 'POST', '/checkout/sessions', {
     mode: 'payment', customer_email: inv.email, customer_creation: 'always', client_reference_id: inv.id,
     line_items: [{ quantity: 1, price_data: { currency: CURRENCY, unit_amount: inv.priceCents, product_data: { name: `Niko · ${lengthLabel(months)} of access` } } }],
     metadata: { kind: 'invite', invite_id: inv.id }, payment_intent_data: { metadata: { kind: 'invite', invite_id: inv.id } },
     success_url: `${app}/invite?token=${token}&paid={CHECKOUT_SESSION_ID}`, cancel_url: `${app}/invite?token=${token}&cancelled=1`,
   });
-  await db.update(invites).set({ checkoutId: s.id }).where(eq(invites.id, inv.id));
+  await db.update(invites).set({ checkoutId: s.id, stripeMode: now.mode }).where(eq(invites.id, inv.id));
   return c.json({ url: s.url });
 });
 
@@ -301,7 +306,7 @@ auth.get('/invite/:token/status', async (c) => {
   if (!(await passOk(c, inv))) return c.json({ error: 'Enter your invite code first.' }, 403);
   if (!inv.paidAt) {
     for (const id of new Set([c.req.query('session'), inv.checkoutId].filter((x): x is string => !!x))) {
-      try { await syncCheckout(c.env, db, id); } catch { /* the webhook will still arrive */ }
+      try { await syncCheckout(c.env, db, id, isMode(inv.stripeMode) ? inv.stripeMode : (await payNow(c.env, db)).mode); } catch { /* the webhook will still arrive */ }
     }
   }
   const now = (await db.select({ paidAt: invites.paidAt }).from(invites).where(eq(invites.id, inv.id)).limit(1))[0];
@@ -326,7 +331,7 @@ auth.post('/invite/:token', async (c) => {
   const access = inv.access === 'life' ? { lifetime: true } : { lifetime: false, accessUntil: addMonths(new Date(), months), accessKind: inv.access === 'free' ? 'free' : 'paid' };
   const [u] = await db.insert(users).values({
     email: inv.email, name: (b.name ?? '').slice(0, 80), passwordHash: await hashPassword(c.get('db'), b.password!), role: inv.role === 'admin' ? 'admin' : 'member',
-    ...access, stripeCustomerId: inv.stripeCustomerId ?? null,
+    ...access, ...(inv.access === 'paid' && isMode(inv.stripeMode) ? { paidMode: inv.stripeMode, ...setCustomer(inv.stripeMode, inv.stripeCustomerId) } : {}),
   }).returning();
   deleteCookie(c, INVITE_COOKIE, { path: '/', secure: true });
   await audit(c, 'invite.accepted', { email: inv.email, access: inv.access }, u!.id);

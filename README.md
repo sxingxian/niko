@@ -35,7 +35,7 @@ Nothing here has run against live services yet. The code typechecks, all three f
 | Area | State |
 |---|---|
 | Landing, sign-in, invite, sign-up, forgot/reset password | Built |
-| Payments (Stripe Checkout, SGD): pay once for a set time, then a monthly or yearly plan; paid, free or lifetime invites with a 6-character code; open sign-up with an email code, payment, then admin switch-on; admin unlock (lifetime or a set time, after any paid time); refunds on revoking a paid invite; reminders and removal of unpaid sign-ups once a day | Built; tested end to end against a local PostgreSQL with Stripe and email stood in for, not yet against Stripe itself |
+| Payments (Stripe Checkout, SGD; test and live keys, switched in Admin → Payments): pay once for a set time, then a monthly or yearly plan; paid, free or lifetime invites with a 6-character code; open sign-up with an email code, payment, then admin switch-on; admin unlock (lifetime or a set time, after any paid time); refunds on revoking a paid invite; reminders and removal of unpaid sign-ups once a day | Built; tested end to end against a local PostgreSQL with Stripe and email stood in for, not yet against Stripe itself |
 | Passkeys (sign-in only; added from Account) | Built |
 | Admin: second factor (authenticator app), users on/off, invites, registration switch, audit log | Built |
 | Per-account provider app keys (Google, Microsoft, Notion, Slack), no server-wide keys | Built; not yet run against the providers |

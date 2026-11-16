@@ -2,8 +2,8 @@ import { and, desc, eq, gt, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { appSettings, auditLog, invites, recoveryCodes, sessions, signups, users } from '@niko/db';
 import { accessState, accountLimits, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, glanceLimits, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
-import { dateLabel, forgetPayments, inviteCodeHash, makeInviteCode, paymentSettings, PAYMENTS_KEY, plansLine } from '../billing';
-import { stripe, stripeReady } from '../stripe';
+import { dateLabel, forgetPayments, forgetStripeMode, inviteCodeHash, keysOf, makeInviteCode, paymentSettings, PAYMENTS_KEY, payNow, plansLine, STRIPE_MODE_KEY, stripeMode } from '../billing';
+import { isMode, modeStatus, stripe, stripeReady } from '../stripe';
 import { forgetGlanceDefaults, GLANCE_DEFAULT_KEY, glanceDefaults } from '../glance';
 import { accountDefaults, ACCOUNT_LIMITS_KEY, forgetAccountDefaults } from '../limits';
 import { AI_DEFAULT_KEY, aiDefaults, forgetAiDefaults } from '../access';
@@ -131,15 +131,16 @@ admin.get('/users', requireAdmin, async (c) => {
   const list = rows.map(({ u, su }) => ({
     id: u.id, name: u.name, email: u.email, role: u.role, status: u.status, isOwner: u.isOwner, lastActiveAt: u.lastActiveAt,
     access: accessState(u, pay.graceDays),
-    lifetime: u.lifetime, accessUntil: u.accessUntil, accessKind: u.accessKind, accessPaidUntil: u.accessPaidUntil, accessStartMonths: u.accessStartMonths,
-    sub: u.subId ? { plan: u.subPlan, status: u.subStatus, periodEnd: u.subPeriodEnd, cancelAtEnd: u.subCancelAtEnd } : null,
-    signup: su ? { state: su.state, paid: !!su.paidAt, priceCents: su.priceCents, months: su.months, removeAt: su.paidAt ? null : new Date(su.createdAt.getTime() + UNPAID_SIGNUP_DAYS * 86400_000) } : null,
+    lifetime: u.lifetime, accessUntil: u.accessUntil, accessKind: u.accessKind, accessPaidUntil: u.accessPaidUntil, accessStartMonths: u.accessStartMonths, paidMode: u.paidMode,
+    sub: u.subId ? { plan: u.subPlan, status: u.subStatus, periodEnd: u.subPeriodEnd, cancelAtEnd: u.subCancelAtEnd, mode: u.subMode } : null,
+    signup: su ? { state: su.state, paid: !!su.paidAt, mode: su.paidAt ? su.stripeMode : null, priceCents: su.priceCents, months: su.months, removeAt: su.paidAt ? null : new Date(su.createdAt.getTime() + UNPAID_SIGNUP_DAYS * 86400_000) } : null,
   }));
   const pending = await db.select({
     id: invites.id, email: invites.email, role: invites.role, expiresAt: invites.expiresAt, access: invites.access, priceCents: invites.priceCents, months: invites.months,
-    paidAt: invites.paidAt, codeTries: invites.codeTries, hasCode: sql<boolean>`${invites.codeHash} is not null`,
+    paidAt: invites.paidAt, stripeMode: invites.stripeMode, codeTries: invites.codeTries, hasCode: sql<boolean>`${invites.codeHash} is not null`,
   }).from(invites).where(and(isNull(invites.usedAt), isNull(invites.revokedAt), gt(invites.expiresAt, new Date()))).orderBy(invites.createdAt);
-  return c.json({ users: list, invites: pending, registration: await registrationMode(c), payments: pay, stripe: stripeReady(c.env) });
+  const now = await payNow(c.env, db);
+  return c.json({ users: list, invites: pending, registration: await registrationMode(c), payments: pay, stripe: now.ready, stripeMode: now.mode });
 });
 
 /** The invite email: the link, the code, and what they will pay (or that it is free). */
@@ -167,7 +168,8 @@ admin.post('/invites', requireAdmin, async (c) => {
   let priceCents: number | null = null;
   let months: number | null = null;
   if (access === 'paid') {
-    if (!stripeReady(c.env)) return c.json({ error: 'Payments aren’t set up yet: add the Stripe keys to the server (see docs/DEPLOYMENT.md), or send a free or lifetime invite.' }, 400);
+    const now = await payNow(c.env, db);
+    if (!now.ready) return c.json({ error: `Stripe ${now.mode} mode isn’t set up yet: add its keys to the server (see docs/DEPLOYMENT.md), switch mode in Payments, or send a free or lifetime invite.` }, 400);
     priceCents = b.priceCents === undefined || b.priceCents === null ? pay.onceCents : (Number.isInteger(b.priceCents) && b.priceCents >= MIN_CENTS && b.priceCents <= MAX_CENTS ? b.priceCents : null);
     if (!priceCents) return c.json({ error: 'Enter a price of at least SGD 0.50, or set a default in Payments.' }, 400);
     months = cleanMonths(b.months ?? pay.months, pay.months);
@@ -212,7 +214,8 @@ admin.delete('/invites/:id', requireAdmin, async (c) => {
   if (!inv) return c.json({ error: 'No such invite.' }, 404);
   let refunded = false;
   if (inv.paidAt && !inv.usedAt && !inv.refundedAt && inv.paymentIntent) {
-    try { await stripe(c.env, 'POST', '/refunds', { payment_intent: inv.paymentIntent, metadata: { invite_id: inv.id } }, `refund-invite-${inv.id}`); }
+    // Refunded in the mode it was paid in, whichever mode new payments use now.
+    try { await stripe(keysOf(c.env, inv.stripeMode), 'POST', '/refunds', { payment_intent: inv.paymentIntent, metadata: { invite_id: inv.id } }, `refund-invite-${inv.id}`); }
     catch (e) { return c.json({ error: `The refund didn’t go through, so the invite was kept: ${(e as Error).message}` }, 502); }
     refunded = true;
   }
@@ -260,8 +263,10 @@ admin.post('/users/:id/unlock', requireAdmin, async (c) => {
   const plan = unlockPlan(target, b.kind === 'set' ? { kind: 'set', months: Number(b.months) } : { kind: 'life' });
   if (plan.sub !== 'keep' && target.subId) {
     try {
-      if (plan.sub === 'cancel-now') await stripe(c.env, 'DELETE', `/subscriptions/${target.subId}`);
-      else await stripe(c.env, 'POST', `/subscriptions/${target.subId}`, { cancel_at_period_end: true });
+      // The plan is changed in the mode it was made in.
+      const keys = keysOf(c.env, target.subMode);
+      if (plan.sub === 'cancel-now') await stripe(keys, 'DELETE', `/subscriptions/${target.subId}`);
+      else await stripe(keys, 'POST', `/subscriptions/${target.subId}`, { cancel_at_period_end: true });
     } catch (e) { return c.json({ error: `Stripe didn’t accept the change to their plan, so nothing was changed: ${(e as Error).message}` }, 502); }
   }
   await db.update(users).set(plan.lifetime
@@ -288,7 +293,25 @@ admin.delete('/users/:id', requireAdmin, async (c) => {
 });
 
 // ---------------------------------------------------------------- payments (default prices)
-admin.get('/payments', requireAdmin, async (c) => c.json({ settings: await paymentSettings(c.get('db'), true), stripe: stripeReady(c.env) }));
+admin.get('/payments', requireAdmin, async (c) => {
+  const db = c.get('db');
+  const mode = await stripeMode(db, true);
+  return c.json({ settings: await paymentSettings(db, true), stripe: stripeReady(keysOf(c.env, mode)), mode, modes: { test: modeStatus(c.env, 'test'), live: modeStatus(c.env, 'live') } });
+});
+// Test or live: which Stripe keys new payments use. Only to a mode whose keys are set and look right. Payments, plans and
+// refunds already made keep using their own mode either way.
+admin.put('/payments/mode', requireAdmin, async (c) => {
+  const b = await c.req.json<{ mode?: string }>().catch(() => ({} as { mode?: string }));
+  if (!isMode(b.mode)) return c.json({ error: 'Choose test or live.' }, 400);
+  const st = modeStatus(c.env, b.mode);
+  if (!st.ready) return c.json({ error: st.problem ?? `Add the ${b.mode} secret key and webhook signing secret to the server first (docs/DEPLOYMENT.md, section 1c).` }, 400);
+  const db = c.get('db');
+  const before = await stripeMode(db, true);
+  await db.insert(appSettings).values({ key: STRIPE_MODE_KEY, value: b.mode }).onConflictDoUpdate({ target: appSettings.key, set: { value: b.mode } });
+  forgetStripeMode();
+  await audit(c, 'payments.mode', { from: before, to: b.mode }, c.get('user').id);
+  return c.json({ ok: true, mode: b.mode });
+});
 admin.put('/payments', requireAdmin, async (c) => {
   const b = await c.req.json<{ settings?: unknown }>().catch(() => ({} as { settings?: unknown }));
   const raw = (b.settings && typeof b.settings === 'object' ? b.settings : {}) as Record<string, any>;
