@@ -1,5 +1,6 @@
 // Settings: one area with a shared sidebar (Appearance, Voice, Connections, Engine, Account) and a way back to Niko.
 import { startRegistration } from '@simplewebauthn/browser';
+import { BillingCard } from './Plan';
 import { passkeyError } from '../passkeyError';
 import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSpeak, kokoroSpeed, kokoroSupported, kokoroTooSlow } from '../kokoro';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
@@ -1635,13 +1636,14 @@ export function Account() {
     } catch (x: any) { setNote({ ok: false, text: passkeyError(x, true) }); }
   };
   return (
-    <SettingsPage title="Account" sub="Your sign-in details and passkeys.">
+    <SettingsPage title="Account" sub="Your sign-in details, billing and passkeys.">
       {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
       <div className="set-grid">
         <section className="set-card" aria-label="You">
           <span className="k">You</span>
           <div className="row"><span className="txt"><b>{me?.name || 'No name set'}</b><span className="sub">{me?.email}</span></span><span className="k">{me?.role}</span></div>
         </section>
+        <BillingCard />
         <section className="set-card" aria-label="Passkeys">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}><span className="k">Passkeys</span><span className="hint">For signing in only</span></div>
           {keys.length === 0 && <p className="sub">No passkeys yet.</p>}

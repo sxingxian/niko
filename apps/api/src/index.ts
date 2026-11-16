@@ -5,6 +5,8 @@ import { sameOrigin } from './lib/session';
 import { admin } from './routes/admin';
 import { app as appRoutes, oauthCallback } from './routes/app';
 import { auth, myPasskeys } from './routes/auth';
+import { billing } from './routes/billing';
+import { daily } from './billing';
 import { hooks } from './routes/hooks';
 
 const api = new Hono<AppEnv>().basePath('/api');
@@ -32,6 +34,7 @@ api.get('/oauth/callback', oauthCallback);
 api.use('*', sameOrigin);
 api.route('/auth', auth);
 api.route('/me/passkeys', myPasskeys);
+api.route('/billing', billing);
 api.route('/admin', admin);
 api.route('/', appRoutes);
 
@@ -93,6 +96,11 @@ function manifest(site: Site): Response {
 }
 
 export default {
+  /** Once a day (see triggers in wrangler.jsonc): removes unpaid sign-ups after 7 days and sends reminders. */
+  async scheduled(_event: ScheduledController, env: AppEnv['Bindings'], ctx: ExecutionContext): Promise<void> {
+    if (!env.DATABASE_URL) return;
+    ctx.waitUntil(daily(env, createDb(env.DATABASE_URL)).catch((e) => console.error('daily tasks failed', e)));
+  },
   async fetch(request: Request, env: AppEnv['Bindings'], ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return api.fetch(request, env, ctx);

@@ -118,3 +118,11 @@ export async function hmacSha256Hex(secret: string, message: string): Promise<st
   const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message));
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
+
+/** Random characters from an alphabet, without modulo bias (for invite and email codes). */
+export function randomChars(alphabet: string, n: number): string {
+  let out = '';
+  const limit = 256 - (256 % alphabet.length);
+  while (out.length < n) for (const b of crypto.getRandomValues(new Uint8Array(n * 2))) if (b < limit && out.length < n) out += alphabet[b % alphabet.length];
+  return out;
+}

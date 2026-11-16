@@ -7,13 +7,14 @@ import './app.css';
 import { NikoProvider, useNiko } from './niko';
 import { FLOW_SECONDS, FlowLayer, LEAVE_MS } from './flow';
 import { Forgot, Invite, Reset, SignIn, SignUp } from './pages/Auth';
+import { PlanGate } from './pages/Plan';
 import { Home, Workspace } from './pages/Core';
 import { Account, Appearance, Connections, Engine, SettingsLayout, Voice } from './pages/Settings';
 
 function Private({ children }: { children: ReactNode }) {
   const { me } = useNiko();
   if (me === undefined) return <div className="bg" />;
-  return me ? <>{children}</> : <Navigate to="/sign-in" replace />;
+  return me ? <PlanGate>{children}</PlanGate> : <Navigate to="/sign-in" replace />;
 }
 function Public({ children }: { children: ReactNode }) {
   const { me } = useNiko();

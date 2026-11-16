@@ -1,4 +1,6 @@
 // Shared constants and types for the Niko API and front ends.
+import type { AccessInfo } from './billing';
+export * from './billing';
 
 export type ProviderGroup = 'mail' | 'calendar' | 'notes' | 'automation' | 'messaging' | 'weather' | 'ai';
 export type ConnectKind = 'oauth' | 'credentials' | 'token' | 'webhook' | 'builtin' | 'planned';
@@ -402,6 +404,8 @@ export interface Me {
   aiOff?: string[];
   /** The admin's limits for new items on Home, as they apply to this account. */
   glanceLimits?: GlanceLimits;
+  /** Whether this account may use Niko now (paid time, a plan, lifetime or admin), and the plans it can choose. */
+  access?: AccessInfo;
 }
 
 /** Whether a message is about the weather. Only then is the device's location asked for and sent. */

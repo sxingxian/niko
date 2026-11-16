@@ -27,7 +27,7 @@ body { background: #07090d; }
 .card { padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; }
 .seg { height: 44px; padding: 0 18px; border-radius: 999px; border: 1px solid rgba(255,255,255,.3); background: transparent; color: #fff; font-size: 14px; font-weight: 500; cursor: pointer; }
 .seg[aria-pressed='true'] { background: #fff; color: #07090d; }
-.table { gap: 0; padding: 14px 24px 8px; overflow-x: auto; flex: 1; min-height: 0; }
+.table { gap: 0; padding: 14px 24px 8px; overflow-x: auto; flex: none; }
 .table > .tr:last-child { margin-bottom: 0; }
 .tr { display: grid; grid-template-columns: minmax(120px, 1.3fr) minmax(160px, 1.7fr) 110px 120px 120px 150px; align-items: center; gap: 16px; min-height: 60px; border-top: 1px solid rgba(255,255,255,.12); min-width: 780px; font-size: 14px; }
 .tr.head { border-top: 0; min-height: 40px; }
@@ -81,3 +81,63 @@ body { background: #07090d; }
 @media (max-width: 900px) { .ai-grid { grid-template-columns: 1fr; } .ai-people { position: static; } }
 .gl-sel { width: auto; min-width: 230px; height: 44px; flex: none; }
 @media (max-width: 560px) { .gl-sel { min-width: 0; max-width: 52vw; } }
+
+/* Payments: invite prices, the Payment column, unlock, and the Payments page (Admin-Invite-Payment / Admin-Payments mockups). */
+.tr.pay { padding: 8px 0; grid-template-columns: minmax(110px, 1fr) minmax(150px, 1.25fr) 76px 130px minmax(220px, 1.9fr) 150px; min-width: 900px; }
+.paycell { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+.tone-await { color: #9fdcf3; }
+.tone-ended { color: #d9c3ff; }
+.tone-warn { color: #ffcf9a; }
+.bt.sm { height: 36px; min-width: 0; padding: 0 14px; font-size: 13px; }
+.pay-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pay-line.spread { justify-content: space-between; }
+.segs { display: flex; gap: 6px; flex-wrap: wrap; }
+.price { display: flex; align-items: center; gap: 8px; }
+.price .k { color: #fff; }
+.price .in { width: 130px; height: 44px; text-align: right; }
+.price.dim { opacity: .4; }
+.in.num { width: 76px; height: 44px; text-align: center; }
+.in.sel { width: auto; min-width: 150px; height: 44px; }
+.small { font-size: 13px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid #fff; display: inline-block; flex: none; }
+.dot.on { background: #7fe3ff; border-color: #7fe3ff; }
+.stripe-line { margin-top: auto; display: flex; align-items: center; gap: 10px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.12); }
+.banner { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.banner > span:first-child { flex: 1; min-width: 200px; }
+.code { font: 500 18px 'JetBrains Mono', monospace; letter-spacing: .24em; padding: 8px 12px; border-radius: 10px; border: 1px dashed rgba(255,255,255,.4); user-select: all; }
+.scrim { position: fixed; inset: 0; background: rgba(3,4,7,.72); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
+.dialog { width: min(540px, 100%); max-height: calc(100dvh - 32px); overflow-y: auto; border-radius: 28px; background: #0d1117; border: 1px solid rgba(255,255,255,.22); box-shadow: 0 30px 80px rgba(0,0,0,.5); padding: 30px; display: flex; flex-direction: column; gap: 18px; }
+.dialog h2 { font-weight: 500; font-size: 26px; letter-spacing: -.01em; margin-bottom: 6px; }
+.dialog .preview { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-radius: 16px; background: rgba(127,227,255,.08); border: 1px solid rgba(127,227,255,.35); font-size: 15px; }
+.dialog .preview .ic { stroke: #7fe3ff; width: 20px; height: 20px; }
+.dialog-acts { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+.pay-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+.pay-side { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.pay-block { display: flex; flex-direction: column; gap: 12px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,.12); }
+.pay-h { font-size: 17px; font-weight: 500; }
+.pay-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.pay-name { width: 72px; font-size: 15px; }
+.pay-txt { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; font-size: 15px; }
+.pay-acts { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding-top: 4px; }
+.timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.timeline li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 14px; align-items: start; padding: 0 0 18px 0; position: relative; }
+.timeline li + li { padding-bottom: 0; }
+.timeline li:first-child::after { content: ''; position: absolute; left: 4px; top: 16px; bottom: 0; width: 1px; background: rgba(255,255,255,.25); }
+.timeline .dot { margin-top: 5px; }
+.timeline b { font-weight: 600; font-size: 16px; max-width: 220px; text-align: right; }
+@media (max-width: 1100px) { .pay-grid { grid-template-columns: 1fr; } }
+
+/* Stripe test or live (Payments page and banners). */
+.dot.test { background: #ffcf9a; border-color: #ffcf9a; }
+.testbanner { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 12px 16px; border-radius: 16px; background: rgba(255,207,154,.08); border: 1px solid rgba(255,207,154,.45); color: #ffe6c7; font-size: 14px; }
+.testbanner > span { flex: 1; min-width: 220px; }
+.mode-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.seg.live[aria-pressed='true'] { background: #7fe3ff; color: #07090d; border-color: #7fe3ff; }
+.seg:disabled { opacity: .45; cursor: not-allowed; }
+.mode-rows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; }
+.mode-row { display: flex; align-items: center; gap: 12px; min-height: 56px; border-top: 1px solid rgba(255,255,255,.12); }
+.pill-st { font: 500 11px 'JetBrains Mono', monospace; letter-spacing: .12em; text-transform: uppercase; border-radius: 999px; padding: 4px 9px; white-space: nowrap; flex: none; }
+.pill-st.ok { color: #a8f0c6; border: 1px solid rgba(168,240,198,.5); }
+.pill-st.no { color: #ffcf9a; border: 1px solid rgba(255,207,154,.5); }
+.mode-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; line-height: 1.45; color: #dfe6ef; }
+@media (max-width: 900px) { .mode-rows { grid-template-columns: 1fr; } }
