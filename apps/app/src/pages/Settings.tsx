@@ -5,6 +5,7 @@ import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSp
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { AI_PRESETS, aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, presetOf, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
+import { IMAGE_PROVIDERS, imageOrder, imagePresetOf, MAX_IMAGE_KEYS, type ImageKeyInfo, type ImageProvider, type ImageSource } from '@niko/shared';
 import { HEAR_PROVIDERS, hearOrder, hearPresetOf, MAX_HEAR_KEYS, type HearKeyInfo, type HearProvider, type HearSource } from '@niko/shared';
 import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, PAGE_SIZES, VOICE_NAMES, VOICE_PROVIDERS, VOICE_SOURCES, voiceName, voiceOrder, voicePresetOf, WORKERS_VOICES, type VoiceKeyInfo, type VoiceProvider, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
 import { api, Field, Icon, setAppearance, Switch } from '@niko/ui';
@@ -409,6 +410,16 @@ function restLine(r: BrainRest | undefined): string {
   return `It did not answer just now. Niko is using the next one, and tries this again at ${day(r.until)}.`;
 }
 
+type ImageDraft = ImageKeyInfo & { apiKey: string; saved: boolean };
+const imageInfo = (k: { provider: ImageProvider; baseUrl: string }) => IMAGE_PROVIDERS.find((p) => p.id === imagePresetOf(k))!;
+const TEST_PICTURE = 'A small watercolour painting of a lighthouse on a cliff at dusk, soft light, calm sea.';
+function imageRestLine(r: BrainRest | undefined): string {
+  if (!r || r.until <= Date.now()) return '';
+  if (r.why === 'limit') return `Usage limit reached. The next one paints, and this one is tried again at ${day(r.until)}.`;
+  if (r.why === 'refused') return `It refused the last request. Check its key and model; it is tried again at ${day(r.until)}.`;
+  return `It did not answer just now. The next one paints, and this one is tried again at ${day(r.until)}.`;
+}
+
 export function Engine() {
   const { me, refreshMe } = useNiko();
   const { linked, values, ready, reload } = useLinks();
@@ -422,11 +433,21 @@ export function Engine() {
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
   const [confirm, setConfirm] = useState('');
   const [models, setModels] = useState<Record<string, { list: string[]; err: string; busy: boolean }>>({});
+  // Pictures: Cloudflare and the user's image keys, in order.
+  const [iOrder, setIOrder] = useState<ImageSource[]>([]);
+  const [iKeys, setIKeys] = useState<ImageDraft[]>([]);
+  const [iOpen, setIOpen] = useState<ImageSource | null>(null);
+  const [sample, setSample] = useState<{ entry: ImageSource; url: string } | null>(null);
   const loadKeys = useCallback(async () => {
     const r = await api<{ keys: AiKeyInfo[] }>('/engine/keys');
     setKeys((cur) => [...(r.keys ?? []).map((k) => ({ ...k, apiKey: '', saved: true })), ...cur.filter((k) => isNew(k.id))]);
   }, []);
-  useEffect(() => { if (me && !e) { setE({ model: 'fast', ...me.engine }); setOrder(brainOrder(me.engine)); void loadKeys(); } }, [me, e, loadKeys]);
+  const loadImageKeys = useCallback(async () => {
+    const r = await api<{ keys: ImageKeyInfo[] }>('/image/keys');
+    setIKeys((cur) => [...(r.keys ?? []).map((k) => ({ ...k, apiKey: '', saved: true })), ...cur.filter((k) => isNew(k.id))]);
+  }, []);
+  useEffect(() => { if (me && !e) { setE({ model: 'fast', ...me.engine }); setOrder(brainOrder(me.engine)); setIOrder(imageOrder(me.engine)); void loadKeys(); void loadImageKeys(); } }, [me, e, loadKeys, loadImageKeys]);
+  useEffect(() => () => { if (sample) URL.revokeObjectURL(sample.url); }, [sample]);
   // Reopen with what was saved. Keys are never sent back.
   useEffect(() => {
     if (!ready) return;
@@ -490,7 +511,19 @@ export function Engine() {
       setDirty((d) => Object.fromEntries(Object.entries(d).filter(([k]) => !savedIds.has(k))));
       if (dirty.self && self.baseUrl.trim()) await api('/connections/self-hosted-ai', { body: { baseUrl: self.baseUrl, model: self.model } });
       if (next.includes('self-hosted-ai') && !linked['self-hosted-ai'] && !self.baseUrl.trim()) throw new Error('Add your model server’s address, or switch it off.');
-      await api('/me', { method: 'PATCH', body: { engine: { brains: next, model: e.model } } });
+      // Image keys, the same way.
+      let iNext = [...iOrder];
+      const iKept: ImageDraft[] = [], iSaved = new Set<string>();
+      for (const k of iKeys) {
+        if (!dirty['i:' + k.id]) { iKept.push(k); continue; }
+        if (isNew(k.id) && !k.apiKey.trim()) { if (iNext.includes(`ikey:${k.id}`)) throw new Error(`Paste the API key for ${k.label || imageInfo(k).name} under Pictures, or remove it.`); iKept.push(k); continue; }
+        const r = await api<{ key: ImageKeyInfo }>('/image/keys', { body: { ...k, id: isNew(k.id) ? undefined : k.id } });
+        iNext = iNext.map((v) => (v === `ikey:${k.id}` ? `ikey:${r.key.id}` as ImageSource : v));
+        iKept.push({ ...r.key, apiKey: '', saved: true }); iSaved.add('i:' + k.id);
+      }
+      setIKeys(iKept); setIOrder(iNext);
+      setDirty((d) => Object.fromEntries(Object.entries(d).filter(([k]) => !iSaved.has(k))));
+      await api('/me', { method: 'PATCH', body: { engine: { brains: next, model: e.model, images: iNext } } });
       setDirty({});
       setOpen((o) => (o && isNew(o.slice(4)) ? null : o));
       await Promise.all([refreshMe(), reload()]);
@@ -590,6 +623,115 @@ export function Engine() {
       </li>
     );
   };
+  // ---- pictures
+  const editIKey = (id: string, p: Partial<ImageDraft>) => { setDirty((d) => ({ ...d, ['i:' + id]: true })); setIKeys(iKeys.map((k) => (k.id === id ? { ...k, ...p } : k))); };
+  const iKeyOf = (v: ImageSource) => iKeys.find((k) => `ikey:${k.id}` === v);
+  const iAll: ImageSource[] = ['workers', ...iKeys.map((k) => `ikey:${k.id}` as ImageSource)];
+  const iOthers = iAll.filter((v) => !iOrder.includes(v));
+  const iToggle = (v: ImageSource, on: boolean) => { setIOrder(on ? [...iOrder, v] : iOrder.filter((x) => x !== v)); if (on) setIOpen(v); };
+  const iMove = (v: ImageSource, by: -1 | 1) => {
+    const i = iOrder.indexOf(v), j = i + by;
+    if (i < 0 || j < 0 || j >= iOrder.length) return;
+    const next = [...iOrder]; [next[i], next[j]] = [next[j]!, next[i]!]; setIOrder(next);
+  };
+  const addIKey = () => {
+    const id = 'new-' + Math.random().toString(36).slice(2, 8);
+    const p = IMAGE_PROVIDERS[0]!;
+    setIKeys([...iKeys, { id, label: '', provider: p.provider, baseUrl: p.baseUrl ?? '', model: p.models[0] ?? '', apiKey: '', saved: false }]);
+    setIOrder([...iOrder, `ikey:${id}`]); setIOpen(`ikey:${id}`); setDirty((d) => ({ ...d, ['i:' + id]: true }));
+  };
+  const removeIKey = async (k: ImageDraft) => {
+    if (confirm !== 'i:' + k.id) { setConfirm('i:' + k.id); return; }
+    setConfirm(''); setNote(null);
+    try {
+      if (!isNew(k.id)) await api(`/image/keys/${encodeURIComponent(k.id)}`, { method: 'DELETE' });
+      setIKeys(iKeys.filter((x) => x.id !== k.id)); setIOrder(iOrder.filter((x) => x !== `ikey:${k.id}`));
+      if (!isNew(k.id)) { await refreshMe(); setNote({ ok: true, text: 'Image key removed.' }); }
+    } catch (x: any) { setNote({ ok: false, text: x.message }); }
+  };
+  // Test: one small picture from this one service, as set on the page, saved or not. It is shown here and not kept.
+  const testImage = async (v: ImageSource) => {
+    setNote(null); setBusy('img-' + v);
+    if (sample) { URL.revokeObjectURL(sample.url); setSample(null); }
+    try {
+      const k = iKeyOf(v);
+      const res = await fetch('/api/image', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+        prompt: TEST_PICTURE, shape: 'square',
+        // A key not saved yet has only a temporary id on this page, so it is sent as "ikey:draft" with its settings.
+        source: k && isNew(k.id) ? 'ikey:draft' : v, key: k ? { ...k, id: undefined, apiKey: k.apiKey || undefined } : undefined,
+      }) });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? 'It could not make a picture.');
+      const blob = await res.blob();
+      setSample({ entry: v, url: URL.createObjectURL(blob) });
+      setNote({ ok: true, text: `It painted a picture in ${((Number(res.headers.get('x-niko-ms')) || 0) / 1000).toFixed(1)} s.` });
+      await refreshMe();
+    } catch (x: any) { setNote({ ok: false, text: x.message }); } finally { setBusy(''); }
+  };
+  const iTestBtn = (v: ImageSource, disabled = false) => <button type="button" className="bt" onClick={() => testImage(v)} disabled={!!busy || disabled}>{busy === 'img-' + v ? 'Painting…' : 'Test'}</button>;
+  const iSample = (v: ImageSource) => sample?.entry === v && <img className="eng-sample" src={sample.url} alt="The test picture" />;
+  const imageSettings = (v: ImageSource) => {
+    if (v === 'workers') return (
+      <div className="eng-fields col">
+        <div className="eng-fields">{iTestBtn(v)}</div>
+        {iSample(v)}
+        <p className="hint">FLUX.1 [schnell] by Black Forest Labs, run on Cloudflare. Fast and free within Cloudflare’s daily allowance, shared with the Workers AI brain and voice. Pictures are square.</p>
+      </div>
+    );
+    const k = iKeyOf(v);
+    if (!k) return null;
+    const p = imageInfo(k);
+    return (
+      <div className="eng-fields col">
+        <div className="eng-fields">
+          <label className="fld"><span className="k">Service</span>
+            <select className="in" value={p.id} onChange={(x) => { const n = IMAGE_PROVIDERS.find((y) => y.id === x.target.value)!; editIKey(k.id, { provider: n.provider, baseUrl: n.baseUrl ?? (n.id === 'other' && p.id === 'other' ? k.baseUrl : ''), model: n.models[0] ?? '' }); }}>
+              {IMAGE_PROVIDERS.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+          </label>
+          <label className="fld"><span className="k">Name · optional</span><input className="in" type="text" maxLength={40} placeholder="Work OpenAI, Spare fal…" value={k.label} onChange={(x) => editIKey(k.id, { label: x.target.value })} /></label>
+        </div>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">API key</span><input className="in" type="password" autoComplete="off" placeholder={k.saved ? 'Saved · type to replace' : 'Paste key'} value={k.apiKey} onChange={(x) => editIKey(k.id, { apiKey: x.target.value })} /></label>
+          {p.id === 'other' && <label className="fld"><span className="k">Base URL</span><input className="in" type="url" placeholder="https://" value={k.baseUrl} onChange={(x) => editIKey(k.id, { baseUrl: x.target.value })} /></label>}
+        </div>
+        <div className="eng-fields">
+          <label className="fld"><span className="k">{p.modelLabel ?? 'Model'}</span>
+            {p.provider === 'ideogram'
+              ? <select className="in" value={k.model.toUpperCase() || 'TURBO'} onChange={(x) => editIKey(k.id, { model: x.target.value })}>{p.models.map((m) => <option key={m} value={m}>{m[0] + m.slice(1).toLowerCase()}</option>)}</select>
+              : <><input className="in" type="text" list={`img-models-${k.id}`} placeholder={p.models[0] ? `Such as ${p.models[0]}` : 'As listed by the service'} value={k.model} onChange={(x) => editIKey(k.id, { model: x.target.value.trim() })} />
+                  <datalist id={`img-models-${k.id}`}>{p.models.map((m) => <option key={m} value={m} />)}</datalist></>}
+          </label>
+          {iTestBtn(v, !k.apiKey.trim() && !k.saved)}
+          <button type="button" className={'bt' + (confirm === 'i:' + k.id ? ' danger' : '')} onClick={() => removeIKey(k)} onBlur={() => confirm === 'i:' + k.id && setConfirm('')}>{confirm === 'i:' + k.id ? 'Tap again to remove' : 'Remove'}</button>
+        </div>
+        {iSample(v)}
+        <p className="hint">{p.note}</p>
+      </div>
+    );
+  };
+  const iName = (v: ImageSource) => { const k = iKeyOf(v); return k ? k.label || imageInfo(k).name : 'Cloudflare FLUX'; };
+  const iSub = (v: ImageSource) => { const k = iKeyOf(v); return k ? [imageInfo(k).name, k.model || 'default model'].join(' · ') + (k.saved ? '' : ' · not saved yet') : 'FLUX.1 [schnell] on Cloudflare, where Niko runs. Nothing to set up.'; };
+  const iRow = (v: ImageSource, i: number | null) => {
+    const on = i !== null, resting = on ? imageRestLine(me.engine.imageRest?.[v]) : '';
+    return (
+      <li key={v} className={'vrow' + (on ? ' on' : '')}>
+        <div className="vrow-head">
+          <span className="n" aria-hidden="true">{on ? i + 1 : '–'}</span>
+          <button type="button" className="vrow-title" aria-expanded={iOpen === v} onClick={() => setIOpen(iOpen === v ? null : v)}>
+            <b>{iName(v)}</b><span className="sub">{iSub(v)}</span>
+            {resting && <span className="sub vrow-warn">{resting}</span>}
+          </button>
+          <span className="k tag">{iKeyOf(v) ? 'Your key' : 'Free tier'}</span>
+          {on && <span className="vrow-move">
+            <button type="button" className="stp" onClick={() => iMove(v, -1)} disabled={i === 0} aria-label={`Move ${iName(v)} up`}>↑</button>
+            <button type="button" className="stp" onClick={() => iMove(v, 1)} disabled={i === iOrder.length - 1} aria-label={`Move ${iName(v)} down`}>↓</button>
+          </span>}
+          <Switch on={on} onChange={(x) => iToggle(v, x)} label={`Use ${iName(v)}`} />
+        </div>
+        {iOpen === v && <div className="vrow-body">{imageSettings(v)}</div>}
+      </li>
+    );
+  };
   return (
     <SettingsPage title="Engine" sub="What Niko thinks with. You can change it at any time." action={<button className="pri set-save" onClick={save} disabled={busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save changes'}</button>}>
       <NoteLine note={note} />
@@ -601,6 +743,16 @@ export function Engine() {
         {others.length > 0 && <>
           <span className="k" style={{ padding: '18px 0 6px' }}>Not in use</span>
           <ul className="vlist">{others.map((b) => row(b, null))}</ul>
+        </>}
+      </section>
+      <section className="g eng-card wide" aria-label="Pictures">
+        <span className="k" style={{ paddingBottom: 6 }}>Pictures · tried in this order</span>
+        <p className="hint" style={{ paddingBottom: 8 }}>Ask Niko to paint, draw or make a picture. The first service that works paints it, switching to the next when one reaches its limit, refuses its key or stops answering. Each service checks requests against its own rules: if one declines a picture, the next is asked. Pictures are never stored; Save keeps one on your device. Switch them all off to turn pictures off.</p>
+        {iOrder.length ? <ol className="vlist">{iOrder.map((v, i) => iRow(v, i))}</ol> : <p className="hint vrow-warn" style={{ padding: '4px 0 8px' }}>Pictures are off. Switch on a service below to turn them on.</p>}
+        <button type="button" className="bt add-key" onClick={addIKey} disabled={iKeys.length >= MAX_IMAGE_KEYS}><Icon name="plus" size={18} />Add an image API key</button>
+        {iOthers.length > 0 && <>
+          <span className="k" style={{ padding: '18px 0 6px' }}>Not in use</span>
+          <ul className="vlist">{iOthers.map((v) => iRow(v, null))}</ul>
         </>}
       </section>
       <p className="g eng-keys"><Icon name="shield" size={20} />Keys are encrypted on the server, never stored in this browser, and never shown again after saving. Several keys from the same provider and account share one usage limit, so a second key helps most when it is from another account or provider. The voice is set under Voice.</p>

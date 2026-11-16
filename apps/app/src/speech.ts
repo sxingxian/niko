@@ -213,3 +213,26 @@ export function sentenceStart(text: string, pos: number): number {
   for (let m: RegExpExecArray | null; (m = re.exec(text)) && m.index + m[0].length <= p;) start = m.index + m[0].length;
   return start;
 }
+
+// ---- Pictures
+/** The AI asks for a picture by ending its reply with [[image:<prompt>]], or [[image:wide: <prompt>]] / tall. */
+export function takeImageTag(reply: string): { text: string; image: { prompt: string; shape: 'square' | 'wide' | 'tall' } | null } {
+  const m = /\[\[\s*image\s*:\s*([\s\S]+?)\s*\]\]/i.exec(reply);
+  const text = reply.replace(/\s*\[\[\s*image\s*:[\s\S]*?\]\]\s*/gi, ' ').replace(/\s+/g, ' ').trim();
+  if (!m) return { text, image: null };
+  let prompt = m[1]!.replace(/\s+/g, ' ').trim(), shape: 'square' | 'wide' | 'tall' = 'square';
+  const s = /^(wide|tall|landscape|portrait)\s*[:,-]\s*/i.exec(prompt);
+  if (s) { shape = /wide|landscape/i.test(s[1]!) ? 'wide' : 'tall'; prompt = prompt.slice(s[0].length); }
+  return prompt.length >= 3 ? { text, image: { prompt: prompt.slice(0, 1500), shape } } : { text, image: null };
+}
+
+/** What to do with the picture on screen: "save it", "share it", "more like this", "close it". */
+export function pictureCommand(raw: string): 'save' | 'share' | 'more' | 'close' | null {
+  const t = cleanCommand(raw);
+  const it = '(?:it|this|that|the (?:picture|image|photo|painting|drawing|one)|this (?:picture|image|one)|that (?:picture|image|one))';
+  if (new RegExp(`^(?:save|download|keep)(?: ${it})?(?: to (?:my )?(?:device|phone|computer|photos|downloads))?$`).test(t)) return 'save';
+  if (new RegExp(`^share(?: ${it})?$`).test(t)) return 'share';
+  if (/^(?:(?:make|paint|draw|show me|give me|do|try) )?(?:(?:one|some|a few) )?more like (?:this|that|it)$|^(?:make |paint |draw |show me |give me )?(?:another|a different) (?:one|version|take|variation)$|^(?:another|one more)(?: one| version)?$|^(?:a )?variation$/.test(t)) return 'more';
+  if (new RegExp(`^(?:close|hide|dismiss|put away)(?: ${it})?$`).test(t)) return 'close';
+  return null;
+}

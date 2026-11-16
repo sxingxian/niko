@@ -2,13 +2,20 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { hearOrder, isWeatherQuestion, voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
-import { isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeItemTag, takeMoveTags, takeScreenTag } from './speech';
+import { isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMoveTags, takeScreenTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, setAppearance, type CoreMode } from '@niko/ui';
 
 export type { Brief } from '@niko/shared';
+
+/** A picture Niko made (or is making) in this visit. Pictures live only in the page's memory and go when it closes. */
+export interface PictureItem {
+  id: number; prompt: string; shape: 'square' | 'wide' | 'tall'; status: 'painting' | 'done' | 'failed'; started: number;
+  url?: string; type?: string; label?: string; ms?: number; error?: string;
+}
+const MAX_PICTURES = 8;
 
 interface NikoState {
   me: Me | null | undefined; // undefined while loading
@@ -43,6 +50,12 @@ interface NikoState {
   /** An item the AI was asked to open (on Inbox, Calendar or Notes); the workspace opens it and clears it. */
   pendingOpen: { view: 'inbox' | 'calendar' | 'notes'; title: string; at: number } | null;
   clearPendingOpen: () => void;
+  /** Pictures made in this visit (oldest first), and the one on screen. */
+  pictures: PictureItem[];
+  picture: PictureItem | null;
+  paintPicture: (prompt: string, shape: PictureItem['shape'], more?: boolean) => void;
+  showPicture: (id: number) => void;
+  closePicture: () => void;
 }
 
 const Ctx = createContext<NikoState>(null as never);
@@ -138,6 +151,17 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const inFlight = useRef(0); // the number of the question still waiting for its answer, or 0
   const [voiceProblem, setVoiceProblem] = useState<string | null>(null);
   const [pendingOpen, setPendingOpen] = useState<NikoState['pendingOpen']>(null);
+  const [pictures, setPictures] = useState<PictureItem[]>([]);
+  const [pictureId, setPictureId] = useState<number | null>(null);
+  const picturesRef = useRef<PictureItem[]>([]);
+  const picSeq = useRef(0);
+  const picCtl = useRef<AbortController | null>(null);
+  /** Changes the list of pictures, letting go of the memory of any that drop off the end. */
+  const updatePictures = (fn: (p: PictureItem[]) => PictureItem[]) => {
+    const next = fn(picturesRef.current);
+    while (next.length > MAX_PICTURES) { const old = next.shift()!; if (old.url) URL.revokeObjectURL(old.url); }
+    picturesRef.current = next; setPictures(next);
+  };
   const SR: any = typeof window !== 'undefined' ? (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition : null;
 
   const refreshMe = useCallback(async () => {
@@ -359,11 +383,20 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       const { text: noScreen, path: asked } = takeScreenTag(r.reply);
       const { text: noItem, item } = takeItemTag(noScreen);
       // …or to scroll ([[scroll:down]]) or turn the list's page ([[page:next]]), which this screen then does.
-      const { text: answer, scroll, page } = takeMoveTags(noItem);
+      const { text: noMove, scroll, page } = takeMoveTags(noItem);
+      // …or a picture ([[image:<prompt>]]), which is painted on Home while Niko says what it is making.
+      const { text: answer, image } = takeImageTag(noMove);
       if (last.current?.question === text) last.current.answer = answer;
       // Stopped while Niko was thinking (or a newer question came): keep the answer for "continue", don't speak it.
       if (mine !== askId.current) { if (last.current?.question === text) setResumable({ canContinue: true }); return; }
-      setBrief(r.brief); setReply(answer); say(answer, 0);
+      setBrief(r.brief);
+      if (image) {
+        say(answer || 'Painting that now.', 0);
+        if (here.current !== '/') navigate('/');
+        paintPicture(image.prompt, image.shape);
+        return;
+      }
+      setPictureId(null); setReply(answer); say(answer, 0);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) navigate('/' + item.view); }
       else if (asked) navigate(asked);
       else if (page && handler.current?.(page, true)) { /* the list on screen turned its page, quietly: Niko is speaking */ }
@@ -376,6 +409,50 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     }
   };
   askRef.current = (t: string) => { void ask(t); };
+
+  /** Paints a picture with the first image service that will (the server goes down the Engine screen's order). */
+  const paintPicture = (prompt: string, shape: PictureItem['shape'], more = false) => {
+    picCtl.current?.abort();
+    const ctl = new AbortController();
+    picCtl.current = ctl;
+    const id = ++picSeq.current;
+    updatePictures((p) => [...p, { id, prompt, shape, status: 'painting', started: Date.now() }]);
+    setPictureId(id); setReply(null);
+    const asked = askId.current;
+    if (more) { setMode('thinking'); setLabel('Painting'); setLine('Another one like this…'); }
+    const timer = window.setTimeout(() => ctl.abort(), 150_000);
+    /** Says something once Niko has finished its current line, unless the conversation has moved on. */
+    const tell = (text: string) => {
+      const until = Date.now() + 10_000;
+      const go = () => {
+        if (askId.current !== asked || picCtl.current !== ctl) return;
+        if (speaking.current && Date.now() < until) { window.setTimeout(go, 300); return; }
+        say(text);
+      };
+      go();
+    };
+    void (async () => {
+      try {
+        const r = await fetch('/api/image', { method: 'POST', credentials: 'same-origin', signal: ctl.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, shape }) });
+        if (!r.ok) { const j = await r.json().catch(() => ({})); throw Object.assign(new Error(j.error ?? 'The picture could not be made just now.'), { declined: !!j.declined }); }
+        const blob = await r.blob();
+        if (!/^image\/(jpeg|png|webp)$/.test(blob.type)) throw new Error('The picture could not be read.');
+        if (!picturesRef.current.some((x) => x.id === id)) return;
+        const url = URL.createObjectURL(blob);
+        const label = (() => { try { return decodeURIComponent(r.headers.get('x-niko-label') ?? ''); } catch { return ''; } })();
+        updatePictures((p) => p.map((x) => (x.id === id ? { ...x, status: 'done', url, type: blob.type, label, ms: Number(r.headers.get('x-niko-ms')) || Date.now() - x.started } : x)));
+        tell(more ? 'Here’s another.' : 'Here it is. Want any changes?');
+      } catch (e: any) {
+        const stopped = ctl.signal.aborted && picCtl.current !== ctl;
+        const msg = stopped ? 'Stopped.' : ctl.signal.aborted ? 'The picture took too long to make.' : String(e?.message ?? 'The picture could not be made just now.');
+        updatePictures((p) => p.map((x) => (x.id === id ? { ...x, status: 'failed', error: msg } : x)));
+        if (!stopped) tell(e?.declined ? 'None of the image services would make that picture.' : 'I couldn’t make that picture just now.');
+      } finally {
+        window.clearTimeout(timer);
+        if (picCtl.current === ctl) picCtl.current = null;
+      }
+    })();
+  };
 
   // Speech recognition: runs while the app is open and the mic is allowed.
   // Interim results let the core react the moment "Niko" is heard; the command itself is taken from the final text.
@@ -441,6 +518,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     inFlight.current = 0;
     askId.current++; // an answer still on its way is kept for "continue", not spoken
     stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; active.current = false; unmuteMic();
+    if (picCtl.current) { const c = picCtl.current; picCtl.current = null; c.abort(); }
     const l = last.current;
     if (l && (thinking || (l.answer && l.from < l.answer.length))) {
       if (thinking) setResumable({ canContinue: true });
@@ -461,10 +539,15 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     voiceProblem,
     pendingOpen,
     clearPendingOpen: () => setPendingOpen(null),
+    pictures,
+    picture: pictures.find((x) => x.id === pictureId) ?? null,
+    paintPicture,
+    showPicture: (id: number) => { setReply(null); setPictureId(id); },
+    closePicture: () => setPictureId(null),
     resumable,
     resume: () => { void ask('continue'); },
     retry: () => { void ask('try again'); },
-  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable]);
+  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

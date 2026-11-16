@@ -49,6 +49,11 @@ const PATHS: Record<string, string> = {
   external: 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
   file: 'M7 3h7l5 5v13H7zM14 3v5h5M12 12v6M9 15l3-3 3 3',
   palette: 'M12 3a9 9 0 1 0 0 18c1.7 0 2-1.3 1.2-2.3-.8-1 0-2.7 1.5-2.7H17a4 4 0 0 0 4-4c0-5-4-9-9-9zM7.5 11h.01M10 7.5h.01M14.5 7.5h.01',
+  save: 'M12 4v11M7 10l5 5 5-5M5 20h14',
+  share: 'M12 15V4M8 8l4-4 4 4M5 13v6h14v-6',
+  again: 'M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5',
+  expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+  image: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM3 16l5-5 4 4 3-3 6 6M15.5 9.5a1.5 1.5 0 1 0 0-.01',
 };
 export function Icon({ name, size = 22 }: { name: keyof typeof PATHS | string; size?: number }) {
   return <svg className="ic" viewBox="0 0 24 24" aria-hidden="true" style={{ width: size, height: size }}><path d={PATHS[name] ?? ''} /></svg>;

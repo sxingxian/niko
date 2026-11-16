@@ -63,7 +63,8 @@ const SECURITY_HEADERS: Record<string, string> = {
     // 'wasm-unsafe-eval' lets WebAssembly run (the on-device voice) without allowing eval() of scripts.
     "default-src 'self'", "script-src 'self' 'wasm-unsafe-eval'", "style-src 'self' 'unsafe-inline'", "font-src 'self'",
     // Hugging Face: only the on-device voice's model and voice files, which the app checks before use.
-    "img-src 'self' data:", "media-src 'self' blob:", "connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co", "worker-src 'self'", "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'", "object-src 'none'",
+    // blob: shows the pictures Niko makes, which are kept only in the page's memory.
+    "img-src 'self' data: blob:", "media-src 'self' blob:", "connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co", "worker-src 'self'", "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'", "object-src 'none'",
   ].join('; '),
 };
 

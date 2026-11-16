@@ -210,6 +210,39 @@ export function hearOrder(e: Partial<EnginePrefs> | undefined): HearSource[] {
   return Array.isArray(e?.hears) ? [...new Set(e!.hears.map(String).filter((v) => HEAR_ENTRY.test(v)))] as HearSource[] : [];
 }
 
+/** Where Niko's pictures come from: Cloudflare's own (FLUX.1 schnell, on the free daily allowance), or any number of
+ * the user's image keys ("ikey:<id>"), tried in the order set on the Engine screen. */
+export type ImageSource = 'workers' | `ikey:${string}`;
+export const IMAGE_ENTRY = /^(workers|ikey:[a-z0-9]{1,16})$/;
+export const MAX_IMAGE_KEYS = 10;
+/** Image services a key can be added for. "openai" also covers any service with an OpenAI-compatible images API. */
+export type ImageProvider = 'openai' | 'google' | 'stability' | 'fal' | 'replicate' | 'bfl' | 'ideogram';
+export interface ImageKeyInfo { id: string; label: string; provider: ImageProvider; model: string; baseUrl: string }
+/** The shape of a picture: square unless the user asks for a wide or tall one. */
+export type ImageShape = 'square' | 'wide' | 'tall';
+export const IMAGE_PROVIDERS: { id: string; provider: ImageProvider; name: string; baseUrl?: string; models: string[]; modelLabel?: string; note: string }[] = [
+  { id: 'openai', provider: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', models: ['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1-mini', 'gpt-image-1'], note: 'GPT Image: very good at following detailed requests and drawing text. Paid per image; keys from platform.openai.com.' },
+  { id: 'google', provider: 'google', name: 'Google Gemini', models: ['gemini-2.5-flash-image', 'gemini-3.1-flash-image-preview', 'gemini-3-pro-image-preview', 'imagen-4.0-generate-001', 'imagen-4.0-fast-generate-001'], note: 'Gemini image models (“Nano Banana”) and Imagen. Uses a Gemini API key from aistudio.google.com; image models need billing on the key.' },
+  { id: 'stability', provider: 'stability', name: 'Stability AI', models: ['core', 'ultra', 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium'], note: 'Stable Image Core, Ultra and Stable Diffusion 3.5. Paid with credits; keys from platform.stability.ai.' },
+  { id: 'bfl', provider: 'bfl', name: 'Black Forest Labs', models: ['flux-2-pro', 'flux-pro-1.1', 'flux-pro-1.1-ultra', 'flux-kontext-pro', 'flux-dev'], note: 'FLUX, from the people who made it. Paid with credits; keys from dashboard.bfl.ai.' },
+  { id: 'fal', provider: 'fal', name: 'fal', models: ['fal-ai/flux/schnell', 'fal-ai/flux/dev', 'fal-ai/flux-pro/v1.1', 'fal-ai/flux-pro/v1.1-ultra', 'fal-ai/imagen4/preview'], note: 'Hundreds of image models behind one key: write the model’s id as fal lists it. Keys from fal.ai/dashboard/keys.' },
+  { id: 'replicate', provider: 'replicate', name: 'Replicate', models: ['black-forest-labs/flux-schnell', 'black-forest-labs/flux-dev', 'black-forest-labs/flux-1.1-pro', 'ideogram-ai/ideogram-v3-turbo', 'google/imagen-4'], note: 'Many image models behind one key: write the model as owner/name, as Replicate lists it. Tokens from replicate.com/account/api-tokens.' },
+  { id: 'ideogram', provider: 'ideogram', name: 'Ideogram', models: ['TURBO', 'DEFAULT', 'QUALITY'], modelLabel: 'Speed', note: 'Ideogram 3.0, strong at posters, logos and lettering. Keys from ideogram.ai’s API settings.' },
+  { id: 'xai', provider: 'openai', name: 'xAI', baseUrl: 'https://api.x.ai/v1', models: ['grok-imagine-image', 'grok-imagine-image-2.0'], note: 'Grok Imagine. Keys from console.x.ai.' },
+  { id: 'together', provider: 'openai', name: 'Together AI', baseUrl: 'https://api.together.xyz/v1', models: ['black-forest-labs/FLUX.1-schnell', 'black-forest-labs/FLUX.1.1-pro', 'black-forest-labs/FLUX.2-dev'], note: 'FLUX and other open models, paid per image. Keys from api.together.ai.' },
+  { id: 'recraft', provider: 'openai', name: 'Recraft', baseUrl: 'https://external.api.recraft.ai/v1', models: ['recraftv3'], note: 'Illustration, icons and design styles. Keys from recraft.ai’s API page.' },
+  { id: 'other', provider: 'openai', name: 'Other (OpenAI-compatible)', models: [], note: 'Any image service with an OpenAI-compatible images API.' },
+];
+export function imagePresetOf(k: { provider: ImageProvider; baseUrl: string }): string {
+  if (k.provider !== 'openai') return k.provider;
+  const b = k.baseUrl.trim().replace(/\/+$/, '').toLowerCase();
+  return IMAGE_PROVIDERS.find((p) => p.provider === 'openai' && p.baseUrl && p.baseUrl.toLowerCase() === b)?.id ?? 'other';
+}
+/** The image services to try, in order. Cloudflare's alone until the user sets an order. */
+export function imageOrder(e: Partial<EnginePrefs> | undefined): ImageSource[] {
+  return Array.isArray(e?.images) ? [...new Set(e!.images.map(String).filter((v) => IMAGE_ENTRY.test(v)))] as ImageSource[] : ['workers'];
+}
+
 export function voicePresetOf(k: { provider: VoiceProvider; baseUrl: string }): string {
   if (k.provider !== 'openai') return k.provider;
   return k.baseUrl.trim().replace(/\/+$/, '').toLowerCase() === 'https://api.openai.com/v1' ? 'openai' : 'other';
@@ -273,6 +306,9 @@ export interface EnginePrefs {
   /** Speech-in services to try, in order; the device's own recognition comes after them. */
   hears?: HearSource[];
   hearRest?: Record<string, BrainRest>;
+  /** Image services to try, in order. Empty: pictures are switched off. */
+  images?: ImageSource[];
+  imageRest?: Record<string, BrainRest>;
   workersVoice?: string;
   kokoroVoice?: string;
   wake: boolean; onlyMyVoice: boolean; fallback: boolean; listen: 'device';

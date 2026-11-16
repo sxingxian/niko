@@ -97,6 +97,37 @@
 .ws .resume { margin-top: -4px; }
 .panels .two .sec, .panels .two .pri { height: 46px; font-size: 14px; flex: 1; padding: 0 12px; }
 .panels .two .pri { flex: 1.5; }
+/* A picture Niko made: the frame the particles paint into, then what can be done with it. */
+.panels.pic { width: 480px; }
+.panels .picture { gap: 12px; }
+.panels .picture .meta { align-items: center; }
+.pic-meta { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pic-frame { --fh: max(220px, calc(100vh - 500px)); position: relative; aspect-ratio: var(--ar); width: min(100%, calc(var(--fh) * var(--ar))); margin: 0 auto; border-radius: 18px; overflow: hidden; background: rgba(0,0,0,.35); box-shadow: inset 0 0 0 1px rgba(255,255,255,.12); }
+.pic-frame.busy::after { content: ''; position: absolute; left: 0; right: 0; height: 2px; top: 0; background: linear-gradient(90deg, transparent, hsl(var(--h) 100% 80% / .9), transparent); animation: picScan 2.4s ease-in-out infinite; pointer-events: none; }
+@keyframes picScan { 0% { top: 0; opacity: 0; } 10%, 90% { opacity: 1; } 100% { top: calc(100% - 2px); opacity: 0; } }
+.pic-frame .pic-paint, .pic-frame img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+/* While waiting, the patches of colour run together like wet paint; the blur clears as the picture paints in. */
+.pic-frame .pic-paint { transition: filter .8s ease; }
+.pic-frame.busy .pic-paint { filter: blur(9px) saturate(1.2); }
+.pic-frame img { object-fit: cover; opacity: 0; transition: opacity .35s ease; user-select: none; -webkit-user-select: none; -webkit-touch-callout: default; }
+.pic-frame img.on { opacity: 1; }
+.pic-failed { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 20px; text-align: center; font: 400 14px/1.45 system-ui, sans-serif; color: #e6eaf1; }
+.pic-failed .sec { height: 44px; font-size: 14px; }
+.pic-prompt { font: 400 13px/1.45 system-ui, sans-serif; color: #c9d0db; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.pic-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.pic-actions .pri, .pic-actions .sec { height: 44px; padding: 0 16px; font-size: 14px; gap: 8px; }
+.pic-actions .pri { padding: 0 20px; }
+.pic-change { display: flex; align-items: center; gap: 6px; height: 46px; padding: 0 4px 0 16px; border-radius: 999px; border: 1px solid rgba(255,255,255,.22); background: rgba(0,0,0,.2); }
+.pic-change:focus-within { border-color: rgba(255,255,255,.5); }
+.pic-change input { flex: 1; min-width: 0; height: 100%; border: 0; background: transparent; color: #fff; font: 400 14px system-ui, sans-serif; outline: none; }
+.pic-change input::placeholder { color: var(--muted); }
+.pic-change .ib:disabled { opacity: .35; }
+.pic-note { font: 400 13px/1.4 system-ui, sans-serif; color: hsl(var(--h) 100% 82%); }
+.pic-strip { display: flex; gap: 8px; overflow-x: auto; padding: 2px; scrollbar-width: none; }
+.pic-thumb { flex: none; width: 56px; height: 56px; padding: 0; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,.2); background: #000; cursor: pointer; }
+.pic-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pic-thumb[aria-pressed="true"] { outline: 2px solid #fff; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .pic-frame.busy::after { animation: none; opacity: .6; } .pic-frame img { transition: none; } }
 @media (max-width: 900px) {
   .home { --s: min(350px, 90vw); }
   .home .top { left: 16px; right: 16px; top: 56px; }
@@ -119,6 +150,14 @@
   .card-build .outline, .card-build .scan { display: none; }
   .home.open .card-build > section { animation: slideUp .5s cubic-bezier(.2,.8,.2,1) calc(var(--d) / 2) both; }
   .home.closing .card-build > section { animation: slideDown .4s ease both; }
+  /* Phone, with a picture: the core shrinks to the top and the picture takes the rest of the screen. */
+  .home.picture { --s: min(140px, 36vw); }
+  .home.picture .stage { padding-top: 92px; }
+  .home.picture .caption { margin-top: -6px; }
+  .home.picture .caption p { font-size: 15px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .panels.pic { top: calc(92px + var(--s) + 40px); bottom: 112px; width: auto; max-height: none; overflow: auto; overscroll-behavior: contain; }
+  .pic-frame { --fh: max(170px, calc(100vh - 92px - var(--s) - 40px - 112px - 250px)); }
+  .pic-actions .pri, .pic-actions .sec { flex: 1; padding: 0 12px; }
   .panels section { background: rgba(16,20,30,.82); border-radius: 26px; padding: 14px 16px 16px; gap: 10px; }
   .panels h2 { font-size: 17px; }
   .dock { top: auto; bottom: 118px; left: 50%; flex-direction: row; transform: translate(-50%, 30px); }
@@ -287,6 +326,7 @@
 .eng-fields { display: flex; gap: 12px; align-items: flex-end; padding-left: 32px; }
 .eng-fields.col { flex-direction: column; align-items: stretch; }
 .eng-fields .eng-fields { padding-left: 0; }
+.eng-sample { width: 160px; height: 160px; border-radius: 14px; object-fit: cover; box-shadow: inset 0 0 0 1px rgba(255,255,255,.15); animation: fadeIn .3s ease both; }
 .eng-fields .fld { gap: 6px; flex: 1; min-width: 0; }
 .eng-fields .in, .eng-card.listen .in { height: 44px; border-radius: 12px; padding: 0 14px; font-size: 14px; }
 select.in option { color: #04070c; }

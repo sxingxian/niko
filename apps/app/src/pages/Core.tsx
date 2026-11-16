@@ -6,6 +6,7 @@ import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
 import { useNiko } from '../niko';
 import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
 import { isStacked } from '../flow';
+import { PictureCard } from './Picture';
 import type { Brief, BriefPart, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
 
 // The mockups' rail: Home, Inbox, Calendar, Notes, Connections. Settings (appearance, engine, account) sit behind the last button.
@@ -119,7 +120,8 @@ export function Home() {
   const [nav, setNav] = useState(false);
   const [typing, setTyping] = useState(false);
   const [text, setText] = useState('');
-  const open = !!n.reply;
+  const pic = n.picture;
+  const open = !!n.reply || !!pic;
   // Keep the last answer on screen while its cards close.
   const [shown, setShown] = useState<{ reply: string; chat: Brief['chats'][number] | null; id: number } | null>(null);
   const [closing, setClosing] = useState(false);
@@ -140,8 +142,10 @@ export function Home() {
   }, [n.reply, wide]);
   const submit = (e: FormEvent) => { e.preventDefault(); const t = text; setText(''); setTyping(false); void n.ask(t); };
   const cards = shown ? (shown.chat ? 2 : 1) : 0;
+  // The caption moves aside for a picture too.
+  useEffect(() => { if (wide && pic && !n.reply) setCaption('aside'); else if (wide && !pic && !n.reply && !shown) setCaption((c) => (c === 'aside' ? 'back' : c)); }, [!!pic]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
-    <div className={'home' + (open ? ' open' : '') + (closing ? ' closing' : '')}>
+    <div className={'home' + (open ? ' open' : '') + (closing && !pic ? ' closing' : '') + (pic ? ' picture' : '')}>
       <div className="bg" />
       <div className="stage">
         <ParticleCore size="var(--s)" mode={n.mode} pad={wide ? 220 : 0} shift={wide && open ? -200 : 0} spot="home" />
@@ -160,7 +164,15 @@ export function Home() {
         <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : n.me?.engine.brain === 'self-hosted-ai' ? 'Your model' : 'Workers AI'} · {voiceName(voiceOrder(n.me?.engine)[0] ?? 'device')}</span><span className="short">Engine</span></Link>
       </div>
       <Dock className={'dock' + (nav ? ' show' : '')} />
-      {wide && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}
+      {wide && !pic && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}
+      {pic ? (
+        <aside className="panels pic" aria-label="Niko’s picture" key="picture">
+          <div className="card-build" style={{ ['--d' as string]: '0s' }}>
+            <PictureCard pic={pic} tabbable />
+            <Outline />
+          </div>
+        </aside>
+      ) : (
       <aside className="panels" aria-label="Niko’s answer" aria-hidden={!open} key={shown?.id ?? 0}>
         {shown && <>
           <div className="card-build" style={{ ['--d' as string]: '0s' }}>
@@ -189,6 +201,7 @@ export function Home() {
           )}
         </>}
       </aside>
+      )}
       {typing && (
         <form className="g typebar" onSubmit={submit}>
           <label className="sr" htmlFor="ask">Message Niko</label>
