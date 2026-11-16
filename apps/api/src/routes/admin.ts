@@ -1,7 +1,8 @@
 import { and, desc, eq, gt, isNull, lt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { appSettings, auditLog, invites, recoveryCodes, sessions, users } from '@niko/db';
-import { isEmail } from '@niko/shared';
+import { aiHasBrain, aiOff, cleanAiAccess, isEmail } from '@niko/shared';
+import { AI_DEFAULT_KEY, aiDefaults, forgetAiDefaults } from '../access';
 import type { AppEnv } from '../env';
 import { hashRecoveryCode, makeRecoveryCodes, newTotpSecret, randomToken, seal, sha256, totpStep, totpUri, unseal } from '../lib/crypto';
 import { verifyPassword } from '../lib/password';
@@ -175,6 +176,45 @@ admin.put('/registration', requireAdmin, async (c) => {
   await audit(c, 'registration.mode', { mode }, c.get('user').id);
   return c.json({ ok: true, mode });
 });
+
+// ---------------------------------------------------------------- AI options (Engine and Voice screens)
+// The default for everyone, and each account's changes to it. Options that are off are hidden from that account and
+// refused by the server. At least one brain must stay on for every account, or Niko could not answer.
+admin.get('/ai', requireAdmin, async (c) => {
+  const db = c.get('db');
+  const list = await db.select({ id: users.id, name: users.name, email: users.email, role: users.role, status: users.status, aiAccess: users.aiAccess }).from(users).orderBy(users.createdAt);
+  return c.json({ defaults: await aiDefaults(db, true), users: list.map((u) => ({ ...u, aiAccess: cleanAiAccess(u.aiAccess) })) });
+});
+admin.put('/ai/default', requireAdmin, async (c) => {
+  const b = await c.req.json<{ access?: unknown }>().catch(() => ({} as { access?: unknown }));
+  const access = cleanAiAccess(b.access);
+  // Only what is off needs keeping: anything not listed is on.
+  const stored = Object.fromEntries(Object.entries(access).filter(([, v]) => v === false));
+  const db = c.get('db');
+  const members = await db.select({ email: users.email, role: users.role, aiAccess: users.aiAccess }).from(users);
+  if (!aiHasBrain(aiOff(stored, {}))) return c.json({ error: 'At least one brain must stay on.' }, 400);
+  const stuck = members.find((m) => m.role !== 'admin' && !aiHasBrain(aiOff(stored, cleanAiAccess(m.aiAccess))));
+  if (stuck) return c.json({ error: `That would leave ${stuck.email} with no brain. Change their own settings first.` }, 400);
+  const before = await aiDefaults(db, true);
+  await db.insert(appSettings).values({ key: AI_DEFAULT_KEY, value: stored }).onConflictDoUpdate({ target: appSettings.key, set: { value: stored } });
+  forgetAiDefaults();
+  await audit(c, 'ai.default', { off: Object.keys(stored).join(', ') || 'none', changed: changedKeys(before, stored).join(', ') }, c.get('user').id);
+  return c.json({ ok: true, defaults: stored });
+});
+admin.put('/ai/users/:id', requireAdmin, async (c) => {
+  const b = await c.req.json<{ access?: unknown }>().catch(() => ({} as { access?: unknown }));
+  const db = c.get('db');
+  const target = (await db.select().from(users).where(eq(users.id, c.req.param('id'))).limit(1))[0];
+  if (!target) return c.json({ error: 'No such user.' }, 404);
+  const defaults = await aiDefaults(db, true);
+  // A change that matches the default is not a change: only real differences are kept.
+  const own = Object.fromEntries(Object.entries(cleanAiAccess(b.access)).filter(([k, v]) => v !== (defaults[k] ?? true)));
+  if (!aiHasBrain(aiOff(defaults, own))) return c.json({ error: 'At least one brain must stay on.' }, 400);
+  await db.update(users).set({ aiAccess: own }).where(eq(users.id, target.id));
+  await audit(c, 'ai.user', { target: target.email, changes: Object.entries(own).map(([k, v]) => `${k} ${v ? 'on' : 'off'}`).join(', ') || 'follows the default' }, c.get('user').id);
+  return c.json({ ok: true, access: own });
+});
+const changedKeys = (a: Record<string, boolean>, b: Record<string, boolean>) => [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => (a[k] ?? true) !== (b[k] ?? true));
 
 admin.get('/audit', requireAdmin, async (c) => {
   const rows = await c.get('db').select().from(auditLog).orderBy(desc(auditLog.createdAt)).limit(200);

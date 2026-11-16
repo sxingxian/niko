@@ -11,7 +11,7 @@
 // Pictures are passed straight back to the person and never stored.
 import { and, eq } from 'drizzle-orm';
 import { connections, users, type Db } from '@niko/db';
-import { imageOrder, MAX_IMAGE_KEYS, type BrainRest, type EnginePrefs, type ImageKeyInfo, type ImageProvider, type ImageShape, type ImageSource } from '@niko/shared';
+import { aiAllowed, imageOption, imageOrder, MAX_IMAGE_KEYS, type BrainRest, type EnginePrefs, type ImageKeyInfo, type ImageProvider, type ImageShape, type ImageSource } from '@niko/shared';
 import type { Env } from './env';
 import { BrainFail, providerMessage } from './brains';
 import { seal } from './lib/crypto';
@@ -318,15 +318,22 @@ export interface Painted extends Picture { used: ImageSource; label: string; ms:
  * rest; a picture ends it. A service that declines the request is not rested: the next one is asked instead.
  * `only` tries one service (the Engine screen's Test), with an unsaved key where one is given.
  */
-export async function paint(env: Env, db: Db, user: { id: string; engine: unknown }, prompt: string, shape: ImageShape, only?: { entry: ImageSource; key?: ImageKey }): Promise<Painted> {
+export async function paint(env: Env, db: Db, user: { id: string; engine: unknown }, prompt: string, shape: ImageShape, only?: { entry: ImageSource; key?: ImageKey }, off: readonly string[] = []): Promise<Painted> {
   const engine = (user.engine ?? {}) as EnginePrefs;
-  const order = only ? [only.entry] : imageOrder(engine);
+  let keys: ImageKey[] | null = null;
+  let order = only ? [only.entry] : imageOrder(engine);
+  // Services the admin has turned off for this account are skipped; with pictures off altogether, none is asked.
+  if (off.includes('sec:images')) throw new BrainFail('not on account', 'refused', 0, 'Pictures aren’t available on your account.');
+  if (off.length) {
+    keys = await loadImageKeys(env, db, user.id);
+    order = order.filter((e) => aiAllowed(off, imageOption(e, only?.key && only.entry === e ? only.key : keys!.find((k) => `ikey:${k.id}` === e))));
+    if (!order.length && only) throw new BrainFail('not on account', 'refused', 0, 'That service isn’t available on your account.');
+  }
   if (!order.length) throw new BrainFail('no services', 'refused', 0, 'Pictures are switched off on the Engine screen.');
   const now = Date.now();
   const rest: Record<string, BrainRest> = {};
   for (const [k, v] of Object.entries(engine.imageRest ?? {})) if (v && v.until > now) rest[k] = v;
   const ready = order.filter((s) => !rest[s]), resting = order.filter((s) => rest[s]).sort((a, b) => rest[a]!.until - rest[b]!.until);
-  let keys: ImageKey[] | null = null;
   let changed = Object.keys(rest).length !== Object.keys(engine.imageRest ?? {}).length, last: unknown = null;
   const declined: string[] = [];
   try {

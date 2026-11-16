@@ -2,6 +2,7 @@
 import { StrictMode, useCallback, useEffect, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api, ApiError, Field, PasswordField, Switch } from '@niko/ui';
+import { AI_OPTION_GROUPS, aiHasBrain, aiOff } from '@niko/shared';
 import '@niko/ui/src/styles.css';
 import './admin.css';
 
@@ -84,8 +85,107 @@ function SignIn({ stage, setStage }: { stage: Stage; setStage: (s: Stage) => voi
   );
 }
 
+// ---------------------------------------------------------------- AI options
+type AiUser = { id: string; name: string; email: string; role: string; status: string; aiAccess: Record<string, boolean> };
+/** Which AI services people can see and use: a default for everyone, and changes for any one person on top of it. */
+function AiOptions({ guard }: { guard: (e: unknown) => void }) {
+  const [defaults, setDefaults] = useState<Record<string, boolean> | null>(null);
+  const [people, setPeople] = useState<AiUser[]>([]);
+  const [sel, setSel] = useState<string>('all');
+  const [draft, setDraft] = useState<Record<string, boolean>>({});
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const load = useCallback(async () => {
+    try { const r = await api<{ defaults: Record<string, boolean>; users: AiUser[] }>('/admin/ai'); setDefaults(r.defaults); setPeople(r.users); }
+    catch (e) { guard(e); }
+  }, [guard]);
+  useEffect(() => { void load(); }, [load]);
+  const person = people.find((p) => p.id === sel) ?? null;
+  // What is being edited: the default itself, or this person's changes to it.
+  useEffect(() => { if (defaults) { setDraft(person ? { ...person.aiAccess } : { ...defaults }); setDirty(false); } }, [sel, defaults, people]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!defaults) return null;
+  const defOn = (k: string) => defaults[k] ?? true;
+  const on = (k: string) => (k in draft ? draft[k]! : person ? defOn(k) : true);
+  const changed = (k: string) => !!person && k in draft && draft[k] !== defOn(k);
+  const set = (k: string, v: boolean) => {
+    setNote(null); setDirty(true);
+    const next = { ...draft };
+    if (person && v === defOn(k)) delete next[k]; else next[k] = v; // a change back to the default is no longer a change
+    setDraft(next);
+  };
+  const reset = (k: string) => { const next = { ...draft }; delete next[k]; setDraft(next); setDirty(true); };
+  const offNow = person ? aiOff(defaults, draft) : aiOff(draft, {});
+  const noBrain = !aiHasBrain(offNow);
+  const count = (p: AiUser) => Object.keys(p.aiAccess).length;
+  const save = async () => {
+    setBusy(true); setNote(null);
+    try {
+      if (person) await api(`/admin/ai/users/${person.id}`, { method: 'PUT', body: { access: draft } });
+      else await api('/admin/ai/default', { method: 'PUT', body: { access: draft } });
+      await load(); setNote({ ok: true, text: person ? `Saved for ${person.name || person.email}.` : 'Saved. Everyone without their own changes gets this within a minute.' });
+    } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
+  };
+  const first = (p: AiUser) => (p.name || p.email).split(' ')[0];
+  return <>
+    <header><h1>AI options</h1><p className="sub" style={{ fontSize: 15, maxWidth: 860 }}>Choose which AI services people can see and use on their Engine and Voice screens. Set the default for everyone, then change it for anyone who needs something different.</p></header>
+    {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
+    <div className="ai-grid">
+      <section className="g card ai-people" aria-label="Applies to">
+        <span className="k" style={{ padding: '0 6px' }}>Applies to</span>
+        <div className="ai-list">
+          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default' }, ...people.map((p) => ({ id: p.id, name: p.name || p.email, sub: p.email, badge: p.role === 'admin' ? 'Admin' : count(p) ? `${count(p)} ${count(p) === 1 ? 'change' : 'changes'}` : 'Default' }))].map((p) => (
+            <button key={p.id} className="who-row" aria-pressed={p.id === sel} onClick={() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; setSel(p.id); setNote(null); }}>
+              <span className="who-txt"><b>{p.name}</b><span>{p.sub}</span></span><span className="who-badge">{p.badge}</span>
+            </button>
+          ))}
+        </div>
+        <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>New accounts get the default. Admins always have every option.</p>
+      </section>
+      <section className="g card ai-options" aria-label="Options">
+        <div className="ai-head">
+          <div><h2>{person ? person.name || person.email : 'Everyone · default'}</h2>
+            <p className="sub" style={{ fontSize: 13 }}>{person ? (person.role === 'admin' ? 'Admins always have every option; these apply if they are made a member.' : Object.keys(draft).length ? `${Object.keys(draft).length} different from the default. Everything else follows the default.` : `Follows the default. Turn anything on or off to change it for ${first(person)} only.`) : 'What every account gets, unless it is changed for that person.'}</p></div>
+          <div className="ai-acts">
+            {person && <button className="bt" onClick={() => { setDraft({}); setDirty(true); }} disabled={!Object.keys(draft).length}>Reset to default</button>}
+            <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy || !dirty || noBrain}>{busy ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+        {noBrain && <p className="err" role="alert">At least one brain must stay on, or Niko could not answer. Turn one back on to save.</p>}
+        <div className="ai-groups">
+          {AI_OPTION_GROUPS.map((g) => {
+            const shown = !g.section || on(g.section);
+            return (
+              <div key={g.id} className="ai-group">
+                <div className="ai-ghead">
+                  <span className="ai-gname"><span className="k" style={{ color: '#fff' }}>{g.name}</span><span className="sub" style={{ fontSize: 12 }}>{g.where}{g.section ? (shown ? ' · shown' : ' · hidden') : ' · always shown'}</span></span>
+                  {g.section && <span className="ai-ctl">
+                    {changed(g.section) && <><span className="chg">Changed</span><button className="lnk" onClick={() => reset(g.section!)}>Reset</button></>}
+                    <Switch on={shown} onChange={(v) => set(g.section!, v)} label={`Show ${g.name}`} />
+                  </span>}
+                </div>
+                <div className={'ai-items' + (shown ? '' : ' dim')}>
+                  {(g.id === 'voices' || g.id === 'hears') && <div className="ai-row"><span className="ai-txt"><span>{g.id === 'voices' ? 'Device voice' : 'Device speech recognition'}</span><span className="sub">{g.id === 'voices' ? 'The last resort, on every device' : 'The last resort, and always hears “Niko”'}</span></span><span className="pill">Always on</span></div>}
+                  {g.items.map((it) => (
+                    <div key={it.key} className="ai-row">
+                      <span className="ai-txt"><span>{it.name}</span><span className="sub">{changed(it.key) ? `Default is ${defOn(it.key) ? 'on' : 'off'}` : it.sub}</span></span>
+                      {changed(it.key) && <><span className="chg">Changed</span><button className="lnk" onClick={() => reset(it.key)}>Reset</button></>}
+                      <Switch on={on(it.key)} onChange={(v) => set(it.key, v)} label={`${it.name} (${g.name})`} disabled={!shown} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <p className="sub" style={{ fontSize: 12, lineHeight: 1.5 }}>Turning a service off hides it from that person’s screens and the server refuses it, so a key they already saved stops being used. Their keys are kept, not deleted, and work again when you turn the service back on. Every change is written to the audit log.</p>
+      </section>
+    </div>
+  </>;
+}
+
 function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?: { name: string; email: string } | null }) {
-  const [tab, setTab] = useState<'users' | 'security' | 'audit'>('users');
+  const [tab, setTab] = useState<'users' | 'ai' | 'security' | 'audit'>('users');
   const [me, setMe] = useState<{ name: string; email: string } | null>(initialMe ?? null);
   const [users, setUsers] = useState<UserRow[]>([]);
   const [invites, setInvites] = useState<InviteRow[]>([]);
@@ -132,6 +232,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
         <div className="brand"><span className="wordmark">NIKO</span><span className="k tag">Admin</span></div>
         <nav aria-label="Admin sections">
           <button className="nv" aria-current={tab === 'users' ? 'page' : undefined} onClick={() => setTab('users')}>Users</button>
+          <button className="nv" aria-current={tab === 'ai' ? 'page' : undefined} onClick={() => setTab('ai')}>AI options</button>
           <button className="nv" aria-current={tab === 'security' ? 'page' : undefined} onClick={() => setTab('security')}>Security</button>
           <button className="nv" aria-current={tab === 'audit' ? 'page' : undefined} onClick={() => setTab('audit')}>Audit log</button>
         </nav>
@@ -178,7 +279,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
             ))}
           </section>
           <p className="sub" style={{ fontSize: 13 }}>Admin sign-in needs a second factor. Every change here is written to the audit log.</p>
-        </> : tab === 'security' ? <>
+        </> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'security' ? <>
           <header><h1>Security</h1><p className="sub" style={{ fontSize: 15 }}>Your own admin sign-in: authenticator app and recovery codes.</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
           <div className="two">

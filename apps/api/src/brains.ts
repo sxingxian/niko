@@ -3,7 +3,7 @@
 // for a while and the next one answers; it is tried again once its rest is over.
 import { and, eq } from 'drizzle-orm';
 import { connections, users, type Db } from '@niko/db';
-import { aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, WORKERS_MODELS, type AiKeyInfo, type BrainEntry, type BrainRest, type EnginePrefs } from '@niko/shared';
+import { aiAllowed, aiProviderOf, brainOption, brainOrder, MAX_AI_KEYS, NOT_CHAT, WORKERS_MODELS, type AiKeyInfo, type BrainEntry, type BrainRest, type EnginePrefs } from '@niko/shared';
 import type { Env } from './env';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
@@ -191,17 +191,22 @@ export async function testEntry(env: Env, db: Db, user: { id: string; engine: un
  * available, and tried last otherwise (a limit may have reset early). Each failure sets that brain's rest; an
  * answer ends it. Returns the reply and which brain gave it.
  */
-export async function think(env: Env, db: Db, user: { id: string; engine: unknown }, msgs: Msg[]): Promise<{ reply: string; used: BrainEntry; first: BrainEntry }> {
+export async function think(env: Env, db: Db, user: { id: string; engine: unknown }, msgs: Msg[], off: readonly string[] = []): Promise<{ reply: string; used: BrainEntry; first: BrainEntry }> {
   const engine = (user.engine ?? {}) as EnginePrefs;
-  const order = brainOrder(engine);
-  if (!order.length) order.push('workers-ai');
+  let keyList: Promise<AiKey[]> | null = null;
+  const keys = () => (keyList ??= loadKeys(env, db, user.id));
+  let order = brainOrder(engine);
+  // Brains the admin has turned off for this account are skipped (and kept in the order for when they come back).
+  if (off.length) { const ks = await keys(); order = order.filter((b) => aiAllowed(off, brainOption(b, ks.find((k) => `key:${k.id}` === b)?.baseUrl))); }
+  if (!order.length) {
+    if (!aiAllowed(off, 'workers-ai')) throw new BrainFail('no brain on this account', 'refused', 0, 'No brain is switched on for your account.');
+    order.push('workers-ai');
+  }
   const now = Date.now();
   const rest: Record<string, BrainRest> = {};
   for (const [k, v] of Object.entries(engine.rest ?? {})) if (v && v.until > now && order.includes(k as BrainEntry)) rest[k] = v;
   const ready = order.filter((b) => !rest[b]);
   const resting = order.filter((b) => rest[b]).sort((a, b) => rest[a]!.until - rest[b]!.until);
-  let keyList: Promise<AiKey[]> | null = null;
-  const keys = () => (keyList ??= loadKeys(env, db, user.id));
   let changed = Object.keys(rest).length !== Object.keys(engine.rest ?? {}).length;
   let last: unknown = null;
   try {

@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
-import { aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
+import { aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
 import { APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -10,6 +10,7 @@ import { eventDetail, mailDetail, noteDetail } from '../details';
 import { BrainFail, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveKeys, testEntry, think } from '../brains';
 import { cleanWhere, forecastText, geocode, stripWeatherTags, weatherTags } from '../weather';
 import { audioProblem, defaultHearLabel, hear, hearServerKey, HEAR_PROVIDERS_LIST, hearKeyInfo, hearKeyProblem, loadHearKeys, MAX_AUDIO_BYTES, saveHearKeys, type HearKey } from '../hears';
+import { NOT_ON_ACCOUNT, offFor } from '../access';
 import { Declined, defaultImageLabel, serverKey, IMAGE_PROVIDERS_LIST, imageKeyInfo, imageKeyProblem, loadImageKeys, MAX_PROMPT, paint, saveImageKeys, type ImageKey } from '../images';
 import { defaultVoiceLabel, listVoices, loadVoiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
 import { icalCheck, normalizeLink } from '../calendarlink';
@@ -28,7 +29,7 @@ const clampNum = (v: unknown, lo: number, hi: number, d: number) => (typeof v ==
 app.get('/me', async (c) => {
   const u = c.get('user');
   const weather = !!(await getConnection(c.get('db'), u.id, 'open-meteo').catch(() => null));
-  return c.json({ id: u.id, email: u.email, name: u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather });
+  return c.json({ id: u.id, email: u.email, name: u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: await offFor(c.get('db'), u) });
 });
 
 app.patch('/me', async (c) => {
@@ -200,6 +201,8 @@ app.post('/connections/:provider', async (c) => {
   if (def.id === 'custom-ai') return c.json({ error: 'AI keys are added on the Engine screen.' }, 400);
   const b = await c.req.json<Record<string, string>>();
   const u = c.get('user');
+  const option = ({ 'self-hosted-ai': 'self-hosted-ai', 'self-hosted-voice': 'v:self-hosted', 'self-hosted-image': 'img:self-hosted', 'self-hosted-hear': 'h:self-hosted', elevenlabs: 'v:elevenlabs' } as Record<string, string>)[def.id];
+  if (option && !aiAllowed(await offFor(c.get('db'), u), option)) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   const secret: Record<string, string> = {};
   // A field left blank keeps what is already saved (so a key need not be typed again to change a voice or model).
   const prior = (await credentials(c.env, c.get('db'), u.id, def.id).catch(() => null)) as Record<string, string> | null;
@@ -441,6 +444,7 @@ const IMAGE_RULE = `You can make pictures. When the user asks you to draw, paint
 When the user asks to change the last picture (for example "make it night" or "add a dog"), write a new full prompt that keeps everything from the last [[image:…]] prompt except the change, in a new tag.
 Each image service checks requests against its own rules, so pass picture requests on with the tag rather than declining them yourself. Never put anything from DATA into a prompt unless the user asks for it. Use the tag only when the user asks for a picture.`;
 const NO_IMAGE_RULE = 'You cannot make pictures right now: they are switched off on the Engine screen. If the user asks for one, say so in a sentence.';
+const NOT_ON_ACCOUNT_IMAGE_RULE = 'You cannot make pictures: they aren’t available on this account (the administrator chooses this). If the user asks for one, say so in a sentence. Never use an image tag.';
 /** Added to the prompt when a weather service is connected. */
 const WEATHER_RULE = `Weather forecasts come from Open-Meteo and are given in WEATHER blocks. Answer weather questions from them in plain spoken words: the conditions, temperatures and the chance of rain that matter for what was asked, without listing every number.
 When the user asks about the weather in a place whose forecast is not given, reply with only [[weather:<place>, <country if known>]] (one tag per place, at most three) and nothing else; you will then be given the forecasts.`;
@@ -469,6 +473,7 @@ app.post('/engine/keys', async (c) => {
   // A saved key is only ever sent to the address it was saved with: changing the address needs the key typed again.
   if (prior && !apiKey && !sameOrigin(prior.baseUrl, baseUrl)) return c.json({ error: 'Paste the API key again when you change the base URL.' }, 400);
   if (NOT_CHAT.test(model)) return c.json({ error: `“${model}” is not a chat model, so it can’t answer as Niko. Pick a chat model from the list.` }, 400);
+  if (!aiAllowed(await offFor(db, u), brainOption('key:', baseUrl))) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   if (!prior && keys.length >= MAX_AI_KEYS) return c.json({ error: `Up to ${MAX_AI_KEYS} keys can be saved.` }, 400);
   let id = prior?.id ?? '';
   while (!id || (!prior && keys.some((k) => k.id === id))) id = Array.from(crypto.getRandomValues(new Uint8Array(8)), (n) => 'abcdefghijklmnopqrstuvwxyz0123456789'[n % 36]).join('');
@@ -517,6 +522,11 @@ app.post('/engine/models', async (c) => {
 app.post('/engine/test', async (c) => {
   const b = await c.req.json<{ entry?: string; model?: 'fast' | 'large' }>().catch(() => ({} as any));
   const entry = BRAIN_ENTRY.test(String(b.entry)) ? (b.entry as BrainEntry) : 'workers-ai';
+  const off = await offFor(c.get('db'), c.get('user'));
+  if (off.length) {
+    const k = entry.startsWith('key:') ? (await loadKeys(c.env, c.get('db'), c.get('user').id)).find((x) => `key:${x.id}` === entry) : undefined;
+    if (!aiAllowed(off, brainOption(entry, k?.baseUrl))) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  }
   try {
     const ms = await testEntry(c.env, c.get('db'), c.get('user'), entry, b.model === 'large' ? 'large' : 'fast');
     return c.json({ ok: true, ms });
@@ -561,16 +571,17 @@ app.post('/chat', async (c) => {
       if (place) weather = `\n<WEATHER for ${here ? 'the user’s current location' : `the user’s home place, ${place.name}`}>\n${await forecastText(place, units)}\n</WEATHER>`;
     } catch (e) { console.warn(`weather: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
   }
+  const off = await offFor(db, u);
   const wxRule = wx ? `\n${WEATHER_RULE}${weather ? '' : '\nNo forecast for the user’s own location is given. If they ask about the weather where they are, say their location is off, and that they can allow it in the browser or set a home place for Open-Meteo in Connections.'}` : '';
   const msgs = [
-    { role: 'system', content: `${SYSTEM}${oneOff ? '' : `\n${imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}`}${wxRule}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${weather}` },
+    { role: 'system', content: `${SYSTEM}${oneOff ? '' : `\n${off.includes('sec:images') ? NOT_ON_ACCOUNT_IMAGE_RULE : imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}`}${wxRule}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${weather}` },
     ...history.map((h) => ({ role: h.role, content: h.content })),
     { role: 'user', content: text },
   ];
   // The brains are tried in the Engine screen's order; one that has reached its limit is skipped until it resets.
   let reply = '', used = 'workers-ai', first = 'workers-ai';
   try {
-    ({ reply, used, first } = await think(c.env, db, u, msgs));
+    ({ reply, used, first } = await think(c.env, db, u, msgs, off));
     // Niko asked for the weather somewhere else: look the places up and ask again with their forecasts.
     const asked = wx ? weatherTags(reply) : [];
     if (asked.length) {
@@ -582,7 +593,7 @@ app.post('/chat', async (c) => {
         } catch (e) { extra.push(`The forecast for ${name} could not be fetched just now.`); console.warn(`weather: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
       }
       const again = [{ ...msgs[0]!, content: `${msgs[0]!.content}\n${extra.join('\n')}\nAnswer now from these forecasts; do not use the weather tag again.` }, ...msgs.slice(1)];
-      ({ reply, used, first } = await think(c.env, db, u, again));
+      ({ reply, used, first } = await think(c.env, db, u, again, off));
     }
     reply = stripWeatherTags(reply) || 'I couldn’t get that forecast just now.';
   } catch (e) {
@@ -722,6 +733,7 @@ app.post('/voice/keys', async (c) => {
   const k = voiceKeyFrom(b);
   const problem = voiceKeyProblem(k);
   if (problem) return c.json({ error: problem }, 400);
+  if (!aiAllowed(await offFor(db, u), voiceOption('vkey:', k))) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   const prior = typeof b.id === 'string' ? keys.find((x) => x.id === b.id) : undefined;
   if (b.id && !prior) return c.json({ error: 'That voice key is no longer saved.' }, 404);
   const apiKey = k.apiKey || savedFor(prior, k);
@@ -788,6 +800,7 @@ app.post('/voice/hear-keys', async (c) => {
   const k = hearKeyFrom(b);
   const problem = hearKeyProblem(k);
   if (problem) return c.json({ error: problem }, 400);
+  if (!aiAllowed(await offFor(db, u), hearOption('skey:', k))) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   const prior = typeof b.id === 'string' ? keys.find((x) => x.id === b.id) : undefined;
   if (b.id && !prior) return c.json({ error: 'That key is no longer saved.' }, 404);
   const apiKey = k.apiKey || savedHearKey(prior, k);
@@ -860,7 +873,7 @@ app.post('/voice/stt', async (c) => {
     }
   }
   try {
-    const r = await hear(c.env, db, u, audio, lang, only);
+    const r = await hear(c.env, db, u, audio, lang, only, await offFor(db, u));
     return c.json({ text: r.text.slice(0, 2000), used: r.used });
   } catch (e) {
     const f = e instanceof BrainFail ? e : null;
@@ -890,6 +903,7 @@ app.post('/image/keys', async (c) => {
   const k = imageKeyFrom(b);
   const problem = imageKeyProblem(k);
   if (problem) return c.json({ error: problem }, 400);
+  if (!aiAllowed(await offFor(db, u), imageOption('ikey:', k))) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   const prior = typeof b.id === 'string' ? keys.find((x) => x.id === b.id) : undefined;
   if (b.id && !prior) return c.json({ error: 'That key is no longer saved.' }, 404);
   const apiKey = k.apiKey || savedImageKey(prior, k);
@@ -957,7 +971,7 @@ app.post('/image', async (c) => {
     }
   }
   try {
-    const p = await paint(c.env, db, u, prompt, shape, only);
+    const p = await paint(c.env, db, u, prompt, shape, only, await offFor(db, u));
     return new Response(p.bytes, { headers: {
       'content-type': p.type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-disposition': 'inline',
       'x-niko-source': p.used, 'x-niko-label': encodeURIComponent(p.label), 'x-niko-ms': String(p.ms),
@@ -966,6 +980,7 @@ app.post('/image', async (c) => {
     if (e instanceof Declined) return c.json({ error: only ? `It declined that picture under its own rules.${e.detail ? ` It said: “${e.detail}”` : ''}` : 'Every image service declined that picture under its own rules.', declined: true, detail: e.detail }, 422);
     const f = e instanceof BrainFail ? e : null;
     if (f?.message === 'no services') return c.json({ error: f.detail }, 400);
+    if (f?.message === 'not on account') return c.json({ error: f.detail }, 403);
     return c.json({ error: (f?.why === 'limit' ? (only ? 'Its usage limit is reached.' : 'Every image service has reached its limit for now.') : f?.why === 'refused' ? (only ? 'It refused the request. Check its key and model.' : 'The image services refused the request. Check them on the Engine screen.') : 'The picture could not be made just now.') + (f?.detail ? ` It said: “${f.detail}”` : '') }, 502);
   }
 });
@@ -987,8 +1002,15 @@ app.post('/voice/tts', async (c) => {
   if (await tooMany(c, 'tts:' + u.id, 150, 15)) return ttsError(c, 'Niko has spoken a lot in the last few minutes. The device voice is used for now.', 429);
   const source = b.source === 'elevenlabs' ? 'vkey:el1' : String(b.source ?? '');
   const preview = b.preview === true;
+  const off = await offFor(db, u);
   try {
     let out: { bytes: Uint8Array; type: string };
+    // A voice the admin has turned off for this account is refused; the app then speaks with the next one.
+    if (off.length) {
+      const k = source.startsWith('vkey:') ? (await loadVoiceKeys(c.env, db, u.id)).find((x) => `vkey:${x.id}` === source) : undefined;
+      const typed = preview && b.key ? voiceKeyFrom(b.key) : undefined;
+      if (!aiAllowed(off, voiceOption(source, typed ?? k))) return ttsError(c, NOT_ON_ACCOUNT, 403);
+    }
     if (source === 'workers') out = await workersTts(c, text, typeof b.workersVoice === 'string' ? b.workersVoice : (u.engine as Partial<EnginePrefs>)?.workersVoice);
     else if (source === 'self-hosted') out = await selfHostedTts(c, text, b);
     else if (source.startsWith('vkey:')) {

@@ -1,7 +1,7 @@
 // Shared Niko state: who is signed in, and the voice loop (wake word, commands, speech).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { hearOrder, isWeatherQuestion, voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
+import { aiAllowed, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
 import { isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMoveTags, takeScreenTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
@@ -80,6 +80,8 @@ function serverSpeech(source: VoiceSource, text: string): Speech {
         const j = await r.json().catch(() => ({}));
         // The server says how long to skip this voice for (usage limit, refused key, no answer).
         if (j?.rest?.until) restingVoices.set(source, j.rest.until);
+        // Not available on this account (the admin turned it off): skipped until the page is next loaded.
+        if (r.status === 403) restingVoices.set(source, Number.MAX_SAFE_INTEGER);
         throw new Error(j.error ?? 'That voice could not speak.');
       }
       url = URL.createObjectURL(await r.blob());
@@ -132,7 +134,10 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   // Speech in through a service (Voice → Listening): one request is recorded and sent, instead of the device's own recognition.
   const capture = useRef<Capture | null>(null);
   const askRef = useRef<(t: string) => void>(() => undefined);
-  const apiHearing = () => hearOrder(meRef.current?.engine as EnginePrefs | undefined).length > 0 && captureSupported();
+  /** Speech-in services this account may use: keys go by their service on the server, so here only the section and the
+   * built-in services are checked; a key the admin turned off is refused there, and the device then listens. */
+  const hearsFor = (m: Me | null | undefined) => { const off = m?.aiOff ?? []; return off.includes('sec:hears') ? [] : hearOrder(m?.engine as EnginePrefs | undefined).filter((e) => e.startsWith('skey:') || aiAllowed(off, hearOption(e))); };
+  const apiHearing = () => hearsFor(meRef.current).length > 0 && captureSupported();
   // Niko's last line and when it finished, so its own voice heard late through the mic is never taken as a question.
   const lastSaid = useRef<{ text: string; until: number }>({ text: '', until: 0 });
   const ECHO_MS = 6000;
@@ -173,7 +178,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   // Only on the screens where Niko speaks (Home and the workspace), not on Settings or sign-in pages.
   const path = useLocation().pathname;
   const speaksHere = /^\/(inbox|calendar|notes)?$/.test(path.replace(/^\/app(?=\/|$)/, '') || '/');
-  useEffect(() => { if (me && speaksHere && voiceOrder(me.engine).includes('kokoro')) kokoroWarm(); }, [me, speaksHere]);
+  useEffect(() => { if (me && speaksHere && voiceOrder(me.engine).includes('kokoro') && aiAllowed(me.aiOff ?? [], 'v:kokoro')) kokoroWarm(); }, [me, speaksHere]);
 
   const idle = useCallback(() => {
     setMode('idle'); setLabel('Standing by');
@@ -290,8 +295,11 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     };
     void (async () => {
       let first: string | null = null; // why the first choice could not speak, shown on the home screen
+      const off = meRef.current?.aiOff ?? [];
       for (const source of voiceOrder(engine)) {
         if (!live()) return;
+        // Voices the admin has turned off for this account are skipped (keys are checked by the server).
+        if (off.includes('sec:voices') || (!source.startsWith('vkey:') && !aiAllowed(off, voiceOption(source)))) continue;
         // Never starts a large download by itself, and does not wait while its engine is still starting up.
         // …and is skipped on a device too slow to keep up with its own speech.
         if (source === 'kokoro' && (!kokoroReady() || !kokoroLoaded() || kokoroTooSlow())) { if (kokoroReady()) kokoroWarm(); continue; }
@@ -529,7 +537,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, [idle, listenForFollowUp]);
 
   const value = useMemo<NikoState>(() => ({
-    me, refreshMe, mode, label, line, reply, brief, micOn, voiceSupported: !!SR || (hearOrder(me?.engine as EnginePrefs | undefined).length > 0 && captureSupported()), toggleMic, stop, ask,
+    me, refreshMe, mode, label, line, reply, brief, micOn, voiceSupported: !!SR || (hearsFor(me).length > 0 && captureSupported()), toggleMic, stop, ask,
     dismissReply: () => setReply(null),
     setCommandHandler: (fn) => { handler.current = fn; },
     say,

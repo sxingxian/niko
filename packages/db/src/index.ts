@@ -18,6 +18,8 @@ export const users = pgTable('users', {
   appearance: jsonb('appearance').notNull().default({}).$type<Record<string, unknown>>(),
   engine: jsonb('engine').notNull().default({}).$type<Record<string, unknown>>(),
   permissions: jsonb('permissions').notNull().default({}).$type<Record<string, unknown>>(),
+  /** This account's changes to the admin's default AI options ({ option: on }). Set by an admin only. */
+  aiAccess: jsonb('ai_access').notNull().default({}).$type<Record<string, boolean>>(),
   createdAt: ts('created_at').notNull().defaultNow(),
   lastActiveAt: ts('last_active_at'),
 });

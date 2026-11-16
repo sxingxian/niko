@@ -1,7 +1,9 @@
 // Home (the adaptive core) and the workspace (inbox, calendar, notes with the docked core and countdown).
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
-import { PAGE_SIZES, SEND_COUNTDOWN_SECONDS, voiceName, voiceOrder } from '@niko/shared';
+import { aiAllowed, PAGE_SIZES, SEND_COUNTDOWN_SECONDS, voiceName, voiceOption, voiceOrder, type Me } from '@niko/shared';
+/** The first voice this account may use (the admin may have turned some off); the device voice if none. */
+const firstVoice = (m: Me | null | undefined) => { const off = m?.aiOff ?? []; return off.includes('sec:voices') ? 'device' : voiceOrder(m?.engine).find((v) => v.startsWith('vkey:') || aiAllowed(off, voiceOption(v))) ?? 'device'; };
 import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
 import { useNiko } from '../niko';
 import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
@@ -161,7 +163,7 @@ export function Home() {
           <button className="ib g" style={{ width: 44, height: 44 }} onClick={() => setNav(!nav)} aria-label="Show or hide navigation" aria-expanded={nav}><Icon name="menu" /></button>
           <span className="wordmark">NIKO</span>
         </div>
-        <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : n.me?.engine.brain === 'self-hosted-ai' ? 'Your model' : 'Workers AI'} · {voiceName(voiceOrder(n.me?.engine)[0] ?? 'device')}</span><span className="short">Engine</span></Link>
+        <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : n.me?.engine.brain === 'self-hosted-ai' ? 'Your model' : 'Workers AI'} · {voiceName(firstVoice(n.me))}</span><span className="short">Engine</span></Link>
       </div>
       <Dock className={'dock' + (nav ? ' show' : '')} />
       {wide && !pic && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}

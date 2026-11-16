@@ -349,11 +349,60 @@ export function aiProviderOf(baseUrl?: string): AiKeyInfo['provider'] {
 export const WORKERS_MODELS = { fast: '@cf/meta/llama-4-scout-17b-16e-instruct,@cf/mistralai/mistral-small-3.1-24b-instruct', large: '@cf/meta/llama-3.3-70b-instruct-fp8-fast' } as const;
 export interface Permissions { draft: boolean; chatReply: boolean; files: boolean }
 
+// ---------------------------------------------------------------- AI options the admin controls
+// Every AI option on the Engine and Voice screens has a stable id. The admin sets which are on for everyone (the
+// default) and can change that for any one account. Options that are off are hidden from that account's screens and
+// refused by the server; keys already saved for them are kept and skipped. Admins always have every option.
+// The device's own voice and speech recognition are never listed: they are the last resort and always on.
+export interface AiOptionGroup { id: 'brain' | 'images' | 'voices' | 'hears'; name: string; where: string; section?: string; items: { key: string; name: string; sub: string }[] }
+const BUILTIN = 'Built in · free daily allowance', THEIRS = 'Their API key', SERVER = 'A server they run';
+export const AI_OPTION_GROUPS: AiOptionGroup[] = [
+  { id: 'brain', name: 'Brain', where: 'Engine screen', items: [
+    { key: 'workers-ai', name: 'Cloudflare Workers AI', sub: BUILTIN }, { key: 'self-hosted-ai', name: 'Their own model server', sub: SERVER },
+    ...AI_PRESETS.map((p) => ({ key: `ai:${p.id}`, name: p.name, sub: p.id === 'other' ? 'Any address they enter' : THEIRS })) ] },
+  { id: 'images', name: 'Pictures', where: 'Engine screen', section: 'sec:images', items: [
+    { key: 'img:workers', name: 'Cloudflare FLUX', sub: BUILTIN }, { key: 'img:self-hosted', name: 'Their own image server', sub: SERVER },
+    ...IMAGE_PROVIDERS.map((p) => ({ key: `img:${p.id}`, name: p.name, sub: p.id === 'other' ? 'Any address they enter' : THEIRS })) ] },
+  { id: 'voices', name: 'Speech out', where: 'Voice screen', section: 'sec:voices', items: [
+    { key: 'v:workers', name: 'Cloudflare voice', sub: BUILTIN }, { key: 'v:kokoro', name: 'On-device voice', sub: 'Runs on their device' }, { key: 'v:self-hosted', name: 'Their own voice server', sub: SERVER },
+    ...VOICE_PROVIDERS.map((p) => ({ key: `v:${p.id}`, name: p.name, sub: p.id === 'other' ? 'Any address they enter' : THEIRS })) ] },
+  { id: 'hears', name: 'Listening · speech in', where: 'Voice screen', section: 'sec:hears', items: [
+    { key: 'h:workers', name: 'Cloudflare speech recognition', sub: BUILTIN }, { key: 'h:self-hosted', name: 'Their own speech-to-text server', sub: SERVER },
+    ...HEAR_PROVIDERS.map((p) => ({ key: `h:${p.id}`, name: p.name, sub: p.id === 'other' ? 'Any address they enter' : THEIRS })) ] },
+];
+export const AI_OPTION_KEYS: string[] = AI_OPTION_GROUPS.flatMap((g) => [...(g.section ? [g.section] : []), ...g.items.map((i) => i.key)]);
+/** Keeps only known options with true/false values. */
+export function cleanAiAccess(v: unknown): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  if (v && typeof v === 'object') for (const [k, x] of Object.entries(v as Record<string, unknown>)) if (AI_OPTION_KEYS.includes(k) && typeof x === 'boolean') out[k] = x;
+  return out;
+}
+/** The options that are off for an account: its own changes over the default (missing means on). Admins: none. */
+export function aiOff(defaults: Record<string, boolean>, own: Record<string, boolean>, isAdmin = false): string[] {
+  if (isAdmin) return [];
+  return AI_OPTION_KEYS.filter((k) => (k in own ? own[k] : defaults[k] ?? true) === false);
+}
+/** Whether an option is usable, given the list of options that are off. A section that is off turns off all of it. */
+export function aiAllowed(off: readonly string[], key: string): boolean {
+  if (off.includes(key)) return false;
+  const g = AI_OPTION_GROUPS.find((x) => x.items.some((i) => i.key === key));
+  return !(g?.section && off.includes(g.section));
+}
+/** At least one brain must stay on for an account, or Niko could not answer. */
+export const aiHasBrain = (off: readonly string[]) => AI_OPTION_GROUPS[0]!.items.some((i) => !off.includes(i.key));
+/** Which option a brain, image, voice or speech-in entry belongs to; keys go by the service they were saved for. */
+export const brainOption = (entry: string, baseUrl?: string) => (entry === 'workers-ai' || entry === 'self-hosted-ai' ? entry : `ai:${presetOf(baseUrl ?? '')}`);
+export const imageOption = (entry: string, k?: { provider: ImageProvider; baseUrl: string }) => (entry === 'workers' || entry === 'self-hosted' ? `img:${entry}` : `img:${k ? imagePresetOf(k) : 'other'}`);
+export const voiceOption = (entry: string, k?: { provider: VoiceProvider; baseUrl: string }) => (entry === 'workers' || entry === 'kokoro' || entry === 'self-hosted' ? `v:${entry}` : `v:${k ? voicePresetOf(k) : 'other'}`);
+export const hearOption = (entry: string, k?: { provider: HearProvider; baseUrl: string }) => (entry === 'workers' || entry === 'self-hosted' ? `h:${entry}` : `h:${k ? hearPresetOf(k) : 'other'}`);
+
 export interface Me {
   id: string; email: string; name: string; role: 'admin' | 'member';
   appearance: Appearance; engine: EnginePrefs; permissions: Permissions;
   /** A weather service is connected, so weather questions may carry the device's rounded location. */
   weather?: boolean;
+  /** AI options the admin has turned off for this account (hidden here, refused by the server). */
+  aiOff?: string[];
 }
 
 /** Whether a message is about the weather. Only then is the device's location asked for and sent. */

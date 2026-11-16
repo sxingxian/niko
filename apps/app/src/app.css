@@ -341,6 +341,7 @@ select.in option { color: #04070c; }
 .eng-check { margin-top: auto; border-top: 1px solid rgba(255,255,255,.16); padding-top: 16px; display: flex; align-items: center; gap: 12px; min-height: 44px; font: 400 14px system-ui, sans-serif; cursor: pointer; }
 .eng-check input { width: 20px; height: 20px; accent-color: hsl(var(--h) 100% 69%); flex: none; }
 .eng-card .hint { font: 400 13px system-ui, sans-serif; color: var(--muted); }
+.eng-card .hint.managed { padding-top: 12px; }
 .eng-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; font: 400 14px system-ui, sans-serif; }
 .eng-line .soon { margin-left: 8px; font-size: 10px; }
 /* Voice: the voices Niko tries, in order. Each row opens to its own settings. */

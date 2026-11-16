@@ -5,6 +5,7 @@ import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSp
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { AI_PRESETS, aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, presetOf, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
+import { AI_OPTION_GROUPS, aiAllowed, brainOption, hearOption, imageOption, voiceOption } from '@niko/shared';
 import { IMAGE_PROVIDERS, imageOrder, imagePresetOf, MAX_IMAGE_KEYS, type ImageKeyInfo, type ImageProvider, type ImageSource } from '@niko/shared';
 import { HEAR_PROVIDERS, hearOrder, hearPresetOf, MAX_HEAR_KEYS, type HearKeyInfo, type HearProvider, type HearSource } from '@niko/shared';
 import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, PAGE_SIZES, VOICE_NAMES, VOICE_PROVIDERS, VOICE_SOURCES, voiceName, voiceOrder, voicePresetOf, WORKERS_VOICES, type VoiceKeyInfo, type VoiceProvider, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
@@ -410,6 +411,19 @@ function restLine(r: BrainRest | undefined): string {
   return `It did not answer just now. Niko is using the next one, and tries this again at ${day(r.until)}.`;
 }
 
+/** Moves an entry among the ones shown; entries hidden by the admin keep their places in the saved order, so they
+ * come back where they were when the admin turns them on again. */
+function moveShown<T>(order: T[], shown: T[], v: T, by: -1 | 1): T[] {
+  const i = shown.indexOf(v), j = i + by;
+  if (i < 0 || j < 0 || j >= shown.length) return order;
+  const a = order.indexOf(shown[i]!), b = order.indexOf(shown[j]!), next = [...order];
+  [next[a], next[b]] = [next[b]!, next[a]!];
+  return next;
+}
+/** Whether the admin has turned anything off in this group, for the small note under its list. */
+const managedIn = (off: readonly string[], group: 'brain' | 'images' | 'voices' | 'hears') => { const g = AI_OPTION_GROUPS.find((x) => x.id === group)!; return g.items.some((i) => off.includes(i.key)); };
+const MANAGED = 'Some options are managed by your administrator.';
+
 type ImageDraft = ImageKeyInfo & { apiKey: string; saved: boolean };
 const imageInfo = (k: { provider: ImageProvider; baseUrl: string }) => IMAGE_PROVIDERS.find((p) => p.id === imagePresetOf(k))!;
 const TEST_PICTURE = 'A small watercolour painting of a lighthouse on a cliff at dusk, soft light, calm sea.';
@@ -462,15 +476,16 @@ export function Engine() {
   const editSelf = (p: Partial<typeof self>) => { setDirty((d) => ({ ...d, self: true })); setSelf({ ...self, ...p }); };
   const editKey = (id: string, p: Partial<KeyDraft>) => { setDirty((d) => ({ ...d, [id]: true })); setKeys(keys.map((k) => (k.id === id ? { ...k, ...p } : k))); };
   const keyOf = (b: BrainEntry) => keys.find((k) => `key:${k.id}` === b);
+  // Options the admin has turned off for this account are not shown (and are kept in the saved order).
+  const off = me.aiOff ?? [];
+  const okBrain = (b: BrainEntry) => aiAllowed(off, brainOption(b, keyOf(b)?.baseUrl));
+  const presets = AI_PRESETS.filter((p) => aiAllowed(off, `ai:${p.id}`));
   // Every saved or new key, plus Workers AI and the model server, is either in the order or listed as not in use.
   const all: BrainEntry[] = ['workers-ai', 'self-hosted-ai', ...keys.map((k) => `key:${k.id}` as BrainEntry)];
-  const others = all.filter((b) => !order.includes(b));
+  const shown = order.filter(okBrain);
+  const others = all.filter((b) => !order.includes(b) && okBrain(b));
   const toggle = (b: BrainEntry, on: boolean) => { setOrder(on ? [...order, b] : order.filter((x) => x !== b)); if (on) setOpen(b); };
-  const move = (b: BrainEntry, by: -1 | 1) => {
-    const i = order.indexOf(b), j = i + by;
-    if (i < 0 || j < 0 || j >= order.length) return;
-    const next = [...order]; [next[i], next[j]] = [next[j]!, next[i]!]; setOrder(next);
-  };
+  const move = (b: BrainEntry, by: -1 | 1) => setOrder(moveShown(order, shown, b, by));
   // The provider's own list of chat models for a key: from the key being typed, or the saved one (with its saved address).
   const listModels = async (k: KeyDraft) => {
     if (!k.apiKey.trim() && !k.saved) return;
@@ -482,7 +497,9 @@ export function Engine() {
   };
   const addKey = () => {
     const id = 'new-' + Math.random().toString(36).slice(2, 8);
-    setKeys([...keys, { id, label: '', provider: 'openai', baseUrl: AI_BASES.openai, model: '', apiKey: '', saved: false }]);
+    const p = presets[0];
+    if (!p) return;
+    setKeys([...keys, { id, label: '', provider: aiProviderOf(p.baseUrl), baseUrl: p.baseUrl, model: '', apiKey: '', saved: false }]);
     setOrder([...order, `key:${id}`]); setOpen(`key:${id}`); setDirty((d) => ({ ...d, [id]: true }));
   };
   const removeKey = async (k: KeyDraft) => {
@@ -498,7 +515,7 @@ export function Engine() {
   const save = async () => {
     setNote(null); setBusy('save');
     try {
-      if (!order.length) throw new Error('Switch on at least one brain.');
+      if (!order.filter(okBrain).length) throw new Error('Switch on at least one brain.');
       // New and changed keys are saved first; a new key's temporary id becomes its saved one.
       let next = [...order];
       const kept: KeyDraft[] = [], savedIds = new Set<string>();
@@ -513,7 +530,7 @@ export function Engine() {
       setKeys(kept); setOrder(next);
       setDirty((d) => Object.fromEntries(Object.entries(d).filter(([k]) => !savedIds.has(k))));
       if (dirty.self && self.baseUrl.trim()) await api('/connections/self-hosted-ai', { body: { baseUrl: self.baseUrl, model: self.model } });
-      if (next.includes('self-hosted-ai') && !linked['self-hosted-ai'] && !self.baseUrl.trim()) throw new Error('Add your model server’s address, or switch it off.');
+      if (next.includes('self-hosted-ai') && okBrain('self-hosted-ai') && !linked['self-hosted-ai'] && !self.baseUrl.trim()) throw new Error('Add your model server’s address, or switch it off.');
       // Image keys, the same way.
       let iNext = [...iOrder];
       const iKept: ImageDraft[] = [], iSaved = new Set<string>();
@@ -527,7 +544,7 @@ export function Engine() {
       setIKeys(iKept); setIOrder(iNext);
       setDirty((d) => Object.fromEntries(Object.entries(d).filter(([k]) => !iSaved.has(k))));
       if (dirty.iself && iSelf.baseUrl.trim()) await api('/connections/self-hosted-image', { body: iSelf });
-      if (iNext.includes('self-hosted') && !linked['self-hosted-image'] && !iSelf.baseUrl.trim()) throw new Error('Add your image server’s address, or switch it off.');
+      if (iNext.includes('self-hosted') && okImage('self-hosted') && !linked['self-hosted-image'] && !iSelf.baseUrl.trim()) throw new Error('Add your image server’s address, or switch it off.');
       await api('/me', { method: 'PATCH', body: { engine: { brains: next, model: e.model, images: iNext } } });
       setISelf((v) => ({ ...v, apiKey: '' }));
       setDirty({});
@@ -580,7 +597,7 @@ export function Engine() {
         <div className="eng-fields">
           <label className="fld"><span className="k">Provider</span>
             <select className="in" value={preset} onChange={(x) => { const p = AI_PRESETS.find((y) => y.id === x.target.value)!; editKey(k.id, { baseUrl: p.baseUrl || (preset === 'other' ? k.baseUrl : ''), provider: aiProviderOf(p.baseUrl), model: '' }); setModels((m) => ({ ...m, [k.id]: { list: [], err: '', busy: false } })); }}>
-              {AI_PRESETS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              {presets.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           </label>
           <label className="fld"><span className="k">Name · optional</span><input className="in" type="text" maxLength={40} placeholder="Work OpenAI, Spare Gemini…" value={k.label} onChange={(x) => editKey(k.id, { label: x.target.value })} /></label>
@@ -621,7 +638,7 @@ export function Engine() {
           <span className="k tag">{tag(b)}</span>
           {on && <span className="vrow-move">
             <button type="button" className="stp" onClick={() => move(b, -1)} disabled={i === 0} aria-label={`Move ${name(b)} up`}>↑</button>
-            <button type="button" className="stp" onClick={() => move(b, 1)} disabled={i === order.length - 1} aria-label={`Move ${name(b)} down`}>↓</button>
+            <button type="button" className="stp" onClick={() => move(b, 1)} disabled={i === shown.length - 1} aria-label={`Move ${name(b)} down`}>↓</button>
           </span>}
           <Switch on={on} onChange={(x) => toggle(b, x)} label={`Use ${name(b)}`} />
         </div>
@@ -632,18 +649,18 @@ export function Engine() {
   // ---- pictures
   const editIKey = (id: string, p: Partial<ImageDraft>) => { setDirty((d) => ({ ...d, ['i:' + id]: true })); setIKeys(iKeys.map((k) => (k.id === id ? { ...k, ...p } : k))); };
   const iKeyOf = (v: ImageSource) => iKeys.find((k) => `ikey:${k.id}` === v);
+  const okImage = (v: ImageSource) => aiAllowed(off, imageOption(v, iKeyOf(v)));
+  const iPresets = IMAGE_PROVIDERS.filter((p) => aiAllowed(off, `img:${p.id}`));
   const iAll: ImageSource[] = ['workers', 'self-hosted', ...iKeys.map((k) => `ikey:${k.id}` as ImageSource)];
+  const iShown = iOrder.filter(okImage);
   const editISelf = (p: Partial<typeof iSelf>) => { setDirty((d) => ({ ...d, iself: true })); setISelf({ ...iSelf, ...p }); };
-  const iOthers = iAll.filter((v) => !iOrder.includes(v));
+  const iOthers = iAll.filter((v) => !iOrder.includes(v) && okImage(v));
   const iToggle = (v: ImageSource, on: boolean) => { setIOrder(on ? [...iOrder, v] : iOrder.filter((x) => x !== v)); if (on) setIOpen(v); };
-  const iMove = (v: ImageSource, by: -1 | 1) => {
-    const i = iOrder.indexOf(v), j = i + by;
-    if (i < 0 || j < 0 || j >= iOrder.length) return;
-    const next = [...iOrder]; [next[i], next[j]] = [next[j]!, next[i]!]; setIOrder(next);
-  };
+  const iMove = (v: ImageSource, by: -1 | 1) => setIOrder(moveShown(iOrder, iShown, v, by));
   const addIKey = () => {
     const id = 'new-' + Math.random().toString(36).slice(2, 8);
-    const p = IMAGE_PROVIDERS[0]!;
+    const p = iPresets[0];
+    if (!p) return;
     setIKeys([...iKeys, { id, label: '', provider: p.provider, baseUrl: p.baseUrl ?? '', model: p.models[0] ?? '', apiKey: '', saved: false }]);
     setIOrder([...iOrder, `ikey:${id}`]); setIOpen(`ikey:${id}`); setDirty((d) => ({ ...d, ['i:' + id]: true }));
   };
@@ -707,7 +724,7 @@ export function Engine() {
         <div className="eng-fields">
           <label className="fld"><span className="k">Service</span>
             <select className="in" value={p.id} onChange={(x) => { const n = IMAGE_PROVIDERS.find((y) => y.id === x.target.value)!; editIKey(k.id, { provider: n.provider, baseUrl: n.baseUrl ?? (n.id === 'other' && p.id === 'other' ? k.baseUrl : ''), model: n.models[0] ?? '' }); }}>
-              {IMAGE_PROVIDERS.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+              {iPresets.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
             </select>
           </label>
           <label className="fld"><span className="k">Name · optional</span><input className="in" type="text" maxLength={40} placeholder="Work OpenAI, Spare fal…" value={k.label} onChange={(x) => editIKey(k.id, { label: x.target.value })} /></label>
@@ -749,7 +766,7 @@ export function Engine() {
           <span className="k tag">{v === 'self-hosted' ? 'Your server' : iKeyOf(v) ? 'Your key' : 'Free tier'}</span>
           {on && <span className="vrow-move">
             <button type="button" className="stp" onClick={() => iMove(v, -1)} disabled={i === 0} aria-label={`Move ${iName(v)} up`}>↑</button>
-            <button type="button" className="stp" onClick={() => iMove(v, 1)} disabled={i === iOrder.length - 1} aria-label={`Move ${iName(v)} down`}>↓</button>
+            <button type="button" className="stp" onClick={() => iMove(v, 1)} disabled={i === iShown.length - 1} aria-label={`Move ${iName(v)} down`}>↓</button>
           </span>}
           <Switch on={on} onChange={(x) => iToggle(v, x)} label={`Use ${iName(v)}`} />
         </div>
@@ -763,23 +780,25 @@ export function Engine() {
       <section className="g eng-card wide" aria-label="Brain">
         <span className="k" style={{ paddingBottom: 6 }}>Brain · Niko uses in this order</span>
         <p className="hint" style={{ paddingBottom: 8 }}>Niko answers with the first one that works. When one reaches its usage limit, refuses its key or stops answering, Niko moves to the next straight away, and goes back to it once its limit has reset.</p>
-        <ol className="vlist">{order.map((b, i) => row(b, i))}</ol>
-        <button type="button" className="bt add-key" onClick={addKey} disabled={keys.length >= MAX_AI_KEYS}><Icon name="plus" size={18} />Add an AI key</button>
+        <ol className="vlist">{shown.map((b, i) => row(b, i))}</ol>
+        {presets.length > 0 && <button type="button" className="bt add-key" onClick={addKey} disabled={keys.length >= MAX_AI_KEYS}><Icon name="plus" size={18} />Add an AI key</button>}
         {others.length > 0 && <>
           <span className="k" style={{ padding: '18px 0 6px' }}>Not in use</span>
           <ul className="vlist">{others.map((b) => row(b, null))}</ul>
         </>}
+        {managedIn(off, 'brain') && <p className="hint managed">{MANAGED}</p>}
       </section>
-      <section className="g eng-card wide" aria-label="Pictures">
+      {!off.includes('sec:images') ? <section className="g eng-card wide" aria-label="Pictures">
         <span className="k" style={{ paddingBottom: 6 }}>Pictures · Niko uses in this order</span>
         <p className="hint" style={{ paddingBottom: 8 }}>Ask Niko to paint, draw or make a picture. The first service that works paints it, switching to the next when one reaches its limit, refuses its key or stops answering. Each service checks requests against its own rules: if one declines a picture, the next is asked. Pictures are never stored; Save keeps one on your device. Switch them all off to turn pictures off.</p>
-        {iOrder.length ? <ol className="vlist">{iOrder.map((v, i) => iRow(v, i))}</ol> : <p className="hint vrow-warn" style={{ padding: '4px 0 8px' }}>Pictures are off. Switch on a service below to turn them on.</p>}
-        <button type="button" className="bt add-key" onClick={addIKey} disabled={iKeys.length >= MAX_IMAGE_KEYS}><Icon name="plus" size={18} />Add an image API key</button>
+        {iShown.length ? <ol className="vlist">{iShown.map((v, i) => iRow(v, i))}</ol> : <p className="hint vrow-warn" style={{ padding: '4px 0 8px' }}>Pictures are off. Switch on a service below to turn them on.</p>}
+        {iPresets.length > 0 && <button type="button" className="bt add-key" onClick={addIKey} disabled={iKeys.length >= MAX_IMAGE_KEYS}><Icon name="plus" size={18} />Add an image API key</button>}
         {iOthers.length > 0 && <>
           <span className="k" style={{ padding: '18px 0 6px' }}>Not in use</span>
           <ul className="vlist">{iOthers.map((v) => iRow(v, null))}</ul>
         </>}
-      </section>
+        {managedIn(off, 'images') && <p className="hint managed">{MANAGED}</p>}
+      </section> : null}
       <p className="g eng-keys"><Icon name="shield" size={20} />Keys are encrypted on the server, never stored in this browser, and never shown again after saving. Several keys from the same provider and account share one usage limit, so a second key helps most when it is from another account or provider. The voice is set under Voice.</p>
     </SettingsPage>
   );
@@ -853,17 +872,19 @@ export function Voice() {
   const editSh = (p: Partial<typeof sh>) => { setDirty((d) => ({ ...d, sh: true })); setSh({ ...sh, ...p }); };
   const editKey = (id: string, p: Partial<VoiceDraft>) => { setDirty((d) => ({ ...d, [id]: true })); setKeys(keys.map((k) => (k.id === id ? { ...k, ...p } : k))); };
   const keyOf = (v: VoiceSource) => keys.find((k) => `vkey:${k.id}` === v);
+  // Options the admin has turned off for this account are not shown (and are kept in the saved order).
+  const off = me.aiOff ?? [];
+  const okVoice = (v: VoiceSource) => aiAllowed(off, voiceOption(v, keyOf(v)));
+  const vPresets = VOICE_PROVIDERS.filter((p) => aiAllowed(off, `v:${p.id}`));
   const all: VoiceSource[] = [...VOICE_SOURCES, ...keys.map((k) => `vkey:${k.id}` as VoiceSource)];
-  const others = all.filter((v) => !order.includes(v));
+  const shown = order.filter(okVoice);
+  const others = all.filter((v) => !order.includes(v) && okVoice(v));
   const toggle = (v: VoiceSource, on: boolean) => { setOrder(on ? [...order, v] : order.filter((x) => x !== v)); if (on) setOpen(v); };
-  const move = (v: VoiceSource, by: -1 | 1) => {
-    const i = order.indexOf(v), j = i + by;
-    if (i < 0 || j < 0 || j >= order.length) return;
-    const next = [...order]; [next[i], next[j]] = [next[j]!, next[i]!]; setOrder(next);
-  };
+  const move = (v: VoiceSource, by: -1 | 1) => setOrder(moveShown(order, shown, v, by));
   const addKey = () => {
     const id = 'new-' + Math.random().toString(36).slice(2, 8);
-    const p = VOICE_PROVIDERS[0]!;
+    const p = vPresets[0];
+    if (!p) return;
     setKeys([...keys, { id, label: '', provider: p.provider, baseUrl: p.baseUrl ?? '', voice: p.voices?.[0]?.id ?? '', model: p.models?.[0] ?? '', region: '', apiKey: '', saved: false }]);
     setOrder([...order, `vkey:${id}`]); setOpen(`vkey:${id}`); setDirty((d) => ({ ...d, [id]: true }));
   };
@@ -916,8 +937,8 @@ export function Voice() {
       setDirty((d) => Object.fromEntries(Object.entries(d).filter(([id]) => !hSaved.has(id))));
       if (dirty.sh && sh.baseUrl.trim()) await api('/connections/self-hosted-voice', { body: sh });
       if (dirty.hself && hSelf.baseUrl.trim()) await api('/connections/self-hosted-hear', { body: hSelf });
-      if (hNext.includes('self-hosted') && !linked['self-hosted-hear'] && !hSelf.baseUrl.trim()) throw new Error('Add your speech-to-text server’s address under Listening, or switch it off.');
-      if (next.includes('self-hosted') && !linked['self-hosted-voice'] && !sh.baseUrl.trim()) throw new Error('Add your voice server’s address, or switch it off.');
+      if (hNext.includes('self-hosted') && okHear('self-hosted') && !linked['self-hosted-hear'] && !hSelf.baseUrl.trim()) throw new Error('Add your speech-to-text server’s address under Listening, or switch it off.');
+      if (next.includes('self-hosted') && okVoice('self-hosted') && !linked['self-hosted-voice'] && !sh.baseUrl.trim()) throw new Error('Add your voice server’s address, or switch it off.');
       await api('/me', { method: 'PATCH', body: { engine: { voices: next, hears: hNext, workersVoice: e.workersVoice ?? 'melo', kokoroVoice: e.kokoroVoice ?? 'af_heart', wake: e.wake } } });
       await Promise.all([refreshMe(), reload()]);
       setSh((v) => ({ ...v, apiKey: '' })); setHSelf((v) => ({ ...v, apiKey: '' })); setDirty({});
@@ -959,18 +980,18 @@ export function Voice() {
   // ---- speech in
   const editHKey = (id: string, p: Partial<HearDraft>) => { setDirty((d) => ({ ...d, ['h:' + id]: true })); setHKeys(hKeys.map((k) => (k.id === id ? { ...k, ...p } : k))); };
   const hKeyOf = (v: HearSource) => hKeys.find((k) => `skey:${k.id}` === v);
+  const okHear = (v: HearSource) => aiAllowed(off, hearOption(v, hKeyOf(v)));
+  const hPresets = HEAR_PROVIDERS.filter((p) => aiAllowed(off, `h:${p.id}`));
   const hAll: HearSource[] = ['workers', 'self-hosted', ...hKeys.map((k) => `skey:${k.id}` as HearSource)];
+  const hShown = hOrder.filter(okHear);
   const editHSelf = (p: Partial<typeof hSelf>) => { setDirty((d) => ({ ...d, hself: true })); setHSelf({ ...hSelf, ...p }); };
-  const hOthers = hAll.filter((v) => !hOrder.includes(v));
+  const hOthers = hAll.filter((v) => !hOrder.includes(v) && okHear(v));
   const hToggle = (v: HearSource, on: boolean) => { setHOrder(on ? [...hOrder, v] : hOrder.filter((x) => x !== v)); if (on) setHOpen(v); };
-  const hMove = (v: HearSource, by: -1 | 1) => {
-    const i = hOrder.indexOf(v), j = i + by;
-    if (i < 0 || j < 0 || j >= hOrder.length) return;
-    const next = [...hOrder]; [next[i], next[j]] = [next[j]!, next[i]!]; setHOrder(next);
-  };
+  const hMove = (v: HearSource, by: -1 | 1) => setHOrder(moveShown(hOrder, hShown, v, by));
   const addHKey = () => {
     const id = 'new-' + Math.random().toString(36).slice(2, 8);
-    const p = HEAR_PROVIDERS[0]!;
+    const p = hPresets[0];
+    if (!p) return;
     setHKeys([...hKeys, { id, label: '', provider: p.provider, baseUrl: p.baseUrl ?? '', model: p.models?.[0] ?? '', region: '', apiKey: '', saved: false }]);
     setHOrder([...hOrder, `skey:${id}`]); setHOpen(`skey:${id}`); setDirty((d) => ({ ...d, ['h:' + id]: true }));
   };
@@ -1031,7 +1052,7 @@ export function Voice() {
         <div className="eng-fields">
           <label className="fld"><span className="k">Service</span>
             <select className="in" value={p.id} onChange={(x) => { const n = HEAR_PROVIDERS.find((y) => y.id === x.target.value)!; editHKey(k.id, { provider: n.provider, baseUrl: n.baseUrl ?? (n.id === 'other' && p.id === 'other' ? k.baseUrl : ''), model: n.models?.[0] ?? '', region: '' }); }}>
-              {HEAR_PROVIDERS.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+              {hPresets.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
             </select>
           </label>
           <label className="fld"><span className="k">Name · optional</span><input className="in" type="text" maxLength={40} placeholder="Work OpenAI, Spare Groq…" value={k.label} onChange={(x) => editHKey(k.id, { label: x.target.value })} /></label>
@@ -1072,7 +1093,7 @@ export function Voice() {
           <span className="k tag">{v === 'self-hosted' ? 'Your server' : hKeyOf(v) ? 'Your key' : 'Free'}</span>
           {on && <span className="vrow-move">
             <button type="button" className="stp" onClick={() => hMove(v, -1)} disabled={i === 0} aria-label={`Move ${hName(v)} up`}>↑</button>
-            <button type="button" className="stp" onClick={() => hMove(v, 1)} disabled={i === hOrder.length - 1} aria-label={`Move ${hName(v)} down`}>↓</button>
+            <button type="button" className="stp" onClick={() => hMove(v, 1)} disabled={i === hShown.length - 1} aria-label={`Move ${hName(v)} down`}>↓</button>
           </span>}
           <Switch on={on} onChange={(x) => hToggle(v, x)} label={`Use ${hName(v)}`} />
         </div>
@@ -1090,7 +1111,7 @@ export function Voice() {
         <div className="eng-fields">
           <label className="fld"><span className="k">Service</span>
             <select className="in" value={p.id} onChange={(x) => { const n = VOICE_PROVIDERS.find((y) => y.id === x.target.value)!; editKey(k.id, { provider: n.provider, baseUrl: n.baseUrl ?? (n.id === 'other' && p.id === 'other' ? k.baseUrl : ''), voice: n.voices?.[0]?.id ?? '', model: n.models?.[0] ?? '', region: '' }); setLists((m) => ({ ...m, [k.id]: { list: [], err: '', busy: false } })); }}>
-              {VOICE_PROVIDERS.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+              {vPresets.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
             </select>
           </label>
           <label className="fld"><span className="k">Name · optional</span><input className="in" type="text" maxLength={40} placeholder="Work OpenAI, Spare Azure…" value={k.label} onChange={(x) => editKey(k.id, { label: x.target.value })} /></label>
@@ -1210,7 +1231,7 @@ export function Voice() {
           <span className="k tag">{tag(v)}</span>
           {on && <span className="vrow-move">
             <button type="button" className="stp" onClick={() => move(v, -1)} disabled={i === 0} aria-label={`Move ${name(v)} up`}>↑</button>
-            <button type="button" className="stp" onClick={() => move(v, 1)} disabled={i === order.length - 1} aria-label={`Move ${name(v)} down`}>↓</button>
+            <button type="button" className="stp" onClick={() => move(v, 1)} disabled={i === shown.length - 1} aria-label={`Move ${name(v)} down`}>↓</button>
           </span>}
           <Switch on={on} onChange={(x) => toggle(v, x)} label={`Use ${name(v)}`} />
         </div>
@@ -1223,43 +1244,60 @@ export function Voice() {
     <SettingsPage title="Voice" sub="How Niko speaks to you, and how it listens." action={<button className="pri set-save" onClick={save} disabled={busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save changes'}</button>}>
       <NoteLine note={note} />
       <div className="eng-grid">
+        {off.includes('sec:voices') ? (
+          <section className="g eng-card" aria-label="Speech out">
+            <span className="k" style={{ paddingBottom: 6 }}>Speech out</span>
+            <div className="vrow on last"><div className="vrow-head">
+              <span className="vrow-title static"><b>{VOICE_NAMES.device}</b><span className="sub">Niko speaks with this device’s own voice. Other voices are managed by your administrator.</span></span>
+              {previewBtn('device')}
+            </div></div>
+          </section>
+        ) : (
         <section className="g eng-card" aria-label="Speech out">
           <span className="k" style={{ paddingBottom: 6 }}>Speech out · Niko uses in this order</span>
           <p className="hint" style={{ paddingBottom: 8 }}>Niko speaks with the first voice that works. When one reaches its usage limit, refuses its key or stops answering, the next one speaks straight away, and Niko goes back to it once it has reset.</p>
           <ol className="vlist">
-            {order.map((v, i) => row(v, i))}
+            {shown.map((v, i) => row(v, i))}
             <li className="vrow on last">
               <div className="vrow-head">
-                <span className="n" aria-hidden="true">{order.length + 1}</span>
+                <span className="n" aria-hidden="true">{shown.length + 1}</span>
                 <span className="vrow-title static"><b>{VOICE_NAMES.device}</b><span className="sub">Built into this device. Always last, so Niko can always speak.</span></span>
                 <span className="k tag">Free</span>
                 {previewBtn('device')}
               </div>
             </li>
           </ol>
-          <button type="button" className="bt add-key" onClick={addKey} disabled={keys.length >= MAX_VOICE_KEYS}><Icon name="plus" size={18} />Add a voice API key</button>
+          {vPresets.length > 0 && <button type="button" className="bt add-key" onClick={addKey} disabled={keys.length >= MAX_VOICE_KEYS}><Icon name="plus" size={18} />Add a voice API key</button>}
           {others.length > 0 && <>
             <span className="k" style={{ padding: '18px 0 6px' }}>Not in use</span>
             <ul className="vlist">{others.map((v) => row(v, null))}</ul>
           </>}
+          {managedIn(off, 'voices') && <p className="hint managed">{MANAGED}</p>}
         </section>
+        )}
         <section className="g eng-card listen" aria-label="Listening">
+          {off.includes('sec:hears') ? <>
+          <span className="k" style={{ paddingBottom: 2 }}>Listening · speech in</span>
+          <p className="hint">This browser’s own speech recognition turns what you say into words. Other speech-in services are managed by your administrator.</p>
+          </> : <>
           <span className="k" style={{ paddingBottom: 2 }}>Listening · speech in · Niko uses in this order</span>
           <p className="hint">After you tap the mic or say “Niko”, your request is recorded and turned into words by the first service that works. When one reaches its limit or fails, the next one is used.</p>
           <ol className="vlist">
-            {hOrder.map((v, i) => hRow(v, i))}
+            {hShown.map((v, i) => hRow(v, i))}
             <li className="vrow on last">
               <div className="vrow-head">
-                <span className="n" aria-hidden="true">{hOrder.length + 1}</span>
+                <span className="n" aria-hidden="true">{hShown.length + 1}</span>
                 <span className="vrow-title static"><b>Device speech recognition</b><span className="sub">Built into this browser. Always last, and always the one that listens for “Niko”, so nothing is sent while you are not talking to Niko.</span></span>
                 <span className="k tag">Free</span>
               </div>
             </li>
           </ol>
-          <button type="button" className="bt add-key" onClick={addHKey} disabled={hKeys.length >= MAX_HEAR_KEYS}><Icon name="plus" size={18} />Add a speech-in API key</button>
+          {hPresets.length > 0 && <button type="button" className="bt add-key" onClick={addHKey} disabled={hKeys.length >= MAX_HEAR_KEYS}><Icon name="plus" size={18} />Add a speech-in API key</button>}
           {hOthers.length > 0 && <>
             <span className="k" style={{ padding: '14px 0 4px' }}>Not in use</span>
             <ul className="vlist">{hOthers.map((v) => hRow(v, null))}</ul>
+          </>}
+          {managedIn(off, 'hears') && <p className="hint managed">{MANAGED}</p>}
           </>}
           <div className="eng-line"><span>Wake when I say “Niko”</span><Switch on={!!e.wake} onChange={(x) => set({ wake: x })} label="Wake when I say Niko" /></div>
           <div className="eng-line"><span>After Niko answers, keep listening for a few seconds so you can carry on talking</span><span className="k later">On</span></div>

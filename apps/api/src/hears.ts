@@ -4,7 +4,7 @@
 // recognition, in the browser, is always the last resort.
 import { and, eq } from 'drizzle-orm';
 import { connections, users, type Db } from '@niko/db';
-import { hearOrder, MAX_HEAR_KEYS, type BrainRest, type EnginePrefs, type HearKeyInfo, type HearProvider, type HearSource } from '@niko/shared';
+import { aiAllowed, hearOption, hearOrder, MAX_HEAR_KEYS, type BrainRest, type EnginePrefs, type HearKeyInfo, type HearProvider, type HearSource } from '@niko/shared';
 import type { Env } from './env';
 import { BrainFail, providerMessage } from './brains';
 import { seal } from './lib/crypto';
@@ -141,15 +141,21 @@ export function audioProblem(audio: Uint8Array): string | null {
  * Turns speech into text with the first service in the order that works. Services that are resting are tried last.
  * Each failure sets a rest; an answer ends it. `only` tries one service (the Voice screen's Test).
  */
-export async function hear(env: Env, db: Db, user: { id: string; engine: unknown }, audio: Uint8Array, lang: string, only?: { entry: HearSource; key?: HearKey }): Promise<{ text: string; used: HearSource }> {
+export async function hear(env: Env, db: Db, user: { id: string; engine: unknown }, audio: Uint8Array, lang: string, only?: { entry: HearSource; key?: HearKey }, off: readonly string[] = []): Promise<{ text: string; used: HearSource }> {
   const engine = (user.engine ?? {}) as EnginePrefs;
-  const order = only ? [only.entry] : hearOrder(engine);
+  let keys: HearKey[] | null = null;
+  let order = only ? [only.entry] : hearOrder(engine);
+  // Services the admin has turned off for this account are skipped; the device's own recognition then listens.
+  if (off.length) {
+    keys = await loadHearKeys(env, db, user.id);
+    order = order.filter((e) => aiAllowed(off, hearOption(e, only?.key && only.entry === e ? only.key : keys!.find((k) => `skey:${k.id}` === e))));
+    if (!order.length && only) throw new BrainFail('not on account', 'refused', 0, 'That service isn’t available on your account.');
+  }
   if (!order.length) throw new BrainFail('no services', 'down', 0, 'No speech-in service is switched on.');
   const now = Date.now();
   const rest: Record<string, BrainRest> = {};
   for (const [k, v] of Object.entries(engine.hearRest ?? {})) if (v && v.until > now) rest[k] = v;
   const ready = order.filter((s) => !rest[s]), resting = order.filter((s) => rest[s]).sort((a, b) => rest[a]!.until - rest[b]!.until);
-  let keys: HearKey[] | null = null;
   let changed = Object.keys(rest).length !== Object.keys(engine.hearRest ?? {}).length, last: unknown = null;
   try {
     for (const entry of [...ready, ...resting]) {
