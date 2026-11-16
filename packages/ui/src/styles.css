@@ -14,7 +14,13 @@ button, input, select { font: inherit; }
 a { color: #fff; }
 a:hover { color: var(--muted); }
 h1, h2, h3, p { margin: 0; }
+/* No grey box when something is tapped (Android, iOS); the element's own pressed and hover styles show the tap. */
+html { -webkit-tap-highlight-color: transparent; }
+/* A focus ring only for keyboard use: never after a tap or click, and never around a whole dialog. */
 :focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+:focus:not(:focus-visible), dialog:focus, dialog:focus-visible { outline: none; }
+/* Text fields show focus with their own border instead of a ring. */
+.in:focus, .in:focus-visible { outline: none; border-color: rgba(255,255,255,.85); box-shadow: 0 0 0 3px rgba(255,255,255,.1); }
 
 /* The shifting background: one glow in the user's colour over a near-black base. */
 /* z-index -1: always behind the page's own content, positioned or not. */
