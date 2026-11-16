@@ -1315,12 +1315,16 @@ const hex = (h: number) => { const f = (n: number) => { const k = (n + h / 30) %
 
 const PREVIEW_STEP_MS = 2500;
 
+const clockOf = (ms: number) => (new Date(ms).toDateString() === new Date().toDateString() ? '' : `${new Date(ms).toLocaleDateString([], { weekday: 'short' })} `) + new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
 export function Appearance() {
   const { me, refreshMe } = useNiko();
   const [a, setA] = useState<Look | null>(me?.appearance ?? null);
   const [saved, setSaved] = useState(false);
   const [tick, setTick] = useState(0);
+  const [checks, setChecks] = useState<{ checked: Record<string, number>; every: Record<string, number> } | null>(null);
   useEffect(() => { if (me && !a) setA(me.appearance); }, [me, a]);
+  useEffect(() => { if (cleanGlancePrefs(me?.appearance.glance).on) api<{ checked: Record<string, number>; every: Record<string, number> }>('/glance/status').then(setChecks).catch(() => undefined); }, [me]);
   // The preview cycles faster than the app will, so every colour in the rotation shows within a few seconds.
   useEffect(() => { const t = window.setInterval(() => setTick((n) => n + 1), PREVIEW_STEP_MS); return () => window.clearInterval(t); }, []);
   if (!a) return null;
@@ -1425,6 +1429,7 @@ export function Appearance() {
                   {GLANCE_REMIND_STEPS.map((m) => <option key={m} value={m}>{m} minutes before</option>)}
                 </select>
               </label>
+              {checks && cleanGlancePrefs(me?.appearance.glance).on && <span className="hint glance-last">Last checked: {GLANCE_PARTS.map((p) => `${GLANCE_PART_NAMES[p]} ${!checks.every[p] ? 'off' : checks.checked[p] ? clockOf(checks.checked[p]!) : 'not yet'}`).join(' · ')}. Checks run while Home is open; the first one only learns what is already there.</span>}
               <span className="hint">Niko checks only while Home is open and on screen, and pauses after 30 minutes without use. Messages from Telegram and Slack arrive straight away; less often is kinder to your email provider. {GLANCE_PARTS.some((p) => limits[p] > 1) ? 'Your administrator sets how often checks may run.' : ''} Changes to notes you make yourself in Notion aren’t shown; OneNote doesn’t say who changed a page, so all its changes are.</span>
             </>}
           </div>}

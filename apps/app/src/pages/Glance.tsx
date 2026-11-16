@@ -1,6 +1,7 @@
 // New items on Home: while Home is open and on screen, Niko asks about once a minute what has come in (the server only
 // reads each kind when it is due) and shows each new item for 30 seconds. Hover or focus keeps it; Open, Reply or
-// Dismiss it, or say so. It never interrupts: while you talk to Niko, or an answer or picture is open, new items wait.
+// Dismiss it, or say so. It never interrupts: while Niko is listening, thinking or speaking, new items wait. With an
+// answer or picture open, they come in below it (desktop) or as one card over the core (phone).
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { cleanGlancePrefs, GLANCE_PARTS, glanceEvery, GLANCE_LIMIT_DEFAULTS, type GlanceItem } from '@niko/shared';
@@ -35,12 +36,29 @@ export function GlanceStack({ wide }: { wide: boolean }) {
   const queue = useRef<GlanceItem[]>([]);
   const cardsRef = useRef(cards);
   cardsRef.current = cards;
-  const max = wide ? 3 : 2;
-  // While Niko is listening, thinking or speaking, or an answer or picture is open, new items wait (and cards hold).
-  const busy = n.mode !== 'idle' || !!n.reply || !!n.picture;
-  const hidden = !!n.reply || !!n.picture;
+  // While Niko is listening, thinking or speaking, new items wait (and cards on show hold).
+  const busy = n.mode !== 'idle';
   const busyRef = useRef(busy);
   busyRef.current = busy;
+  // An answer or picture open on Home takes the right-hand column: new items go below it (or, without room, to the
+  // left), and on a phone one at a time, over the core.
+  const panelsOpen = !!n.reply || !!n.picture;
+  const [place, setPlace] = useState<{ style?: React.CSSProperties; room: number }>({ room: wide ? 3 : 2 });
+  useEffect(() => {
+    if (!panelsOpen) { setPlace({ room: wide ? 3 : 2 }); return; }
+    const measure = () => {
+      if (!wide) return setPlace({ room: 1 });
+      const cardsIn = document.querySelectorAll<HTMLElement>('.home .panels .card-build');
+      const bottom = cardsIn.length ? cardsIn[cardsIn.length - 1]!.getBoundingClientRect().bottom : 104;
+      const top = Math.max(104, Math.round(bottom + 16)), room = Math.floor((window.innerHeight - 130 - top) / 162);
+      setPlace(room >= 1 ? { style: { top }, room: Math.min(3, room) } : { style: { left: 36, right: 'auto', top: 104 }, room: 2 });
+    };
+    measure();
+    const t = window.setInterval(measure, 600);
+    return () => window.clearInterval(t);
+  }, [panelsOpen, wide]);
+  const maxRef = useRef(place.room);
+  maxRef.current = place.room;
   const nRef = useRef(n);
   nRef.current = n;
   const fx = useRef<HTMLCanvasElement>(null);
@@ -88,7 +106,7 @@ export function GlanceStack({ wide }: { wide: boolean }) {
     const t = window.setInterval(() => {
       const now = Date.now();
       // Room on screen and nothing going on: the next waiting item comes in.
-      if (!busyRef.current && queue.current.length && cardsRef.current.filter((c) => !c.leaving).length < max) {
+      if (!busyRef.current && queue.current.length && cardsRef.current.filter((c) => !c.leaving).length < maxRef.current) {
         const it = queue.current.shift()!, first = cardsRef.current.length === 0;
         setCards((cs) => [...cs, { it, start: now, used: 0, held: false, heldAt: 0, leaving: false, entered: false }]);
         window.setTimeout(() => setCards((cs) => cs.map((c) => (c.it.key === it.key ? { ...c, entered: true } : c))), 30);
@@ -109,7 +127,7 @@ export function GlanceStack({ wide }: { wide: boolean }) {
       }
     }, 250);
     return () => window.clearInterval(t);
-  }, [max]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const hold = (key: string, on: boolean) => setCards((cs) => cs.map((c) => {
     if (c.it.key !== key || c.leaving) return c;
@@ -124,7 +142,7 @@ export function GlanceStack({ wide }: { wide: boolean }) {
   // Voice: "open it", "reply", "dismiss" act on the newest card on show.
   useEffect(() => {
     const live = cards.filter((c) => !c.leaving);
-    if (!live.length || hidden) { n.setGlanceHandler(null); return; }
+    if (!live.length) { n.setGlanceHandler(null); return; }
     n.setGlanceHandler((phrase) => {
       const cmd = glanceCommand(phrase), c = live[live.length - 1]!;
       if (!cmd || (cmd === 'reply' && !c.it.canReply)) return false;
@@ -176,7 +194,7 @@ export function GlanceStack({ wide }: { wide: boolean }) {
   if (!enabled) return null;
   const now = Date.now(), waiting = queue.current.length;
   return <>
-    <aside className={'glance-stack' + (hidden ? ' away' : '')} aria-label="New for you" aria-live="polite">
+    <aside className="glance-stack" style={place.style} aria-label="New for you" aria-live="polite">
       {cards.map((c) => {
         const held = c.held || busy, left = Math.max(0, LIFE_MS - ((held && c.held ? c.heldAt : now) - c.start - c.used));
         const ago = Math.round((now - c.start) / 1000);
@@ -197,8 +215,8 @@ export function GlanceStack({ wide }: { wide: boolean }) {
           </section>
         );
       })}
-      {waiting > 0 && cards.length > 0 && <p className="glance-more">+{waiting} more waiting · they appear as these go</p>}
-      {cards.length > 0 && wide && <p className="glance-hint">Say “open it”, “reply” or “dismiss”. Hover to keep it.</p>}
+      {waiting > 0 && cards.length > 0 && (wide || !panelsOpen) && <p className="glance-more">+{waiting} more waiting · they appear as these go</p>}
+      {cards.length > 0 && wide && !panelsOpen && <p className="glance-hint">Say “open it”, “reply” or “dismiss”. Hover to keep it.</p>}
     </aside>
     {createPortal(<canvas ref={fx} className="sparks" aria-hidden="true" />, document.body)}
   </>;

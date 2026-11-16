@@ -401,6 +401,13 @@ app.get('/brief/chats', async (c) => c.json({ chats: await recentChats(c) }));
 // services only when it is due, under both the person's own choice and the admin's limit. Nothing is read for a person
 // who has not turned this on, or whose admin has not allowed it.
 const lastGlance = new Map<string, number>();
+// When each kind was last checked, for the Appearance screen (so a person can see it is working).
+app.get('/glance/status', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  const prefs = cleanGlancePrefs((u.appearance as Record<string, unknown>)?.glance), limits = await limitsFor(db, u);
+  const row = (await db.select({ checked: glanceState.checked }).from(glanceState).where(eq(glanceState.userId, u.id)).limit(1))[0];
+  return c.json({ checked: row?.checked ?? {}, every: Object.fromEntries(GLANCE_PARTS.map((p) => [p, glanceEvery(prefs, limits, p)])) });
+});
 app.post('/glance', async (c) => {
   const u = c.get('user'), db = c.get('db'), now = Date.now();
   const b = await c.req.json<{ tz?: number }>().catch(() => ({} as { tz?: number }));

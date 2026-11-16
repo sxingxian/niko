@@ -345,6 +345,7 @@ select.in option { color: #04070c; }
 .eng-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; font: 400 14px system-ui, sans-serif; }
 .eng-line .soon { margin-left: 8px; font-size: 10px; }
 .glance-set { border-top: 1px solid rgba(255,255,255,.12); padding-top: 18px; gap: 6px !important; }
+.glance-last { color: #e6eaf1 !important; }
 .glance-sel { width: auto; min-width: 190px; height: 44px; flex: none; }
 /* Voice: the voices Niko tries, in order. Each row opens to its own settings. */
 .vlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
@@ -534,8 +535,7 @@ dialog.sheet.wide { width: min(580px, calc(100% - 24px)); }
 }
 
 /* New items on Home: cards that come in on the right (desktop) or under the top bar (phone) for 30 seconds. */
-.glance-stack { position: absolute; right: 36px; top: 104px; width: 380px; display: flex; flex-direction: column; gap: 12px; z-index: 2; transition: opacity .3s; }
-.glance-stack.away { opacity: 0; visibility: hidden; }
+.glance-stack { position: absolute; right: 36px; top: 104px; width: 380px; display: flex; flex-direction: column; gap: 12px; z-index: 3; transition: top .35s cubic-bezier(.22,1,.36,1); }
 .glance { border-radius: 24px; padding: 16px 18px 0; display: flex; flex-direction: column; gap: 8px; overflow: hidden; opacity: 0; transform: translateX(40px); transition: opacity .35s ease, transform .45s cubic-bezier(.22,1,.36,1); }
 .glance.arrived { opacity: 1; transform: none; }
 .glance-top { display: flex; align-items: center; gap: 10px; }
