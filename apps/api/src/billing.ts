@@ -292,11 +292,34 @@ export async function daily(env: Env, db: Db): Promise<void> {
   ));
   const line = plansLine(s);
   for (const u of soon) {
+    // Claim the reminder first (copied in the database: a JavaScript date would drop the microseconds and never
+    // match again). If two runs overlap, only the one whose update takes the row sends the email.
+    const claimed = await db.update(users).set({ remindedFor: sql`${users.accessUntil}` })
+      .where(and(eq(users.id, u.id), sql`(${users.remindedFor} is null or ${users.remindedFor} <> ${users.accessUntil})`))
+      .returning({ id: users.id });
+    if (!claimed.length) continue;
     await sendEmail(env, u.email, 'Your Niko time ends soon', 'Your Niko time ends soon',
       `Your time with Niko ends on ${esc(dateLabel(u.accessUntil!))}. Nothing renews by itself. To keep going, choose a plan in Niko under Account${line ? ` (${esc(line)})` : ''}. Choose it in the next few days and billing starts only when your time ends.`);
-    // Copied in the database: a JavaScript date would drop the microseconds and never match again.
-    await db.update(users).set({ remindedFor: sql`${users.accessUntil}` }).where(eq(users.id, u.id));
   }
+}
+
+// The daily job runs on the back of ordinary traffic, not a Cloudflare cron trigger (the free plan allows only 5
+// per account). After an API request has been answered, maybeDaily checks at most every 10 minutes per Worker
+// instance whether an hour has passed since the last run; the check is one atomic update in the database, so
+// only one request runs the job however many arrive together. With no visits for a while, it runs on the next one.
+const DAILY_EVERY = "1 hour";
+let nextLook = 0;
+export async function maybeDaily(env: Env, db: Db, now = Date.now()): Promise<boolean> {
+  if (now < nextLook) return false;
+  nextLook = now + 10 * 60_000;
+  const claimed = await db.execute(sql`
+    insert into app_settings (key, value) values ('daily-ran', to_jsonb(now()))
+    on conflict (key) do update set value = excluded.value
+    where (app_settings.value #>> '{}')::timestamptz < now() - ${DAILY_EVERY}::interval
+    returning key`);
+  if (!claimed.rows.length) return false;
+  await daily(env, db);
+  return true;
 }
 
 export { addMonths, lengthLabel, money };

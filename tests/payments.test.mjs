@@ -9,6 +9,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import worker from '../apps/api/src/index.ts';
+import { maybeDaily } from '../apps/api/src/billing.ts';
+import { createDb } from '@niko/db';
 import { closePools } from './db-node.mjs';
 
 // ---------------------------------------------------------------- a temporary PostgreSQL
@@ -385,6 +387,27 @@ await ok('signing up with an email that has an account looks the same, but goes 
   assert.match(lastEmail('priya@example.com').subject, /Someone tried to sign up/);
   assert.equal((await b.post('/auth/sign-up/verify', { code: '123456' })).status, 400);
 });
+// The daily job runs from traffic (no cron). A clock that moves on past the 10-minute and 1-hour gates.
+let clock = Date.now() + 86400_000;
+const runDaily = async () => {
+  await Promise.all(waits.splice(0));
+  await q(`update app_settings set value = to_jsonb(now() - interval '2 hours') where key = 'daily-ran'`);
+  clock += 60 * 60_000;
+  assert.equal(await maybeDaily(env, createDb(env.DATABASE_URL), clock), true);
+};
+await ok('the daily job runs from ordinary requests, at most once an hour, and only one of many requests runs it', async () => {
+  await Promise.all(waits.splice(0));
+  // Nothing but maybeDaily writes this row, and so far the tests have only sent requests.
+  assert.equal((await q(`select count(*)::int as n from app_settings where key = 'daily-ran'`))[0].n, 1, 'the requests so far ran it');
+  const db = createDb(env.DATABASE_URL);
+  clock += 11 * 60_000;
+  assert.equal(await maybeDaily(env, db, clock), false, 'not again within the hour');
+  await q(`update app_settings set value = to_jsonb(now() - interval '2 hours') where key = 'daily-ran'`);
+  clock += 11 * 60_000;
+  const a = maybeDaily(env, db, clock);
+  const b = maybeDaily(env, createDb(env.DATABASE_URL), clock + 11 * 60_000);
+  assert.deepEqual((await Promise.all([a, b])).sort(), [false, true], 'two at once: one runs');
+});
 await ok('unpaid sign-ups can’t be switched on, can be removed, and go by themselves after 7 days', async () => {
   const ken = new Browser();
   await ken.post('/auth/sign-up', { name: 'Ken', email: 'ken@example.com', password: PW });
@@ -396,8 +419,7 @@ await ok('unpaid sign-ups can’t be switched on, can be removed, and go by them
   const old = new Browser();
   await old.post('/auth/sign-up', { name: 'Old', email: 'old@example.com', password: PW });
   await q(`update signups set created_at = now() - interval '8 days' where user_id = (select id from users where email = 'old@example.com')`);
-  await worker.scheduled({}, env, ctx);
-  await Promise.all(waits.splice(0));
+  await runDaily();
   assert.equal(await user('old@example.com'), undefined);
 });
 await ok('the “Wrong email?” restart removes an unpaid sign-up', async () => {
@@ -412,10 +434,10 @@ await ok('the “Wrong email?” restart removes an unpaid sign-up', async () =>
 await ok('a reminder goes out once, 7 days before paid time ends', async () => {
   await q(`update users set access_until = now() + interval '5 days' where email = 'jun@example.com'`);
   const before = emails.length;
-  await worker.scheduled({}, env, ctx); await Promise.all(waits.splice(0));
+  await runDaily();
   const sent = emails.slice(before).filter((e) => e.to === 'jun@example.com');
   assert.equal(sent.length, 1); assert.match(sent[0].subject, /time ends soon/); assert.match(sent[0].html, /SGD 9\.00 a month or SGD 90\.00 a year/);
-  await worker.scheduled({}, env, ctx); await Promise.all(waits.splice(0));
+  await runDaily();
   assert.equal(emails.slice(before).filter((e) => e.to === 'jun@example.com').length, 1);
 });
 

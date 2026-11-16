@@ -73,7 +73,7 @@ If you'd rather run your own webhook, you can still set `STRIPE_TEST_WEBHOOK_SEC
 
 Accounts that existed before this update keep using Niko as before: the update marks them lifetime. Admins never pay.
 
-A Cloudflare cron trigger (`17 3 * * *`, in `wrangler.jsonc`) runs once a day: it removes open sign-ups that haven't paid within 7 days and sends the reminder emails. Cron triggers are included in the Workers free plan.
+The daily job (removing open sign-ups that haven't paid within 7 days, and sending the reminder emails) runs from ordinary traffic, not a Cloudflare cron trigger: the Workers free plan allows only 5 cron triggers per account, shared by all your Workers. After any API request is answered, Niko runs the job in the background if an hour has passed since the last run; one database update decides which request runs it, so it never runs twice at once. If nobody visits for a while, it runs on the next visit. `wrangler.jsonc` sets `"crons": []`, so Niko uses none of the 5.
 
 ## 2. Secrets
 
