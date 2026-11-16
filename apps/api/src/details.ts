@@ -3,7 +3,7 @@
 import type { Db } from '@niko/db';
 import type { DocBlock, EventDetail, MailDetail, NoteDetail } from '@niko/shared';
 import type { Env } from './env';
-import { api, credentials } from './providers';
+import { api, credentials, googleCals, splitGoogleEventId } from './providers';
 import { icalDetail } from './calendarlink';
 import { imapDetail, isImapProvider } from './mailbox';
 
@@ -197,10 +197,12 @@ export async function eventDetail(env: Env, db: Db, userId: string, provider: st
   if (id.length > 1024) throw new Error('That is not an event.');
   if (provider === 'ical') return icalDetail(s, id, tzOffsetMin);
   if (provider === 'google-calendar') {
-    const e = await api(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(id)}`, s.accessToken);
+    const ref = splitGoogleEventId(id), cal = googleCals(s).find((x) => x.id === ref.cal && x.on);
+    if (!cal) throw new Error('That event is not in a calendar Niko reads.');
+    const e = await api(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal.id)}/events/${encodeURIComponent(ref.id)}`, s.accessToken);
     const allDay = !e.start?.dateTime;
     return {
-      title: e.summary ?? '(no title)', source: 'Google', allDay,
+      title: e.summary ?? (cal.id === 'primary' ? '(no title)' : 'Busy'), source: cal.name, allDay,
       start: Date.parse(e.start?.dateTime ?? e.start?.date), end: Date.parse(e.end?.dateTime ?? e.end?.date) || undefined,
       location: e.location || undefined, description: e.description ? cut(htmlToText(e.description), 8000) : undefined,
       attendees: (e.attendees ?? []).map((a: any) => a.displayName || a.email).filter(Boolean).slice(0, 30),

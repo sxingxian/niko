@@ -455,6 +455,7 @@ select.in option { color: #04070c; }
 .spectrum span { position: absolute; top: -5px; bottom: -5px; width: 6px; margin-left: -3px; border-radius: 3px; background: #fff; box-shadow: 0 0 0 2px #07090d; }
 .seg { flex: 1; height: 48px; padding: 0 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,.25); background: transparent; color: #fff; font-size: 15px; cursor: pointer; white-space: nowrap; }
 .seg[aria-pressed='true'] { background: #fff; color: #05070d; }
+.seg:disabled { opacity: .4; cursor: not-allowed; }
 .opt { width: 100%; min-height: 52px; display: flex; align-items: center; gap: 14px; padding: 6px 0; border: 0; background: transparent; color: #fff; text-align: left; cursor: pointer; }
 .opt i { width: 18px; height: 18px; border-radius: 50%; border: 2px solid #fff; flex: none; }
 .opt[aria-pressed='true'] i { background: hsl(var(--h) 90% 72%); }
@@ -480,6 +481,8 @@ dialog.sheet.wide { width: min(580px, calc(100% - 24px)); }
 .cal-keep { font-size: 13px; margin-top: -6px; }
 .cal-help summary { cursor: pointer; color: var(--muted); font-size: 14px; padding: 4px 0; }
 .cal-help[open] summary { margin-bottom: 12px; }
+.gcal { display: flex; flex-direction: column; gap: 10px; }
+.gcal .cal-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'name sw' 'meta sw'; }
 button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; }
 @media (max-width: 520px) { .cal-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'name sw' 'meta ed'; column-gap: 12px; row-gap: 10px; } .cal-row > .bt { height: 36px; padding: 0 14px; } }
 /* Provider app setup: numbered steps, each with its console link and the addresses to copy. */

@@ -235,11 +235,11 @@ export function Connections() {
         </div>
       )}
 
-      <dialog ref={manageDlg} className="sheet" onClose={() => setManage(null)}>
+      <dialog ref={manageDlg} className={'sheet' + (manage?.id === 'google-calendar' ? ' wide' : '')} onClose={() => setManage(null)}>
         {manage && (
           <form method="dialog">
             <h2 style={{ fontWeight: 500, fontSize: 24 }}>{manage.name}</h2>
-            <p className="sub">{manage.label ? `Linked as ${manage.label}. ` : 'Linked. '}{manage.can.read || manage.can.send ? [manage.can.read && 'Niko can read it', manage.can.send && 'send after your approval'].filter(Boolean).join(' and ') + '.' : 'Saved, but Niko does not use it yet.'}</p>
+            <p className="sub">{manage.label && manage.id !== 'google-calendar' ? `Linked as ${manage.label}. ` : 'Linked. '}{manage.can.read || manage.can.send ? [manage.can.read && 'Niko can read it', manage.can.send && 'send after your approval'].filter(Boolean).join(' and ') + '.' : 'Saved, but Niko does not use it yet.'}</p>
             {manage.id === 'telegram-bot' && (
               <div className={'tg-note' + (manage.readsGroups ? ' ok' : '')}>
                 {manage.readsGroups
@@ -248,6 +248,7 @@ export function Connections() {
                 <button type="button" className="bt" onClick={refreshTelegram}>Check again</button>
               </div>
             )}
+            {manage.id === 'google-calendar' && <GoogleCalendars onChanged={() => void load()} />}
             <p className="sub">Removing it deletes its stored credentials straight away.</p>
             <div className="sheet-actions">
               <button className="sec">Close</button>
@@ -307,7 +308,8 @@ export function Connections() {
 // ---------------------------------------------------------------- calendar links (iCal): a list to add, change and remove
 // Each address is checked by reading it once before it is saved. A private address is never shown back in full: to
 // change it, paste the new one (left blank, the saved one is kept).
-const guessKind = (url: string): 'private' | 'public' | null => (/calendar\.google\.com\/calendar\/ical\/[^/]+\/public\//i.test(url) ? 'public' : /\/private-[^/]+\//i.test(url) ? 'private' : null);
+const isCalendarId = (v: string) => /^[^\s/:?]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(v.trim());
+const guessKind = (url: string): 'private' | 'public' | null => isCalendarId(url) ? 'public' : (/calendar\.google\.com\/calendar\/ical\/[^/]+\/public\//i.test(url) ? 'public' : /\/private-[^/]+\//i.test(url) ? 'private' : null);
 function CalendarLinks({ prov, onChanged, onClose }: { prov: Prov; onChanged: () => void; onClose: () => void }) {
   type Reply = { calendars: CalendarLink[]; limit: number };
   const [list, setList] = useState<CalendarLink[] | null>(null);
@@ -373,14 +375,15 @@ function CalendarLinks({ prov, onChanged, onClose }: { prov: Prov; onChanged: ()
           </details>
         )}
         <Field label="Name"><input className="in" maxLength={40} autoComplete="off" placeholder="Work, Family, Public holidays…" value={name} onChange={(e) => { setErr(''); setName(e.target.value); }} /></Field>
-        <Field label={isNew ? 'iCal address' : 'New iCal address · optional'}>
-          <input className="in" type="url" inputMode="url" autoComplete="off" spellCheck={false} required={isNew}
+        <Field label={isNew ? 'iCal address or Google calendar ID' : 'New iCal address or calendar ID · optional'}>
+          <input className="in" type="text" inputMode="url" autoComplete="off" spellCheck={false} required={isNew}
             placeholder={isNew ? 'https://calendar.google.com/calendar/ical/…/basic.ics' : editing.address}
             value={url} onChange={(e) => { setErr(''); setUrl(e.target.value); const g = guessKind(e.target.value); if (g) setKind(g); }} />
         </Field>
+        {isCalendarId(url) && <p className="sub cal-keep">A calendar ID works for public Google calendars. For a private one, paste its secret iCal address, or connect Google Calendar and switch it on there.</p>}
         {!isNew && <p className="sub cal-keep">{editing.kind === 'private' ? 'The saved address stays hidden. Leave this blank to keep it, or paste a new one to replace it.' : 'Leave this blank to keep the saved address.'}</p>}
         <div role="group" aria-label="Kind of calendar" className="cal-kind-pick">
-          <button type="button" className="seg" aria-pressed={kind === 'private'} onClick={() => setKind('private')}>Private</button>
+          <button type="button" className="seg" aria-pressed={kind === 'private'} onClick={() => setKind('private')} disabled={isCalendarId(url)}>Private</button>
           <button type="button" className="seg" aria-pressed={kind === 'public'} onClick={() => setKind('public')}>Public</button>
         </div>
         <p className="sub cal-keep">{kind === 'private' ? 'A secret address: stored encrypted and never shown in full again.' : 'A calendar anyone can subscribe to (holidays, a school, a club). Its address is shown in full.'}</p>
@@ -419,6 +422,45 @@ function CalendarLinks({ prov, onChanged, onClose }: { prov: Prov; onChanged: ()
         <button type="button" className="pri" onClick={() => open('new')} disabled={full}>Add calendar</button>
       </div>
     </form>
+  );
+}
+
+// ---------------------------------------------------------------- Google calendars: which ones Niko reads, after Google sign-in
+function GoogleCalendars({ onChanged }: { onChanged: () => void }) {
+  type GCal = { id: string; name: string; primary: boolean; role: string; on: boolean };
+  type Reply = { calendars: GCal[]; limit: number };
+  const [list, setList] = useState<GCal[] | null>(null);
+  const [limit, setLimit] = useState(20);
+  const [err, setErr] = useState('');
+  useEffect(() => { api<Reply>('/google-calendars').then((r) => { setList(r.calendars); setLimit(r.limit); }).catch((e) => setErr(e.message)); }, []);
+  const toggle = async (c: GCal, on: boolean) => {
+    if (!list) return;
+    setErr('');
+    const next = list.map((x) => (x.id === c.id ? { ...x, on } : x));
+    setList(next);
+    try { const r = await api<Reply>('/google-calendars', { method: 'PUT', body: { on: next.filter((x) => x.on).map((x) => x.id) } }); setList((l) => l && l.map((x) => ({ ...x, on: !!r.calendars.find((y) => y.id === x.id)?.on }))); onChanged(); }
+    catch (x: any) { setErr(x.message); setList(list); }
+  };
+  const count = list?.filter((x) => x.on).length ?? 0;
+  return (
+    <div className="gcal">
+      <div className="cal-top"><span className="k">Calendars Niko reads</span>{list && <span className="k cal-count">{count} of {limit}</span>}</div>
+      {!list && !err && <p className="sub">Asking Google…</p>}
+      {list && (
+        <div className="cal-list">
+          {list.map((c) => (
+            <div key={c.id} className={'cal-row' + (c.on ? '' : ' off')}>
+              <b className="cal-name">{c.name}</b>
+              <span className="cal-meta"><span className="cal-tag">{c.primary ? 'Main' : c.role}</span></span>
+              <Switch on={c.on} onChange={(v) => toggle(c, v)} label={`Read ${c.name}`} disabled={!c.on && count >= limit} />
+            </div>
+          ))}
+        </div>
+      )}
+      {list && !list.length && <p className="sub">Google lists no calendars on this account.</p>}
+      {err && <p className="err" role="alert">{err}</p>}
+      {list && <p className="sub cal-keep">Your own, shared and subscribed calendars on this Google account. “Busy times only” calendars show as Busy, without titles.</p>}
+    </div>
   );
 }
 

@@ -14,12 +14,12 @@ import { NOT_ON_ACCOUNT, offFor } from '../access';
 import { diffGlance, limitsFor } from '../glance';
 import { Declined, defaultImageLabel, serverKey, IMAGE_PROVIDERS_LIST, imageKeyInfo, imageKeyProblem, loadImageKeys, MAX_PROMPT, paint, saveImageKeys, type ImageKey } from '../images';
 import { defaultVoiceLabel, listVoices, loadVoiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
-import { calendarsOf, calendarsSecret, cleanCalName, icalCheckOne, newCalId, normalizeLink, shownCalendars, type Cal } from '../calendarlink';
+import { calendarIdLink, calendarsOf, calendarsSecret, cleanCalName, icalCheckOne, newCalId, normalizeLink, shownCalendars, type Cal } from '../calendarlink';
 import { accountLimitsFor } from '../limits';
 import { IMAP_PROVIDERS, imapCheck, isImapProvider } from '../mailbox';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
-  telegramSetWebhook, type AppKeys,
+  telegramSetWebhook, type AppKeys, api as providerApi, googleCals,
 } from '../providers';
 
 export const app = new Hono<AppEnv>();
@@ -290,9 +290,16 @@ async function saveCals(c: { env: Env; get: (k: 'db' | 'user') => any }, conn: {
   if (conn) await db.update(connections).set({ secretEnc, meta }).where(eq(connections.id, conn.id));
   else await db.insert(connections).values({ id: crypto.randomUUID(), userId: u.id, provider: 'ical', secretEnc, meta });
 }
+/** A calendar ID that Google won't serve is a private calendar: say what works instead. */
+const idProblem = (e: unknown, fromId?: boolean) => (fromId && /no longer exists|isn’t public|answered 40[34]/.test((e as Error).message)
+  ? 'Google didn’t share a calendar with that ID. A calendar ID works only for public calendars: for a private one, paste its “Secret address in iCal format”, or connect Google Calendar and switch it on there.'
+  : (e as Error).message);
 const calReply = (list: Cal[], limit: number) => ({ calendars: shownCalendars(list), limit });
 /** A pasted address, made readable and checked as a public https address; or why not. */
-function calAddress(raw: unknown): { url?: string; error?: string } {
+function calAddress(raw: unknown): { url?: string; error?: string; fromId?: boolean } {
+  // A Google calendar ID is read through Google's public address for it (only public calendars answer there).
+  const byId = calendarIdLink(raw);
+  if (byId) return { url: byId, fromId: true };
   const url = normalizeLink(typeof raw === 'string' ? raw.slice(0, 2000) : '');
   if (!url) return { error: 'Paste the calendar’s iCal address (it usually ends in .ics).' };
   if (!publicHttpsUrl(url)) return { error: 'The calendar address must be a public https address.' };
@@ -309,12 +316,12 @@ app.post('/calendars', async (c) => {
   const { conn, list, limit } = await loadCals(c);
   if (list.length >= limit) return c.json({ error: `You can keep up to ${limit} ${limit === 1 ? 'calendar' : 'calendars'}. Remove one to add another.` }, 400);
   const name = cleanCalName(b.name) || `Calendar ${list.length + 1}`;
-  const { url, error } = calAddress(b.url);
+  const { url, error, fromId } = calAddress(b.url);
   if (!url) return c.json({ error }, 400);
   const twin = list.find((x) => x.url === url);
   if (twin) return c.json({ error: `That calendar is already in your list, as “${twin.name}”.` }, 400);
-  try { await icalCheckOne(url, name); } catch (e) { return c.json({ error: (e as Error).message }, 400); }
-  const cal: Cal = { id: newCalId(), name, url, kind: b.kind === 'public' ? 'public' : 'private', on: true };
+  try { await icalCheckOne(url, name); } catch (e) { return c.json({ error: idProblem(e, fromId) }, 400); }
+  const cal: Cal = { id: newCalId(), name, url, kind: fromId || b.kind === 'public' ? 'public' : 'private', on: true };
   await saveCals(c, conn, [...list, cal]);
   await audit(c, 'calendar.added', { kind: cal.kind }, u.id);
   return c.json(calReply([...list, cal], limit));
@@ -334,14 +341,15 @@ app.patch('/calendars/:id', async (c) => {
     cal.on = b.on;
   }
   if (typeof b.url === 'string' && b.url.trim()) {
-    const { url, error } = calAddress(b.url);
+    const { url, error, fromId } = calAddress(b.url);
     if (!url) return c.json({ error }, 400);
     const twin = list.find((x) => x.url === url && x.id !== cal.id);
     if (twin) return c.json({ error: `That calendar is already in your list, as “${twin.name}”.` }, 400);
     if (url !== cal.url) {
       if (await tooMany(c, 'cal:' + u.id, 30, 15)) return c.json({ error: 'Too many calendar checks just now. Try again in a few minutes.' }, 429);
-      try { await icalCheckOne(url, cal.name); } catch (e) { return c.json({ error: (e as Error).message }, 400); }
+      try { await icalCheckOne(url, cal.name); } catch (e) { return c.json({ error: idProblem(e, fromId) }, 400); }
       cal.url = url;
+      if (fromId) cal.kind = 'public';
     }
   }
   const next = list.map((x, j) => (j === i ? cal : x));
@@ -356,6 +364,48 @@ app.delete('/calendars/:id', async (c) => {
   await saveCals(c, conn, next);
   await audit(c, 'calendar.removed', {}, c.get('user').id);
   return c.json(calReply(next, limit));
+});
+
+// ---------------------------------------------------------------- Google calendars (after Google sign-in)
+// The calendars on the signed-in Google account (own, shared, subscribed), each with a switch. Read live from Google;
+// the choice is kept in the connection's encrypted secret. Nothing chosen yet means the main calendar only.
+const ROLE: Record<string, string> = { owner: 'Yours', writer: 'Can edit', reader: 'Shared with you', freeBusyReader: 'Busy times only' };
+async function googleCalendarList(c: { env: Env; get: (k: 'db' | 'user') => any }) {
+  const s = await credentials(c.env, c.get('db'), c.get('user').id, 'google-calendar');
+  if (!s?.accessToken) return null;
+  const j = await providerApi('https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=250&showHidden=false', s.accessToken);
+  return { s, items: ((j.items ?? []) as any[]).filter((x) => typeof x?.id === 'string' && !x.deleted).map((x) => ({ id: x.primary ? 'primary' : String(x.id), name: String(x.summaryOverride || x.summary || x.id).slice(0, 60), primary: !!x.primary, role: ROLE[x.accessRole] ?? 'Shared with you' })) };
+}
+app.get('/google-calendars', async (c) => {
+  try {
+    const r = await googleCalendarList(c);
+    if (!r) return c.json({ error: 'Connect Google Calendar first.' }, 400);
+    const on = new Set(googleCals(r.s).filter((x) => x.on).map((x) => x.id));
+    const limit = (await accountLimitsFor(c.get('db'), c.get('user'))).calendars;
+    return c.json({ calendars: r.items.map((x) => ({ ...x, on: on.has(x.id) })).sort((a, b) => Number(b.primary) - Number(a.primary) || Number(b.on) - Number(a.on) || a.name.localeCompare(b.name)), limit });
+  } catch (e) { return c.json({ error: 'Google didn’t list your calendars just now. Try again in a moment, or sign in to Google Calendar again.' }, 502); }
+});
+app.put('/google-calendars', async (c) => {
+  const b = await c.req.json<{ on?: unknown }>().catch(() => ({} as { on?: unknown }));
+  const want = new Set(Array.isArray(b.on) ? b.on.filter((x): x is string => typeof x === 'string').slice(0, 300) : []);
+  try {
+    const r = await googleCalendarList(c);
+    if (!r) return c.json({ error: 'Connect Google Calendar first.' }, 400);
+    const limit = (await accountLimitsFor(c.get('db'), c.get('user'))).calendars;
+    // Only calendars that are really on this Google account can be chosen; names come from Google, not the browser.
+    const chosen = r.items.filter((x) => want.has(x.id));
+    if (chosen.length > limit) return c.json({ error: `You can read up to ${limit} Google ${limit === 1 ? 'calendar' : 'calendars'}. Switch another off first.` }, 400);
+    const conn = await getConnection(c.get('db'), c.get('user').id, 'google-calendar');
+    if (!conn) return c.json({ error: 'Connect Google Calendar first.' }, 400);
+    // Re-read just before writing, so a token refreshed meanwhile is kept.
+    const fresh = (await unseal<Record<string, unknown>>(c.env.ENCRYPTION_KEY, conn.secretEnc)) ?? {};
+    fresh.cals = JSON.stringify(chosen.map((x) => ({ id: x.id, name: x.name, on: true })));
+    await c.get('db').update(connections).set({ secretEnc: await seal(c.env.ENCRYPTION_KEY, fresh), meta: { ...(conn.meta as object ?? {}), label: `${chosen.length} ${chosen.length === 1 ? 'calendar' : 'calendars'}` }, updatedAt: new Date() }).where(eq(connections.id, conn.id));
+    forgetChatBrief(c.get('user').id);
+    await audit(c, 'google_calendars.changed', { count: chosen.length }, c.get('user').id);
+    const on = new Set(chosen.map((x) => x.id));
+    return c.json({ calendars: r.items.map((x) => ({ ...x, on: on.has(x.id) })), limit });
+  } catch { return c.json({ error: 'Google didn’t answer just now. Try again in a moment.' }, 502); }
 });
 
 app.delete('/connections/:provider', async (c) => {
@@ -396,6 +446,12 @@ export async function oauthCallback(c: import('hono').Context<AppEnv>) {
   if (!cfg) return back(false);
   try {
     const { secret, meta } = await exchangeCode(cfg, code, `${url.origin}/api/oauth/callback`);
+    // Signing in again keeps which Google calendars were chosen.
+    if (row.provider === 'google-calendar') {
+      const prior = await getConnection(db, row.userId, row.provider);
+      const old = prior ? await unseal<Record<string, unknown>>(c.env.ENCRYPTION_KEY, prior.secretEnc).catch(() => null) : null;
+      if (typeof old?.cals === 'string') { (secret as unknown as Record<string, unknown>).cals = old.cals; meta.label = (prior!.meta as Record<string, unknown>)?.label; }
+    }
     await db.delete(connections).where(and(eq(connections.userId, row.userId), eq(connections.provider, row.provider)));
     await db.insert(connections).values({ userId: row.userId, provider: row.provider, secretEnc: await seal(c.env.ENCRYPTION_KEY, secret), meta });
     await audit(c, 'connection.linked', { provider: row.provider }, row.userId);

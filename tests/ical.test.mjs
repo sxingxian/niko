@@ -1,4 +1,5 @@
-import { icalList, icalDetail, icalCheck, icalCheckOne, icalLinks, normalizeLink, forgetIcsCopies, calendarsOf, calendarsSecret, shownCalendars, kindOf, cleanCalName, newCalId } from '../apps/api/src/calendarlink.ts';
+import { icalList, icalDetail, icalCheck, icalCheckOne, icalLinks, normalizeLink, forgetIcsCopies, calendarsOf, calendarsSecret, shownCalendars, kindOf, cleanCalName, newCalId, calendarIdLink } from '../apps/api/src/calendarlink.ts';
+import { googleCals, googleEventId, splitGoogleEventId } from '../apps/api/src/providers.ts';
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 const ICS = [
 'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Google Inc//Google Calendar 70.9054//EN',
@@ -110,6 +111,16 @@ try { await icalList({ url: 'https://outlook.live.com/owa/calendar/0/gone/cid-1/
   try { await icalCheckOne('https://example.com/missing.ics', 'Gym'); ok(false, 'dead accepted'); } catch (e) { ok(/“Gym” calendar address no longer works/.test(e.message) && !/https?:/.test(e.message), 'a failing check names the calendar and never repeats the address: ' + e.message); }
   ok(calendarsOf({ cals: JSON.stringify(Array.from({ length: 80 }, (_, i) => ({ id: 'c' + i, name: 'C', url: `https://example.com/${i}.ics` }))) }).length === 50, 'never more than 50 are read from storage');
 }
+
+// ---- Calendar IDs and Google calendars
+ok(calendarIdLink('en.singapore#holiday@group.v.calendar.google.com') === 'https://calendar.google.com/calendar/ical/en.singapore%23holiday%40group.v.calendar.google.com/public/basic.ics', 'a Google calendar ID becomes its public iCal address');
+ok(calendarIdLink('abc123@group.calendar.google.com')?.endsWith('/abc123%40group.calendar.google.com/public/basic.ics'), 'a group calendar ID works too');
+ok([URL1, 'not an id', 'a b@c.com', 'x@localhost', 'https://x@y.com/a.ics', ''].every((v) => calendarIdLink(v) === null), 'addresses, spaces and odd values are not taken as IDs');
+ok(googleCals(null).length === 1 && googleCals({}).map((c) => c.id + c.on).join() === 'primarytrue', 'with nothing chosen, the main Google calendar is read, as before');
+const gc = googleCals({ cals: JSON.stringify([{ id: 'primary', name: 'Me', on: true }, { id: 'team@group.calendar.google.com', name: 'Team' }, { id: 'bad|id', name: 'x' }, { id: 'a b', name: 'y' }]) });
+ok(gc.map((c) => c.id).join() === 'primary,team@group.calendar.google.com', 'chosen Google calendars are read back; ids with | or spaces are dropped');
+ok(googleEventId('primary', 'e1') === 'e1' && googleEventId('team@x', 'e2') === 'team@x|e2', 'main-calendar event ids stay the same; others carry their calendar');
+ok(splitGoogleEventId('team@x|e2').cal === 'team@x' && splitGoogleEventId('e1').cal === 'primary', 'event ids split back into calendar and event');
 
 // ---- Rate limits: read each feed at most every 10 minutes, keep the last good copy, back off when told to
 {

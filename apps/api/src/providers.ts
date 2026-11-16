@@ -5,7 +5,7 @@ import { and, eq } from 'drizzle-orm';
 import { connections, providerApps, users, type Db } from '@niko/db';
 import { PROVIDERS, type AppId, type EventItem, type MailItem, type NoteItem } from '@niko/shared';
 import { notionDeleted, notionTitle } from './details';
-import { icalList } from './calendarlink';
+import { icalList, pool } from './calendarlink';
 import { accountLimitsFor } from './limits';
 import { imapList, imapReply, isImapProvider } from './mailbox';
 import type { Env } from './env';
@@ -152,6 +152,24 @@ export async function listMail(env: Env, db: Db, userId: string, provider: strin
   return [];
 }
 
+// ---- Which Google calendars are read
+// Chosen after Google sign-in, from the account's own calendar list; kept in the connection's encrypted secret (the IDs
+// of shared calendars are often other people's email addresses). Nothing chosen yet: the main calendar only, as before.
+// The main calendar is always stored as 'primary', so its event ids stay the same.
+export interface GoogleCal { id: string; name: string; on: boolean }
+export function googleCals(s: Record<string, any> | null | undefined): GoogleCal[] {
+  let raw: unknown = null;
+  try { raw = typeof s?.cals === 'string' ? JSON.parse(s.cals) : null; } catch { raw = null; }
+  if (!Array.isArray(raw)) return [{ id: 'primary', name: 'Google', on: true }];
+  return raw.flatMap((c: any) => (c && typeof c.id === 'string' && c.id.length <= 300 && !/[\s|]/.test(c.id) ? [{ id: c.id, name: String(c.name ?? '').slice(0, 60) || 'Google', on: c.on !== false }] : [])).slice(0, 50);
+}
+/** An event id carries its calendar, except for the main calendar (so older ids keep working). */
+export const googleEventId = (cal: string, id: string) => (cal === 'primary' ? id : `${cal}|${id}`);
+export function splitGoogleEventId(id: string): { cal: string; id: string } {
+  const i = id.lastIndexOf('|');
+  return i < 0 ? { cal: 'primary', id } : { cal: id.slice(0, i), id: id.slice(i + 1) };
+}
+
 export async function listEvents(env: Env, db: Db, userId: string, provider: string, dayStart: Date, dayEnd: Date, tzOffsetMin = 0): Promise<EventItem[]> {
   const s = await credentials(env, db, userId, provider);
   if (!s) return [];
@@ -160,11 +178,19 @@ export async function listEvents(env: Env, db: Db, userId: string, provider: str
     return icalList(s, dayStart, dayEnd, tzOffsetMin, (await accountLimitsFor(db, row ?? {})).calendars);
   }
   if (provider === 'google-calendar') {
-    const u = new URL('https://www.googleapis.com/calendar/v3/calendars/primary/events');
-    u.searchParams.set('timeMin', dayStart.toISOString()); u.searchParams.set('timeMax', dayEnd.toISOString());
-    u.searchParams.set('singleEvents', 'true'); u.searchParams.set('orderBy', 'startTime'); u.searchParams.set('maxResults', String(LIST_MAX));
-    const j = await api(u.toString(), s.accessToken);
-    return (j.items ?? []).filter((e: any) => e.status !== 'cancelled').map((e: any) => ({ id: String(e.id), provider, title: e.summary ?? '(no title)', source: 'Google', start: Date.parse(e.start?.dateTime ?? e.start?.date), time: '' }));
+    const row = (await db.select({ accountLimits: users.accountLimits }).from(users).where(eq(users.id, userId)).limit(1))[0];
+    const cals = googleCals(s).filter((c) => c.on).slice(0, (await accountLimitsFor(db, row ?? {})).calendars);
+    // One calendar failing (unshared since, a hiccup) must not hide the others.
+    const lists = await pool(cals, 6, async (cal) => {
+      const u = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal.id)}/events`);
+      u.searchParams.set('timeMin', dayStart.toISOString()); u.searchParams.set('timeMax', dayEnd.toISOString());
+      u.searchParams.set('singleEvents', 'true'); u.searchParams.set('orderBy', 'startTime'); u.searchParams.set('maxResults', String(LIST_MAX));
+      const j = await api(u.toString(), s.accessToken);
+      return (j.items ?? []).filter((e: any) => e.status !== 'cancelled').map((e: any) => ({ id: googleEventId(cal.id, String(e.id)), provider, title: e.summary ?? (cal.id === 'primary' ? '(no title)' : 'Busy'), source: cal.name, start: Date.parse(e.start?.dateTime ?? e.start?.date), time: '', allDay: !e.start?.dateTime } as EventItem));
+    });
+    const failed = lists.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (cals.length && failed.length === cals.length) throw failed[0]!.reason;
+    return lists.flatMap((r) => (r.status === 'fulfilled' ? r.value : [])).sort((a, b) => a.start - b.start).slice(0, 100);
   }
   if (provider === 'outlook-calendar') {
     const u = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${dayStart.toISOString()}&endDateTime=${dayEnd.toISOString()}&$top=${LIST_MAX}&$select=id,subject,start,isCancelled&$orderby=start/dateTime`;

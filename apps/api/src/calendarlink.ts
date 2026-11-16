@@ -70,8 +70,15 @@ export function shownAddress(c: Pick<Cal, 'url' | 'kind'>): string {
 export const shownCalendars = (list: Cal[]): CalendarLink[] => list.map((c) => ({ id: c.id, name: c.name, kind: c.kind, on: c.on, address: shownAddress(c) }));
 /** The addresses that are switched on (older callers and tests). */
 export const icalLinks = (s: Record<string, string>): string[] => calendarsOf(s).filter((c) => c.on).map((c) => c.url);
+/** A bare Google calendar ID (abc@group.calendar.google.com, en.singapore#holiday@group.v.calendar.google.com) as the
+ *  public iCal address Google serves for it. Only public calendars answer there. Anything else: null. */
+export function calendarIdLink(raw: unknown): string | null {
+  const v = String(raw ?? '').trim();
+  if (v.length > 300 || !/^[^\s/:?]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(v)) return null;
+  return `https://calendar.google.com/calendar/ical/${encodeURIComponent(v)}/public/basic.ics`;
+}
 /** Runs at most `n` at a time: a Worker may hold only a few outgoing connections open at once. */
-async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Promise<PromiseSettledResult<R>[]> {
+export async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Promise<PromiseSettledResult<R>[]> {
   const out: PromiseSettledResult<R>[] = new Array(items.length);
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
