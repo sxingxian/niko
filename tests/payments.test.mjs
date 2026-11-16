@@ -19,15 +19,29 @@ function pgBin() {
   for (const v of readdirSync(root).sort((a, b) => Number(b) - Number(a))) if (existsSync(join(root, v, 'bin', 'initdb'))) return join(root, v, 'bin');
   return null;
 }
+// On GitHub's runners PostgreSQL works, so there the test must run and a setup problem fails the check.
+// Elsewhere (Cloudflare's build machine, a laptop) PostgreSQL may be missing or unable to start; the test is
+// skipped there with the reason, so a release is never blocked by the build machine rather than by the code.
+const required = process.env.GITHUB_ACTIONS === 'true' || process.env.REQUIRE_PG_TEST === '1';
+const skip = (why) => {
+  if (required) { console.log(`FAIL payments test: ${why}`); process.exit(1); }
+  console.log(`SKIP payments test: ${why}`);
+  process.exit(0);
+};
 const bin = pgBin();
-if (!bin) { console.log('SKIP payments test: PostgreSQL (initdb) is not installed here'); process.exit(0); }
+if (!bin) skip('PostgreSQL (initdb) is not installed here');
 const asRoot = process.getuid?.() === 0;
 const dir = mkdtempSync(join(tmpdir(), 'niko-pg-'));
-if (asRoot) execFileSync('chown', ['-R', 'postgres', dir]);
 const run = (tool, args) => execFileSync(asRoot ? 'runuser' : join(bin, tool), asRoot ? ['-u', 'postgres', '--', join(bin, tool), ...args] : args, { stdio: 'pipe' });
 const port = 20000 + Math.floor(Math.random() * 20000);
-run('initdb', ['-D', join(dir, 'data'), '-A', 'trust', '-U', 'niko', '--no-sync']);
-run('pg_ctl', ['-D', join(dir, 'data'), '-o', `-p ${port} -k ${dir} -c listen_addresses=127.0.0.1 -c fsync=off`, '-w', '-l', join(dir, 'log'), 'start']);
+try {
+  if (asRoot) execFileSync('chown', ['-R', 'postgres', dir], { stdio: 'pipe' });
+  run('initdb', ['-D', join(dir, 'data'), '-A', 'trust', '-U', 'niko', '--no-sync']);
+  run('pg_ctl', ['-D', join(dir, 'data'), '-o', `-p ${port} -k ${dir} -c listen_addresses=127.0.0.1 -c fsync=off`, '-w', '-l', join(dir, 'log'), 'start']);
+} catch (e) {
+  rmSync(dir, { recursive: true, force: true });
+  skip(`a temporary PostgreSQL could not be started here (${String(e?.stderr || e?.message || e).trim().split('\n')[0].slice(0, 200)})`);
+}
 const url = `postgresql://niko@127.0.0.1:${port}/postgres`;
 const sqlc = new pg.Client({ connectionString: url });
 await sqlc.connect();
