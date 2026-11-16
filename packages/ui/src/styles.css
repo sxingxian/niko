@@ -98,7 +98,10 @@ html { -webkit-tap-highlight-color: transparent; }
 /* ---- screen transitions: holographic, in the spirit of a heads-up display ------------------------- */
 /* Only opacity and transform move, so the browser can run every frame on the graphics chip without
    repainting the page; the HUD look comes from the sweep overlay drawn on top. */
-.route { height: 100%; }
+.route { height: 100%; height: 100dvh; }
+/* 100dvh, not 100%: on a phone, once the address bar has slid away (after scrolling a settings page), 100% is still
+   the shorter screen, which left a dark band under Home. The dynamic height always matches the visible screen.
+   It matters most while a screen builds in: its scale animation makes it the box the fixed background fills. */
 .hud-in { animation: hudScreen .42s cubic-bezier(.22,1,.36,1) backwards; }
 @keyframes hudScreen { 0% { opacity: 0; transform: scale(.985); } 100% { opacity: 1; transform: none; } }
 /* The screen being left fades out quickly before the next one builds in. */
