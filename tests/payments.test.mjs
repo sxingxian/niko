@@ -87,7 +87,7 @@ globalThis.fetch = async (input, init = {}) => {
     const id = `we_${call.mode}_${++seq}`;
     const secret = `whsec_made_${call.mode}_${seq}`;
     made[call.mode] = secret;
-    endpoints.set(id, { id, url: call.p.url, mode: call.mode, events: Object.entries(call.p).filter(([k]) => k.startsWith('enabled_events')).map(([, v]) => v) });
+    endpoints.set(id, { id, url: call.p.url, mode: call.mode, metadata: { niko: call.p['metadata[niko]'] }, events: Object.entries(call.p).filter(([k]) => k.startsWith('enabled_events')).map(([, v]) => v) });
     return Response.json({ id, secret, url: call.p.url });
   }
   if (method === 'POST' && path === '/billing_portal/configurations') return Response.json({ id: `bpc_${call.mode}` });
@@ -173,10 +173,13 @@ await ok('nothing set up in Stripe: Connect has Niko make the webhook and billin
   const ep = [...endpoints.values()].find((e) => e.mode === 'test');
   assert.equal(ep.url, `${ORIGIN}/api/hooks/stripe`);
   assert.deepEqual(ep.events.sort(), ['checkout.session.async_payment_succeeded', 'checkout.session.completed', 'customer.subscription.created', 'customer.subscription.deleted', 'customer.subscription.updated', 'invoice.paid', 'invoice.payment_failed']);
-  // Pressed again: the old endpoint is replaced, not doubled.
+  // Pressed again (also after one made on the other domain): Niko's old endpoints are replaced, not doubled.
+  endpoints.set('we_other', { id: 'we_other', url: 'https://niko.midnightpoetry.studio/api/hooks/stripe', mode: 'test', metadata: { niko: 'true' }, events: [] });
+  endpoints.set('we_theirs', { id: 'we_theirs', url: 'https://example.com/hook', mode: 'test', metadata: {}, events: [] });
   r = await admin.post('/admin/payments/connect', { mode: 'test' });
   assert.equal(r.status, 200);
-  assert.equal([...endpoints.values()].filter((e) => e.mode === 'test').length, 1);
+  assert.deepEqual([...endpoints.values()].filter((e) => e.mode === 'test').map((e) => e.id).filter((id) => id !== 'we_theirs').length, 1);
+  assert.ok(endpoints.has('we_theirs'), 'endpoints Niko didn’t make are left alone');
   r = await admin.post('/admin/payments/connect', { mode: 'live' });
   assert.equal(r.status, 200); assert.equal(r.data.chargesEnabled, false, 'live account not yet activated is reported');
   const row = (await q(`select value from app_settings where key = 'stripe-connect'`))[0].value;

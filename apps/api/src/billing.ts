@@ -5,7 +5,7 @@ import {
   accessState, addMonths, CODE_ALPHABET, cleanPayments, lengthLabel, money, plansOffered, UNPAID_SIGNUP_DAYS,
   type AccessInfo, type PaymentSettings, type Plan,
 } from '@niko/shared';
-import type { Env } from './env';
+import { ALLOWED_HOSTS, type Env } from './env';
 import { randomChars, seal, sha256, unseal } from './lib/crypto';
 import { esc, sendEmail } from './lib/email';
 import { idOf, invoiceSubscription, isMode, keysFor, periodEnd, planOf, stripe, StripeError, stripeReady, type StripeEnv, type StripeMode, type StripeSecrets } from './stripe';
@@ -72,6 +72,8 @@ export async function payNow(env: Env, db: Db): Promise<{ mode: StripeMode; keys
 /** The secret key for something made in a given mode (an invite's payment, a plan); test when unknown. */
 export const keysOf = (env: Env, mode: string | null | undefined) => keysFor(env, isMode(mode) ? mode : 'test');
 
+/** Where Stripe sends webhooks: the main domain for both Niko domains; local and preview addresses keep their own. */
+export const hookOrigin = (origin: string) => (ALLOWED_HOSTS.includes(new URL(origin).hostname) ? 'https://niko.sxingxian.com' : origin);
 const HOOK_EVENTS = ['checkout.session.completed', 'checkout.session.async_payment_succeeded', 'customer.subscription.created', 'customer.subscription.updated', 'customer.subscription.deleted', 'invoice.paid', 'invoice.payment_failed'];
 /** Sets up a Stripe mode for Niko: checks the key, then (re)creates Niko's webhook endpoint and billing page settings.
  * Safe to run again; an older Niko endpoint at the same address is replaced. */
@@ -84,9 +86,11 @@ export async function connectStripe(env: Env, db: Db, mode: StripeMode, origin: 
     account = String(a.business_profile?.name || a.settings?.dashboard?.display_name || a.email || a.id || '');
     chargesEnabled = typeof a.charges_enabled === 'boolean' ? a.charges_enabled : null;
   } catch (e) { if ((e as StripeError).status === 401) throw new StripeError(`Stripe didn’t accept the ${mode} secret key. Copy it again from Stripe → Developers → API keys.`, 400); }
-  const url = `${origin}/api/hooks/stripe`;
+  // One endpoint for both domains (they share the database), always at the main address, whichever domain the admin
+  // pressed Connect on. Any endpoint Niko made before (at either address) is replaced, so only one secret is ever live.
+  const url = `${hookOrigin(origin)}/api/hooks/stripe`;
   const list = await stripe(keys, 'GET', '/webhook_endpoints', { limit: 100 });
-  for (const ep of list.data ?? []) if (ep.url === url) await stripe(keys, 'DELETE', `/webhook_endpoints/${ep.id}`);
+  for (const ep of list.data ?? []) if (ep.url === url || ep.metadata?.niko === 'true') await stripe(keys, 'DELETE', `/webhook_endpoints/${ep.id}`);
   const ep = await stripe(keys, 'POST', '/webhook_endpoints', { url, enabled_events: HOOK_EVENTS, description: 'Niko (made by Niko; do not edit)', metadata: { niko: 'true' } });
   const portal = await stripe(keys, 'POST', '/billing_portal/configurations', {
     business_profile: { headline: 'Niko · manage your plan' },

@@ -48,7 +48,7 @@ Niko sends invitations (with the 6-character invite code), sign-up email codes, 
 People pay once for a set time (12 months by default), and when that time ends they choose a monthly or yearly plan to keep going. Card and PayNow details are typed on Stripe's own Checkout page and never reach Niko.
 
 **Nothing is set up by hand in Stripe.** You don't create products, prices, webhooks or billing-page settings there. Niko sends each price with each payment, and **Admin → Payments → Connect** has Niko create what it needs in your Stripe account through Stripe's API:
-- a webhook endpoint at `https://<your admin address>/api/hooks/stripe`, with its signing secret kept in Niko's database, encrypted;
+- one webhook endpoint for both domains, always at `https://niko.sxingxian.com/api/hooks/stripe` (whichever domain you press Connect on), with its signing secret kept in Niko's database, encrypted;
 - the billing-page settings people use from Account → Billing (change card, receipts, cancel at the end of the period);
 - one product per kind of purchase ("Niko · 1 year of access", "Niko · monthly plan", "Niko · yearly plan"), made the first time it's needed.
 
@@ -60,6 +60,8 @@ The one thing you copy from Stripe is each mode's **secret key**, because Niko c
 4. Run the payment checks in section 6 in **Test**, then press **Live** and confirm.
 
 Payment methods: cards (and Apple Pay / Google Pay) work as Stripe accounts come. PayNow appears on the one-time payment by itself if it's on in your Stripe account's payment methods. Stripe doesn't support PayNow for monthly or yearly plans. Failed renewals: Stripe retries the card on its usual schedule, and Niko emails the person itself and keeps access for the grace days you set (7 by default).
+
+**Two domains, one Stripe account.** Both domains share the database, so they share one Stripe account, one set of keys and one webhook. Connect works from either admin address. Each person pays and returns on the domain they started on (invite links point to the domain the invite was sent from), because sign-in and the invite's code check are kept per domain. Stripe needs no list of your domains: Checkout and the billing page are on Stripe's own site.
 
 **Going live needs an activated Stripe account.** Stripe asks for your business and bank details once, when you open the account; that's Stripe's sign-up, not setup for Niko. Connect warns you if the live account can't take payments yet.
 
