@@ -9,6 +9,7 @@ import { useNiko } from '../niko';
 import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
 import { isStacked } from '../flow';
 import { PictureCard } from './Picture';
+import { GlanceStack } from './Glance';
 import type { Brief, BriefPart, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
 
 // The mockups' rail: Home, Inbox, Calendar, Notes, Connections. Settings (appearance, engine, account) sit behind the last button.
@@ -166,6 +167,7 @@ export function Home() {
         <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : n.me?.engine.brain === 'self-hosted-ai' ? 'Your model' : 'Workers AI'} · {voiceName(firstVoice(n.me))}</span><span className="short">Engine</span></Link>
       </div>
       <Dock className={'dock' + (nav ? ' show' : '')} />
+      <GlanceStack wide={wide} />
       {wide && !pic && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}
       {pic ? (
         <aside className="panels pic" aria-label="Niko’s picture" key="picture">

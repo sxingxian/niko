@@ -20,6 +20,8 @@ export const users = pgTable('users', {
   permissions: jsonb('permissions').notNull().default({}).$type<Record<string, unknown>>(),
   /** This account's changes to the admin's default AI options ({ option: on }). Set by an admin only. */
   aiAccess: jsonb('ai_access').notNull().default({}).$type<Record<string, boolean>>(),
+  /** This account's changes to the admin's default limits for new items on Home. Set by an admin only. */
+  glanceLimits: jsonb('glance_limits').notNull().default({}).$type<Record<string, unknown>>(),
   createdAt: ts('created_at').notNull().defaultNow(),
   lastActiveAt: ts('last_active_at'),
 });
@@ -178,3 +180,12 @@ export function createDb(databaseUrl: string) {
 }
 export type Db = ReturnType<typeof createDb>;
 export type User = typeof users.$inferSelect;
+
+/** New items on Home: per account, when each kind was last checked, what has been shown, and the next few events. */
+export const glanceState = pgTable('glance_state', {
+  userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  checked: jsonb('checked').notNull().default({}).$type<Record<string, number>>(),
+  seen: jsonb('seen').notNull().default({}).$type<Record<string, number>>(),
+  upcoming: jsonb('upcoming').notNull().default([]).$type<{ id: string; provider: string; title: string; start: number; source: string }[]>(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});

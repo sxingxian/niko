@@ -39,6 +39,10 @@ interface NikoState {
   dismissReply: () => void;
   /** A page (the workspace) can claim "send it" / "cancel". Returns true when it handled the phrase. */
   setCommandHandler: (fn: ((phrase: string, quiet?: boolean) => boolean) | null) => void;
+  /** New items on Home claim "open it", "reply" and "dismiss" while one is showing; asked before the page's own. */
+  setGlanceHandler: (fn: ((phrase: string) => boolean) | null) => void;
+  /** Opens one item on Inbox, Calendar or Notes (as the AI's [[item:…]] does). */
+  openItem: (view: 'inbox' | 'calendar' | 'notes', title: string) => void;
   say: (text: string) => void;
   setStatus: (label: string, line: string, mode?: CoreMode) => void;
   /** Back to the resting label and line ("Standing by"). */
@@ -123,6 +127,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [micOn, setMicOn] = useState(false);
   const navigate = useNavigate();
   const handler = useRef<((p: string, quiet?: boolean) => boolean) | null>(null);
+  const glanceHandler = useRef<((p: string) => boolean) | null>(null);
   const rec = useRef<any>(null);
   const active = useRef(false); // true after the mic button: the next phrase is a command even without "Niko"
   const meRef = useRef<Me | null>(null);
@@ -358,7 +363,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     }
     setReply(null);
     // 1. Phrases a page has claimed (send it / cancel).
-    if (handler.current?.(lower)) return;
+    if (glanceHandler.current?.(lower) || handler.current?.(lower)) return;
     // 2. Scrolling: "scroll down", "page up", "back to the top", "keep scrolling".
     const way = scrollRequest(text);
     if (way) {
@@ -540,6 +545,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     me, refreshMe, mode, label, line, reply, brief, micOn, voiceSupported: !!SR || (hearsFor(me).length > 0 && captureSupported()), toggleMic, stop, ask,
     dismissReply: () => setReply(null),
     setCommandHandler: (fn) => { handler.current = fn; },
+    setGlanceHandler: (fn) => { glanceHandler.current = fn; },
+    openItem: (view, title) => { setReply(null); setPictureId(null); setPendingOpen({ view, title, at: Date.now() }); navigate('/' + view); },
     say,
     setStatus: (l, t, m) => { setLabel(l); setLine(t); if (m) setMode(m); },
     rest: idle,

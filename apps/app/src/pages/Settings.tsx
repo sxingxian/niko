@@ -5,6 +5,7 @@ import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSp
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { AI_PRESETS, aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, presetOf, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
+import { cleanGlancePrefs, GLANCE_LIMIT_DEFAULTS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_REMIND_STEPS, GLANCE_STEPS, glanceEvery, type GlancePart, type GlancePrefs } from '@niko/shared';
 import { AI_OPTION_GROUPS, aiAllowed, brainOption, hearOption, imageOption, voiceOption } from '@niko/shared';
 import { IMAGE_PROVIDERS, imageOrder, imagePresetOf, MAX_IMAGE_KEYS, type ImageKeyInfo, type ImageProvider, type ImageSource } from '@niko/shared';
 import { HEAR_PROVIDERS, hearOrder, hearPresetOf, MAX_HEAR_KEYS, type HearKeyInfo, type HearProvider, type HearSource } from '@niko/shared';
@@ -1339,6 +1340,11 @@ export function Appearance() {
   const save = async () => { await api('/me', { method: 'PATCH', body: { appearance: a } }); await refreshMe(); setAppearance(a); setSaved(true); };
   const rotation = a.mode === 'shift' ? a.colours : [a.single];
   const ph = hueOf(rotation[tick % rotation.length] ?? 'cyan');
+  // New items on Home: the person's own choices, never more often than the admin allows.
+  const limits = me?.glanceLimits ?? GLANCE_LIMIT_DEFAULTS;
+  const g = cleanGlancePrefs(a.glance);
+  const upG = (p: Partial<GlancePrefs>) => up({ glance: { ...g, ...p } });
+  const every = (m: number) => (m === 60 ? 'Every hour' : m === 1 ? 'Every minute' : `Every ${m} minutes`);
   return (
     <SettingsPage title="Appearance" sub="Your own background, and how long lists are shown. The particles and accents follow your colours." action={<button className="pri set-save" onClick={save}>{saved ? 'Saved' : 'Save'}</button>}>
       <div className="set-grid">
@@ -1397,6 +1403,31 @@ export function Appearance() {
             <div className="pv-cap"><span className="k fade" style={{ color: `hsl(${ph},100%,75%)` }}>Standing by</span><span>Say “Niko” to start.</span></div>
             <span className="pv-mic fade" aria-hidden="true" style={{ backgroundColor: `hsl(${ph},100%,75%)` }} />
           </div>
+          {limits.allowed && <div className="grp glance-set" role="group" aria-label="New items on Home">
+            <div className="eng-line"><span><b style={{ fontWeight: 500 }}>Show new items on Home</b><br /><span className="hint">New emails, messages, calendar events and changed notes appear for 30 seconds, then go. Only new ones: nothing you have already read or seen.</span></span><Switch on={g.on} onChange={(x) => upG({ on: x })} label="Show new items on Home" /></div>
+            {g.on && <>
+              <div className="eng-line"><span>Read them aloud</span><Switch on={g.aloud} onChange={(x) => upG({ aloud: x })} label="Read new items aloud" /></div>
+              <span className="k" style={{ paddingTop: 6 }}>How often Niko checks</span>
+              {GLANCE_PARTS.map((p: GlancePart) => {
+                const min = limits[p], value = glanceEvery(g, limits, p);
+                return (
+                  <label key={p} className="eng-line"><span>{GLANCE_PART_NAMES[p]}{!min && <span className="hint"> · not available on your account</span>}</span>
+                    <select className="in glance-sel" value={min ? value : 0} disabled={!min} onChange={(x) => upG({ [p]: Number(x.target.value) } as Partial<GlancePrefs>)}>
+                      <option value={0}>Off</option>
+                      {GLANCE_STEPS.filter((m) => m >= min).map((m) => <option key={m} value={m}>{every(m)}</option>)}
+                    </select>
+                  </label>
+                );
+              })}
+              <label className="eng-line"><span>Remind me before events</span>
+                <select className="in glance-sel" value={glanceEvery(g, limits, 'events') ? g.remind : 0} disabled={!glanceEvery(g, limits, 'events')} onChange={(x) => upG({ remind: Number(x.target.value) || GLANCE_REMIND_STEPS[0]! })}>
+                  {!glanceEvery(g, limits, 'events') && <option value={0}>Calendar checks are off</option>}
+                  {GLANCE_REMIND_STEPS.map((m) => <option key={m} value={m}>{m} minutes before</option>)}
+                </select>
+              </label>
+              <span className="hint">Niko checks only while Home is open and on screen, and pauses after 30 minutes without use. Messages from Telegram and Slack arrive straight away; less often is kinder to your email provider. {GLANCE_PARTS.some((p) => limits[p] > 1) ? 'Your administrator sets how often checks may run.' : ''} Changes to notes you make yourself in Notion aren’t shown; OneNote doesn’t say who changed a page, so all its changes are.</span>
+            </>}
+          </div>}
         </section>
       </div>
     </SettingsPage>

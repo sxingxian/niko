@@ -11,3 +11,5 @@ export const fakeDb = {
   delete: () => ({ where: async () => {} }),
   insert: () => ({ values: async (v) => { store.keyWrites.push(v); } }),
 };
+export const appSettings = { name: 'app_settings', key: 'key', value: 'value' };
+export const glanceState = { name: 'glance_state', userId: 'user_id' };

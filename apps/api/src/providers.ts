@@ -170,6 +170,17 @@ export async function listEvents(env: Env, db: Db, userId: string, provider: str
   return [];
 }
 
+/** The Notion user who connected Niko, so that page changes they made themselves can be told apart. Kept per instance. */
+const notionOwners = new Map<string, string>();
+async function notionOwner(userId: string, token: string): Promise<string> {
+  if (notionOwners.has(userId)) return notionOwners.get(userId)!;
+  const me = await api('https://api.notion.com/v1/users/me', token, { headers: { 'notion-version': '2022-06-28' } }).catch(() => null);
+  const id = String(me?.bot?.owner?.user?.id ?? '');
+  if (notionOwners.size > 500) notionOwners.delete(notionOwners.keys().next().value!);
+  notionOwners.set(userId, id);
+  return id;
+}
+
 export async function listNotes(env: Env, db: Db, userId: string, provider: string): Promise<NoteItem[]> {
   const s = await credentials(env, db, userId, provider);
   if (!s) return [];
@@ -179,8 +190,9 @@ export async function listNotes(env: Env, db: Db, userId: string, provider: stri
       method: 'POST', headers: { 'content-type': 'application/json', 'notion-version': '2022-06-28' },
       body: JSON.stringify({ page_size: 70, sort: { direction: 'descending', timestamp: 'last_edited_time' }, filter: { property: 'object', value: 'page' } }),
     });
+    const owner = await notionOwner(userId, s.accessToken);
     return (j.results ?? []).filter((p: any) => !notionDeleted(p)).slice(0, LIST_MAX)
-      .map((p: any) => ({ id: String(p.id), provider, title: notionTitle(p), source: 'Notion', edited: Date.parse(p.last_edited_time) || undefined }));
+      .map((p: any) => ({ id: String(p.id), provider, title: notionTitle(p), source: 'Notion', edited: Date.parse(p.last_edited_time) || undefined, ...(owner && p.last_edited_by?.id === owner ? { byMe: true } : {}) }));
   }
   if (provider === 'onenote') {
     const j = await api('https://graph.microsoft.com/v1.0/me/onenote/pages?$top=${LIST_MAX}&$select=id,title,lastModifiedDateTime&$orderby=lastModifiedDateTime desc', s.accessToken);

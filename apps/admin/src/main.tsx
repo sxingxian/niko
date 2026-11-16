@@ -2,7 +2,7 @@
 import { StrictMode, useCallback, useEffect, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api, ApiError, Field, PasswordField, Switch } from '@niko/ui';
-import { AI_OPTION_GROUPS, aiHasBrain, aiOff } from '@niko/shared';
+import { AI_OPTION_GROUPS, aiHasBrain, aiOff, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, type GlanceLimits } from '@niko/shared';
 import '@niko/ui/src/styles.css';
 import './admin.css';
 
@@ -184,8 +184,96 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
   </>;
 }
 
+// ---------------------------------------------------------------- new items on Home
+type GlanceUser = { id: string; name: string; email: string; role: string; status: string; glanceLimits: Partial<GlanceLimits> };
+const everyLabel = (m: number) => (m === 0 ? 'Not allowed' : m === 60 ? 'Every hour at most' : m === 1 ? 'Every minute at most' : `Every ${m} minutes at most`);
+/** Whether people can turn on new items on Home, and the most often each kind may be checked: a default, then per person. */
+function GlanceAdmin({ guard }: { guard: (e: unknown) => void }) {
+  const [defaults, setDefaults] = useState<GlanceLimits | null>(null);
+  const [people, setPeople] = useState<GlanceUser[]>([]);
+  const [sel, setSel] = useState('all');
+  const [draft, setDraft] = useState<Partial<GlanceLimits>>({});
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const load = useCallback(async () => {
+    try { const r = await api<{ defaults: GlanceLimits; users: GlanceUser[] }>('/admin/glance'); setDefaults(r.defaults); setPeople(r.users); }
+    catch (e) { guard(e); }
+  }, [guard]);
+  useEffect(() => { void load(); }, [load]);
+  const person = people.find((p) => p.id === sel) ?? null;
+  useEffect(() => { if (defaults) { setDraft(person ? { ...person.glanceLimits } : { ...defaults }); setDirty(false); } }, [sel, defaults, people]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!defaults) return null;
+  type K = keyof GlanceLimits;
+  const val = <T extends K>(k: T): GlanceLimits[T] => (k in draft ? (draft[k] as GlanceLimits[T]) : defaults[k]);
+  const changed = (k: K) => !!person && k in draft && draft[k] !== defaults[k];
+  const set = (k: K, v: boolean | number) => {
+    setNote(null); setDirty(true);
+    const next: Partial<GlanceLimits> = { ...draft };
+    if (person && v === defaults[k]) delete next[k]; else (next as Record<string, unknown>)[k] = v;
+    setDraft(next);
+  };
+  const reset = (k: K) => { const next = { ...draft }; delete next[k]; setDraft(next); setDirty(true); };
+  const count = (p: GlanceUser) => Object.keys(p.glanceLimits).length;
+  const save = async () => {
+    setBusy(true); setNote(null);
+    try {
+      if (person) await api(`/admin/glance/users/${person.id}`, { method: 'PUT', body: { limits: draft } });
+      else await api('/admin/glance/default', { method: 'PUT', body: { limits: draft } });
+      await load(); setNote({ ok: true, text: person ? `Saved for ${person.name || person.email}.` : 'Saved. It applies to everyone without their own changes within a minute.' });
+    } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
+  };
+  const allowed = val('allowed');
+  return <>
+    <header><h1>New items</h1><p className="sub" style={{ fontSize: 15, maxWidth: 860 }}>New emails, messages, calendar events and changed notes can appear on people’s Home for 30 seconds. Each person turns it on and chooses how often Niko checks; here you set whether they can, and the most often each kind may be checked.</p></header>
+    {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
+    <div className="ai-grid">
+      <section className="g card ai-people" aria-label="Applies to">
+        <span className="k" style={{ padding: '0 6px' }}>Applies to</span>
+        <div className="ai-list">
+          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default' }, ...people.map((p) => ({ id: p.id, name: p.name || p.email, sub: p.email, badge: count(p) ? `${count(p)} ${count(p) === 1 ? 'change' : 'changes'}` : 'Default' }))].map((p) => (
+            <button key={p.id} className="who-row" aria-pressed={p.id === sel} onClick={() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; setSel(p.id); setNote(null); }}>
+              <span className="who-txt"><b>{p.name}</b><span>{p.sub}</span></span><span className="who-badge">{p.badge}</span>
+            </button>
+          ))}
+        </div>
+        <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>New accounts get the default. These limits apply to admins too.</p>
+      </section>
+      <section className="g card ai-options" aria-label="Limits">
+        <div className="ai-head">
+          <div><h2>{person ? person.name || person.email : 'Everyone · default'}</h2>
+            <p className="sub" style={{ fontSize: 13 }}>{person ? (Object.keys(draft).length ? `${Object.keys(draft).length} different from the default. Everything else follows the default.` : 'Follows the default. Change anything to set it for this person only.') : 'What every account gets, unless it is changed for that person.'}</p></div>
+          <div className="ai-acts">
+            {person && <button className="bt" onClick={() => { setDraft({}); setDirty(true); }} disabled={!Object.keys(draft).length}>Reset to default</button>}
+            <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+        <div className="ai-row">
+          <span className="ai-txt"><span>New items on Home</span><span className="sub">{allowed ? 'People can turn it on under Appearance (it starts off).' : 'Hidden: people can’t turn it on.'}</span></span>
+          {changed('allowed') && <><span className="chg">Changed</span><button className="lnk" onClick={() => reset('allowed')}>Reset</button></>}
+          <Switch on={allowed} onChange={(v) => set('allowed', v)} label="Allow new items on Home" />
+        </div>
+        <div className={'ai-items' + (allowed ? '' : ' dim')}>
+          <span className="k" style={{ display: 'block', padding: '16px 0 6px' }}>Most often each kind may be checked</span>
+          {GLANCE_PARTS.map((p) => (
+            <div key={p} className="ai-row">
+              <span className="ai-txt"><span>{GLANCE_PART_NAMES[p]}</span><span className="sub">{changed(p) ? `Default is ${everyLabel(defaults[p]).toLowerCase()}` : p === 'chats' ? 'Telegram and Slack arrive instantly; this is how often Home looks' : p === 'mail' ? 'Gmail, Outlook and other email' : p === 'events' ? 'New events, invitations and reminders' : 'Notion and OneNote'}</span></span>
+              {changed(p) && <><span className="chg">Changed</span><button className="lnk" onClick={() => reset(p)}>Reset</button></>}
+              <label className="sr" htmlFor={`gl-${p}`}>{GLANCE_PART_NAMES[p]}: most often</label>
+              <select id={`gl-${p}`} className="in gl-sel" value={val(p)} disabled={!allowed} onChange={(e) => set(p, Number(e.target.value))}>
+                {[0, ...GLANCE_STEPS].map((m) => <option key={m} value={m}>{everyLabel(m)}</option>)}
+              </select>
+            </div>
+          ))}
+        </div>
+        <p className="sub" style={{ fontSize: 12, lineHeight: 1.5 }}>The server never checks a service more often than this, whatever a person chooses. Checks run only while that person has Home open and on screen, and pause after 30 minutes without use. Each check of email, calendar or notes wakes the database; longer limits use less of its monthly allowance. Every change is written to the audit log.</p>
+      </section>
+    </div>
+  </>;
+}
+
 function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?: { name: string; email: string } | null }) {
-  const [tab, setTab] = useState<'users' | 'ai' | 'security' | 'audit'>('users');
+  const [tab, setTab] = useState<'users' | 'ai' | 'glance' | 'security' | 'audit'>('users');
   const [me, setMe] = useState<{ name: string; email: string } | null>(initialMe ?? null);
   const [users, setUsers] = useState<UserRow[]>([]);
   const [invites, setInvites] = useState<InviteRow[]>([]);
@@ -233,6 +321,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
         <nav aria-label="Admin sections">
           <button className="nv" aria-current={tab === 'users' ? 'page' : undefined} onClick={() => setTab('users')}>Users</button>
           <button className="nv" aria-current={tab === 'ai' ? 'page' : undefined} onClick={() => setTab('ai')}>AI options</button>
+          <button className="nv" aria-current={tab === 'glance' ? 'page' : undefined} onClick={() => setTab('glance')}>New items</button>
           <button className="nv" aria-current={tab === 'security' ? 'page' : undefined} onClick={() => setTab('security')}>Security</button>
           <button className="nv" aria-current={tab === 'audit' ? 'page' : undefined} onClick={() => setTab('audit')}>Audit log</button>
         </nav>
@@ -279,7 +368,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
             ))}
           </section>
           <p className="sub" style={{ fontSize: 13 }}>Admin sign-in needs a second factor. Every change here is written to the audit log.</p>
-        </> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'security' ? <>
+        </> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'security' ? <>
           <header><h1>Security</h1><p className="sub" style={{ fontSize: 15 }}>Your own admin sign-in: authenticator app and recovery codes.</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
           <div className="two">

@@ -163,7 +163,7 @@ export const GROUPS: { id: ProviderGroup; name: string; note: string }[] = [
 export const COLOURS: Record<string, number> = { cyan: 190, violet: 262, rose: 330, amber: 32, emerald: 158 };
 export const SHIFT_ORDER = ['cyan', 'violet', 'rose', 'amber', 'emerald'];
 
-export interface Appearance { mode: 'shift' | 'single'; colours: string[]; single: string; customHue: number; seconds: number; /** Items per page in Inbox, Calendar and Notes. */ pageSize?: number }
+export interface Appearance { mode: 'shift' | 'single'; colours: string[]; single: string; customHue: number; seconds: number; /** Items per page in Inbox, Calendar and Notes. */ pageSize?: number; /** New items on Home. */ glance?: GlancePrefs }
 export const PAGE_SIZES = [5, 10, 20, 25, 50];
 export type Brain = 'workers-ai' | 'custom-ai' | 'self-hosted-ai';
 /** Where Niko's speech can come from: three built in, and any number of the user's voice API keys ("vkey:<id>").
@@ -403,6 +403,8 @@ export interface Me {
   weather?: boolean;
   /** AI options the admin has turned off for this account (hidden here, refused by the server). */
   aiOff?: string[];
+  /** The admin's limits for new items on Home, as they apply to this account. */
+  glanceLimits?: GlanceLimits;
 }
 
 /** Whether a message is about the weather. Only then is the device's location asked for and sent. */
@@ -447,7 +449,7 @@ export function passwordProblem(v: unknown, email = ''): string | null {
 // ---------------------------------------------------------------- the brief, and what opens from it
 export interface MailItem { id: string; from: string; subject: string; source: string; provider: string }
 export interface EventItem { id: string; provider: string; time: string; title: string; source: string; start: number; allDay?: boolean }
-export interface NoteItem { id: string; provider: string; title: string; source: string; edited?: number }
+export interface NoteItem { id: string; provider: string; title: string; source: string; edited?: number; /** Last changed by the person themselves (where the service says so). */ byMe?: boolean }
 export interface ChatItem { provider: string; chatId: string; title: string; last: string; source: string; lastAt?: number }
 /** The parts of the briefing, so each screen asks only for its own: Inbox = mail + chats, Calendar = events, Notes = notes. */
 export type BriefPart = 'mail' | 'events' | 'notes' | 'chats';
@@ -461,3 +463,51 @@ export interface DocBlock { kind: 'h1' | 'h2' | 'h3' | 'p' | 'li' | 'ol' | 'todo
 export interface NoteDetail { title: string; source: string; url?: string; edited?: number; blocks: DocBlock[]; more?: boolean }
 export interface MailDetail { from: string; to: string; subject: string; date?: number; text: string; url?: string }
 export interface EventDetail { title: string; source: string; start: number; end?: number; allDay?: boolean; location?: string; description?: string; attendees?: string[]; url?: string }
+
+// ---------------------------------------------------------------- new items on Home ("glance")
+// While Home is open and on screen, Niko checks for new email, messages, calendar invitations and changed notes, and
+// shows each new one for 30 seconds. Each person chooses how often each kind is checked; the admin sets the most often
+// allowed (for everyone, or for one account) and whether the feature is available at all. The server checks a source
+// only when it is due under both, so the limits hold whatever the browser sends.
+export type GlancePart = 'mail' | 'chats' | 'events' | 'notes';
+export const GLANCE_PARTS: GlancePart[] = ['mail', 'chats', 'events', 'notes'];
+export const GLANCE_PART_NAMES: Record<GlancePart, string> = { mail: 'Emails', chats: 'Messages', events: 'Calendar', notes: 'Notes' };
+/** Check intervals offered, in minutes. */
+export const GLANCE_STEPS = [1, 2, 5, 10, 15, 30, 60];
+export const GLANCE_REMIND_STEPS = [5, 10, 15, 30];
+/** The admin's limits: whether the feature is available, and the most often each kind may be checked (minutes; 0 = not allowed). */
+export interface GlanceLimits { allowed: boolean; mail: number; chats: number; events: number; notes: number }
+export const GLANCE_LIMIT_DEFAULTS: GlanceLimits = { allowed: true, mail: 2, chats: 1, events: 5, notes: 5 };
+/** A person's own choices: off by default; how often each kind is checked (minutes; 0 = off); the reminder lead time. */
+export interface GlancePrefs { on: boolean; aloud: boolean; mail: number; chats: number; events: number; notes: number; remind: number }
+export const GLANCE_PREF_DEFAULTS: GlancePrefs = { on: false, aloud: false, mail: 5, chats: 1, events: 10, notes: 10, remind: 10 };
+const step = (v: unknown, steps: number[], allowZero = true) => (typeof v === 'number' && ((allowZero && v === 0) || steps.includes(v)) ? v : undefined);
+/** Keeps only valid admin limits (for a stored default or one account's changes). */
+export function cleanGlanceLimits(v: unknown): Partial<GlanceLimits> {
+  const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>, out: Partial<GlanceLimits> = {};
+  if (typeof o.allowed === 'boolean') out.allowed = o.allowed;
+  for (const p of GLANCE_PARTS) { const n = step(o[p], GLANCE_STEPS); if (n !== undefined) out[p] = n; }
+  return out;
+}
+/** The limits that apply to an account: its own changes over the default over the built-in defaults. */
+export function glanceLimits(defaults: Partial<GlanceLimits>, own: Partial<GlanceLimits>): GlanceLimits {
+  return { ...GLANCE_LIMIT_DEFAULTS, ...defaults, ...own };
+}
+export function cleanGlancePrefs(v: unknown): GlancePrefs {
+  const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>, d = GLANCE_PREF_DEFAULTS;
+  return {
+    on: typeof o.on === 'boolean' ? o.on : d.on, aloud: typeof o.aloud === 'boolean' ? o.aloud : d.aloud,
+    mail: step(o.mail, GLANCE_STEPS) ?? d.mail, chats: step(o.chats, GLANCE_STEPS) ?? d.chats, events: step(o.events, GLANCE_STEPS) ?? d.events, notes: step(o.notes, GLANCE_STEPS) ?? d.notes,
+    remind: step(o.remind, GLANCE_REMIND_STEPS) ?? d.remind,
+  };
+}
+/** How often a kind is actually checked, in minutes (0 = not at all): the person's choice, but never more often than the admin allows. */
+export function glanceEvery(prefs: GlancePrefs, limits: GlanceLimits, part: GlancePart): number {
+  if (!prefs.on || !limits.allowed || !limits[part] || !prefs[part]) return 0;
+  return Math.max(prefs[part], limits[part]);
+}
+/** One new thing to show on Home. `key` identifies it, so it is shown once only. */
+export interface GlanceItem {
+  key: string; kind: 'mail' | 'chat' | 'invite' | 'reminder' | 'note'; title: string; line: string; source: string; at: number;
+  /** Where it opens, and the title to open it by. */ view: 'inbox' | 'calendar' | 'notes'; open: string; canReply?: boolean;
+}

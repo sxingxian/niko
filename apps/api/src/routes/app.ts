@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { chatTurns, connections, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
-import { aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
+import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
+import { cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
 import { APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -11,6 +11,7 @@ import { BrainFail, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveK
 import { cleanWhere, forecastText, geocode, stripWeatherTags, weatherTags } from '../weather';
 import { audioProblem, defaultHearLabel, hear, hearServerKey, HEAR_PROVIDERS_LIST, hearKeyInfo, hearKeyProblem, loadHearKeys, MAX_AUDIO_BYTES, saveHearKeys, type HearKey } from '../hears';
 import { NOT_ON_ACCOUNT, offFor } from '../access';
+import { diffGlance, limitsFor } from '../glance';
 import { Declined, defaultImageLabel, serverKey, IMAGE_PROVIDERS_LIST, imageKeyInfo, imageKeyProblem, loadImageKeys, MAX_PROMPT, paint, saveImageKeys, type ImageKey } from '../images';
 import { defaultVoiceLabel, listVoices, loadVoiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
 import { icalCheck, normalizeLink } from '../calendarlink';
@@ -29,7 +30,7 @@ const clampNum = (v: unknown, lo: number, hi: number, d: number) => (typeof v ==
 app.get('/me', async (c) => {
   const u = c.get('user');
   const weather = !!(await getConnection(c.get('db'), u.id, 'open-meteo').catch(() => null));
-  return c.json({ id: u.id, email: u.email, name: u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: await offFor(c.get('db'), u) });
+  return c.json({ id: u.id, email: u.email, name: u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: await offFor(c.get('db'), u), glanceLimits: await limitsFor(c.get('db'), u) });
 });
 
 app.patch('/me', async (c) => {
@@ -48,6 +49,8 @@ app.patch('/me', async (c) => {
       customHue: clampNum(a.customHue, 0, 359, 210),
       seconds: clampNum(a.seconds, 4, 30, 8),
       pageSize: PAGE_SIZES.includes(Number(a.pageSize)) ? Number(a.pageSize) : 10,
+      // New items on Home: kept as they were when this save doesn't include them.
+      glance: cleanGlancePrefs(a.glance ?? (u.appearance as Record<string, unknown>)?.glance),
     };
   }
   if (b.engine) {
@@ -393,6 +396,35 @@ async function recentChats(c: import('hono').Context<AppEnv>): Promise<Brief['ch
 
 app.get('/brief', async (c) => c.json(await buildBrief(c, clampNum(Number(c.req.query('tz')), -840, 840, 0), briefParts(c.req.query('parts')))));
 app.get('/brief/chats', async (c) => c.json({ chats: await recentChats(c) }));
+
+// New items on Home. The app asks about once a minute while Home is open and on screen; each kind is read from its
+// services only when it is due, under both the person's own choice and the admin's limit. Nothing is read for a person
+// who has not turned this on, or whose admin has not allowed it.
+const lastGlance = new Map<string, number>();
+app.post('/glance', async (c) => {
+  const u = c.get('user'), db = c.get('db'), now = Date.now();
+  const b = await c.req.json<{ tz?: number }>().catch(() => ({} as { tz?: number }));
+  const prefs = cleanGlancePrefs((u.appearance as Record<string, unknown>)?.glance), limits = await limitsFor(db, u);
+  const every = Object.fromEntries(GLANCE_PARTS.map((p) => [p, glanceEvery(prefs, limits, p)])) as Record<GlancePart, number>;
+  if (!prefs.on || !limits.allowed) return c.json({ items: [], off: true });
+  // Asked again too soon (another tab, or a modified app): nothing is read.
+  if (now - (lastGlance.get(u.id) ?? 0) < 40_000) return c.json({ items: [], waitMs: 60_000 });
+  if (lastGlance.size > 2000) lastGlance.delete(lastGlance.keys().next().value!);
+  lastGlance.set(u.id, now);
+  const row = (await db.select().from(glanceState).where(eq(glanceState.userId, u.id)).limit(1))[0];
+  const prev = { checked: (row?.checked ?? {}) as Record<string, number>, seen: (row?.seen ?? {}) as Record<string, number>, upcoming: row?.upcoming ?? [] };
+  // A kind is due when its interval has passed (with 20 seconds to spare, so a once-a-minute ask is never just short).
+  const due = GLANCE_PARTS.filter((p) => every[p] > 0 && now - (prev.checked[p] ?? 0) >= every[p] * 60_000 - 20_000);
+  const remind = every.events > 0 ? prefs.remind : 0;
+  const reminderDue = remind > 0 && prev.upcoming.some((e) => e.start > now && e.start - now <= remind * 60_000 && !prev.seen[`remind:${e.provider}:${e.id}:${e.start}`]);
+  if (!due.length && !reminderDue) return c.json({ items: [], waitMs: 60_000 });
+  const tz = clampNum(b.tz, -840, 840, 0);
+  const brief = due.length ? await buildBrief(c, tz, new Set<BriefPart>(due)) : EMPTY_BRIEF;
+  const { items, state } = diffGlance(prev, brief, due, now, remind, tz);
+  await db.insert(glanceState).values({ userId: u.id, ...state, updatedAt: new Date() })
+    .onConflictDoUpdate({ target: glanceState.userId, set: { ...state, updatedAt: new Date() } });
+  return c.json({ items, waitMs: 60_000 });
+});
 
 // What opens from the workspace: one note, one email or one event, as plain text.
 const opened = (fn: typeof noteDetail, group: string) => async (c: import('hono').Context<AppEnv>) => {

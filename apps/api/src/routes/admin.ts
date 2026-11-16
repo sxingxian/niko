@@ -1,7 +1,8 @@
 import { and, desc, eq, gt, isNull, lt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { appSettings, auditLog, invites, recoveryCodes, sessions, users } from '@niko/db';
-import { aiHasBrain, aiOff, cleanAiAccess, isEmail } from '@niko/shared';
+import { aiHasBrain, aiOff, cleanAiAccess, cleanGlanceLimits, glanceLimits, isEmail } from '@niko/shared';
+import { forgetGlanceDefaults, GLANCE_DEFAULT_KEY, glanceDefaults } from '../glance';
 import { AI_DEFAULT_KEY, aiDefaults, forgetAiDefaults } from '../access';
 import type { AppEnv } from '../env';
 import { hashRecoveryCode, makeRecoveryCodes, newTotpSecret, randomToken, seal, sha256, totpStep, totpUri, unseal } from '../lib/crypto';
@@ -214,6 +215,36 @@ admin.put('/ai/users/:id', requireAdmin, async (c) => {
   await audit(c, 'ai.user', { target: target.email, changes: Object.entries(own).map(([k, v]) => `${k} ${v ? 'on' : 'off'}`).join(', ') || 'follows the default' }, c.get('user').id);
   return c.json({ ok: true, access: own });
 });
+// ---------------------------------------------------------------- new items on Home
+// Whether people can turn it on, and the most often each kind may be checked: a default for everyone, and changes for
+// any one account. The server never reads a source more often than this, whatever a person chooses.
+admin.get('/glance', requireAdmin, async (c) => {
+  const db = c.get('db');
+  const list = await db.select({ id: users.id, name: users.name, email: users.email, role: users.role, status: users.status, glanceLimits: users.glanceLimits }).from(users).orderBy(users.createdAt);
+  return c.json({ defaults: glanceLimits(await glanceDefaults(db, true), {}), users: list.map((u) => ({ ...u, glanceLimits: cleanGlanceLimits(u.glanceLimits) })) });
+});
+admin.put('/glance/default', requireAdmin, async (c) => {
+  const b = await c.req.json<{ limits?: unknown }>().catch(() => ({} as { limits?: unknown }));
+  const limits = glanceLimits(cleanGlanceLimits(b.limits), {});
+  const db = c.get('db');
+  await db.insert(appSettings).values({ key: GLANCE_DEFAULT_KEY, value: limits }).onConflictDoUpdate({ target: appSettings.key, set: { value: limits } });
+  forgetGlanceDefaults();
+  await audit(c, 'glance.default', { allowed: limits.allowed, mail: limits.mail, chats: limits.chats, events: limits.events, notes: limits.notes }, c.get('user').id);
+  return c.json({ ok: true, defaults: limits });
+});
+admin.put('/glance/users/:id', requireAdmin, async (c) => {
+  const b = await c.req.json<{ limits?: unknown }>().catch(() => ({} as { limits?: unknown }));
+  const db = c.get('db');
+  const target = (await db.select().from(users).where(eq(users.id, c.req.param('id'))).limit(1))[0];
+  if (!target) return c.json({ error: 'No such user.' }, 404);
+  const defaults = glanceLimits(await glanceDefaults(db, true), {});
+  // A change that matches the default is not a change: only real differences are kept.
+  const own = Object.fromEntries(Object.entries(cleanGlanceLimits(b.limits)).filter(([k, v]) => v !== (defaults as unknown as Record<string, unknown>)[k]));
+  await db.update(users).set({ glanceLimits: own }).where(eq(users.id, target.id));
+  await audit(c, 'glance.user', { target: target.email, changes: Object.entries(own).map(([k, v]) => `${k} ${v}`).join(', ') || 'follows the default' }, c.get('user').id);
+  return c.json({ ok: true, limits: own });
+});
+
 const changedKeys = (a: Record<string, boolean>, b: Record<string, boolean>) => [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => (a[k] ?? true) !== (b[k] ?? true));
 
 admin.get('/audit', requireAdmin, async (c) => {
