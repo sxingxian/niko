@@ -659,6 +659,44 @@ await ok('a signed-in person changes their password; other devices are signed ou
   assert.equal((await new Browser().post('/me/password', { current: 'x', password: 'y' })).status, 401, 'signed out: refused');
 });
 
+await ok('changing plan prices: the admin chooses whether existing accounts keep theirs or move at their next plan', async () => {
+  const NEWPW = 'a brand new long passphrase 42';
+  const jun = await user('jun@example.com');
+  await q("insert into users (email, name, password_hash, status, role, lifetime, access_until, access_kind) values ('kim@example.com', 'Kim', $1, 'active', 'member', false, now() - interval '1 day', 'paid')", [jun.password_hash]);
+  const kim = new Browser();
+  assert.equal((await kim.post('/auth/sign-in', { email: 'kim@example.com', password: NEWPW })).status, 200);
+  const cur = (await admin.get('/admin/payments')).data.settings;
+  const plansOf = async (b) => (await b.get('/billing')).data.plans.map((p) => `${p.plan}:${p.cents}`).join();
+  assert.equal(await plansOf(kim), 'monthly:900,yearly:9000');
+  // Changing plan prices needs a choice.
+  let r = await admin.put('/admin/payments', { settings: { ...cur, monthly: { on: true, cents: 1200 }, yearly: { on: true, cents: 12000 } } });
+  assert.equal(r.status, 400); assert.match(r.data.error, /who gets the new plan prices/);
+  // Only new people: Kim keeps today's prices, and is charged them.
+  r = await admin.put('/admin/payments', { settings: { ...cur, monthly: { on: true, cents: 1200 }, yearly: { on: true, cents: 12000 } }, pricesFor: 'new' });
+  assert.equal(r.status, 200); assert.equal(r.data.changed, true); assert.ok(r.data.accounts >= 1);
+  assert.equal(await plansOf(kim), 'monthly:900,yearly:9000', 'an existing account keeps its plan prices');
+  r = await kim.post('/billing/checkout', { plan: 'monthly' });
+  assert.equal(r.status, 200); assert.equal(stripeCalls.at(-1).p['line_items[0][price_data][unit_amount]'], '900', 'and is charged them');
+  const row = (await admin.get('/admin/users')).data.users.find((x) => x.email === 'kim@example.com');
+  assert.deepEqual(row.keptPrices, [{ plan: 'monthly', cents: 900 }, { plan: 'yearly', cents: 9000 }], 'the admin sees the kept prices');
+  assert.equal((await admin.get('/admin/users')).data.users.find((x) => x.email === 'alex@example.com').keptPrices, null, 'admins keep nothing');
+  // A second change for new people only: Kim still keeps the first prices.
+  r = await admin.put('/admin/payments', { settings: { ...cur, monthly: { on: true, cents: 1500 }, yearly: { on: false, cents: 12000 } }, pricesFor: 'new' });
+  assert.equal(r.status, 200);
+  assert.equal(await plansOf(kim), 'monthly:900,yearly:9000');
+  // Saving without changing plan prices needs no choice and changes nobody.
+  r = await admin.put('/admin/payments', { settings: { ...cur, monthly: { on: true, cents: 1500 }, yearly: { on: false, cents: 12000 }, remind: false } });
+  assert.equal(r.status, 200); assert.equal(r.data.changed, false);
+  // Everyone: Kim moves to the current prices at the next plan.
+  r = await admin.put('/admin/payments', { settings: { ...cur, monthly: { on: true, cents: 1100 }, yearly: { on: true, cents: 11000 } }, pricesFor: 'everyone' });
+  assert.equal(r.status, 200);
+  assert.equal(await plansOf(kim), 'monthly:1100,yearly:11000', 'everyone moves to the new prices');
+  assert.equal((await user('kim@example.com')).plan_prices, null);
+  const log = (await q("select detail from audit_log where action = 'payments.default' order by created_at desc limit 1"))[0].detail;
+  assert.equal(log.newPlanPrices, 'everyone at their next plan');
+  await admin.put('/admin/payments', { settings: cur, pricesFor: 'everyone' });
+});
+
 await sqlc.end();
 await closePools();
 try { run('pg_ctl', ['-D', join(dir, 'data'), '-m', 'immediate', 'stop']); } catch { /* already stopping */ }

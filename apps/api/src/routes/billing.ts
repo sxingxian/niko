@@ -4,7 +4,7 @@
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { users } from '@niko/db';
-import { CURRENCY, plansOffered, type Plan } from '@niko/shared';
+import { CURRENCY, plansFor, type Plan } from '@niko/shared';
 import { accessFor, connectInfo, customerIn, keysOf, paymentSettings, payNow, priceLine, syncCheckout } from '../billing';
 import type { AppEnv } from '../env';
 import { audit, requireUser, tooMany } from '../lib/session';
@@ -25,7 +25,8 @@ billing.post('/checkout', async (c) => {
   if (!now.ready) return c.json({ error: NOT_READY }, 503);
   if (u.role === 'admin' || u.lifetime) return c.json({ error: 'Your account doesn’t need a plan.' }, 400);
   if (u.subId && u.subStatus && LIVE.includes(u.subStatus)) return c.json({ error: 'You already have a plan. Change it from Stripe’s billing page in Account.' }, 409);
-  const offer = plansOffered(await paymentSettings(db)).find((p) => p.plan === b.plan);
+  // This account's own plan prices if it kept them when prices changed, else the current ones.
+  const offer = plansFor(u.planPrices, await paymentSettings(db)).find((p) => p.plan === b.plan);
   if (!offer) return c.json({ error: 'That plan isn’t offered right now.' }, 400);
   if (await tooMany(c, 'checkout:' + u.id, 10, 15)) return c.json({ error: 'Too many attempts. Try again later.' }, 429);
   const plan = offer.plan as Plan;

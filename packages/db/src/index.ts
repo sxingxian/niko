@@ -23,6 +23,8 @@ export const users = pgTable('users', {
   /** This account's changes to the admin's default limits for new items on Home. Set by an admin only. */
   glanceLimits: jsonb('glance_limits').notNull().default({}).$type<Record<string, unknown>>(),
   accountLimits: jsonb('account_limits').notNull().default({}).$type<Record<string, unknown>>(),
+  /** Plan prices this account keeps when it next chooses a plan; null follows the current prices. */
+  planPrices: jsonb('plan_prices').$type<{ plan: 'monthly' | 'yearly'; cents: number }[] | null>(),
   // ---- access and payments (see migration 0007)
   lifetime: boolean('lifetime').notNull().default(false),
   accessUntil: ts('access_until'),

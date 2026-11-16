@@ -1,7 +1,7 @@
 import { and, desc, eq, gt, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { appSettings, auditLog, invites, recoveryCodes, sessions, signups, users } from '@niko/db';
-import { accessState, accountLimits, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, glanceLimits, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
+import { accessState, accountLimits, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
 import { connectInfo, connectStripe, dateLabel, forgetPayments, forgetStripeMode, inviteCodeHash, keysOf, makeInviteCode, paymentSettings, PAYMENTS_KEY, payNow, plansLine, secretsFor, STRIPE_MODE_KEY, stripeMode } from '../billing';
 import { isMode, keysFor, modeStatus, stripe, StripeError, stripeReady } from '../stripe';
 import { forgetGlanceDefaults, GLANCE_DEFAULT_KEY, glanceDefaults } from '../glance';
@@ -132,6 +132,7 @@ admin.get('/users', requireAdmin, async (c) => {
     id: u.id, name: u.name, email: u.email, role: u.role, status: u.status, isOwner: u.isOwner, lastActiveAt: u.lastActiveAt,
     access: accessState(u, pay.graceDays),
     lifetime: u.lifetime, accessUntil: u.accessUntil, accessKind: u.accessKind, accessPaidUntil: u.accessPaidUntil, accessStartMonths: u.accessStartMonths, paidMode: u.paidMode,
+    keptPrices: cleanPlanPrices(u.planPrices),
     sub: u.subId ? { plan: u.subPlan, status: u.subStatus, periodEnd: u.subPeriodEnd, cancelAtEnd: u.subCancelAtEnd, mode: u.subMode } : null,
     signup: su ? { state: su.state, paid: !!su.paidAt, mode: su.paidAt ? su.stripeMode : null, priceCents: su.priceCents, months: su.months, removeAt: su.paidAt ? null : new Date(su.createdAt.getTime() + UNPAID_SIGNUP_DAYS * 86400_000) } : null,
   }));
@@ -337,10 +338,26 @@ admin.put('/payments', requireAdmin, async (c) => {
   const s = cleanPayments(raw);
   if (raw.monthly?.on === false && raw.yearly?.on === false) return c.json({ error: 'Keep at least one plan on, or people can’t continue when their time ends.' }, 400);
   const db = c.get('db');
+  // Plan prices changed: the admin says whether accounts that already exist move to them at their next plan
+  // ('everyone'), or keep the plan prices they have now ('new': only new people get the new ones). Plans running now
+  // keep renewing at their own price in Stripe either way.
+  const before = await paymentSettings(db, true);
+  const changed = plansDiffer(before, s);
+  const pricesFor = (b as { pricesFor?: unknown }).pricesFor;
+  if (changed && plansOffered(before).length && pricesFor !== 'everyone' && pricesFor !== 'new') return c.json({ error: 'Choose who gets the new plan prices: everyone at their next plan, or only new people.' }, 400);
+  let moved = 0;
+  if (changed && pricesFor === 'everyone') {
+    moved = (await db.update(users).set({ planPrices: null }).where(isNotNull(users.planPrices)).returning({ id: users.id })).length;
+  } else if (changed && pricesFor === 'new' && plansOffered(before).length) {
+    // Accounts following the current prices keep the old ones; accounts that already kept prices keep theirs.
+    moved = (await db.update(users).set({ planPrices: plansOffered(before) })
+      .where(and(isNull(users.planPrices), sql`${users.role} <> 'admin'`, eq(users.lifetime, false))).returning({ id: users.id })).length;
+  }
   await db.insert(appSettings).values({ key: PAYMENTS_KEY, value: s }).onConflictDoUpdate({ target: appSettings.key, set: { value: s } });
   forgetPayments();
-  await audit(c, 'payments.default', { once: money(s.onceCents), length: lengthLabel(s.months), monthly: s.monthly.on ? money(s.monthly.cents) : 'off', yearly: s.yearly.on ? money(s.yearly.cents) : 'off', openPay: s.openPay, grace: s.graceDays, remind: s.remind }, c.get('user').id);
-  return c.json({ ok: true, settings: s });
+  await audit(c, 'payments.default', { once: money(s.onceCents), length: lengthLabel(s.months), monthly: s.monthly.on ? money(s.monthly.cents) : 'off', yearly: s.yearly.on ? money(s.yearly.cents) : 'off', openPay: s.openPay, grace: s.graceDays, remind: s.remind,
+    ...(changed ? { newPlanPrices: pricesFor === 'everyone' ? 'everyone at their next plan' : 'new people only', accounts: moved, ...(pricesFor === 'new' ? { kept: offersLine(plansOffered(before)) } : {}) } : {}) }, c.get('user').id);
+  return c.json({ ok: true, settings: s, changed, pricesFor: changed ? pricesFor : null, accounts: moved });
 });
 
 admin.put('/registration', requireAdmin, async (c) => {

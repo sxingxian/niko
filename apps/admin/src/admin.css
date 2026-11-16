@@ -118,6 +118,14 @@ body { background: #07090d; }
 .pay-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .pay-name { width: 72px; font-size: 15px; }
 .pay-txt { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; font-size: 15px; }
+.who-pays { margin: 6px 0 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.who-pays legend { padding: 0; margin-bottom: 4px; }
+.who-opt { display: flex; align-items: flex-start; gap: 14px; padding: 14px 16px; border-radius: 16px; border: 1px solid rgba(255,255,255,.25); cursor: pointer; }
+.who-opt.on { border-color: #fff; background: rgba(255,255,255,.08); }
+.who-opt input { width: 20px; height: 20px; margin: 2px 0 0; accent-color: #fff; flex: none; }
+.who-opt:focus-within { outline: 2px solid #fff; outline-offset: 2px; }
+.who-opt > span { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.who-opt b { font-weight: 500; font-size: 15px; }
 .pay-acts { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding-top: 4px; }
 .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .timeline li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 14px; align-items: start; padding: 0 0 18px 0; position: relative; }

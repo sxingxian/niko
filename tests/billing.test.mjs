@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import {
-  accessState, addMonths, cleanPayments, CODE_ALPHABET, isCodeShape, lengthLabel, money, normalizeCode, paidEnd, plansOffered, showCode, toCents, unlockPlan,
+  accessState, addMonths, cleanPayments, CODE_ALPHABET, isCodeShape, lengthLabel, money, normalizeCode, paidEnd, plansOffered, showCode, cleanPlanPrices, plansFor, plansDiffer, offersLine, toCents, unlockPlan,
 } from '../packages/shared/src/index.ts';
 import { formEncode, invoiceSubscription, keyMode, keysFor, modeStatus, periodEnd, planOf, verifyStripeEvent, verifyStripeSignature } from '../apps/api/src/stripe.ts';
 import { randomChars } from '../apps/api/src/lib/crypto.ts';
@@ -126,5 +126,15 @@ await ok('webhooks: told apart by which signing secret matches, and the event mu
   assert.equal(await verifyStripeEvent(env, sign('whsec_t', test), test, { livemode: false }), 'test');
   assert.equal(await verifyStripeEvent(env, sign('whsec_t', live), live, { livemode: true }), null, 'test secret, live event');
   assert.equal(await verifyStripeEvent(env, sign('whsec_x', test), test, { livemode: false }), null);
+});
+await ok('kept plan prices: read safely, used before the current ones', () => {
+  const s = cleanPayments({ monthly: { on: true, cents: 1200 }, yearly: { on: true, cents: 12000 } });
+  assert.deepEqual(plansFor(null, s), plansOffered(s), 'nothing kept: the current prices');
+  assert.deepEqual(plansFor([{ plan: 'monthly', cents: 900 }], s), [{ plan: 'monthly', cents: 900 }], 'kept prices win, and only the kept plans');
+  assert.equal(cleanPlanPrices([{ plan: 'weekly', cents: 900 }, { plan: 'monthly', cents: 10 }]), null, 'unknown plans and prices under the minimum are dropped');
+  assert.deepEqual(cleanPlanPrices([{ plan: 'monthly', cents: 900 }, { plan: 'monthly', cents: 800 }]), [{ plan: 'monthly', cents: 900 }], 'one price per plan');
+  assert.equal(plansDiffer(s, cleanPayments({ ...s, remind: false })), false, 'other settings are not a price change');
+  assert.equal(plansDiffer(s, cleanPayments({ ...s, yearly: { on: false, cents: 12000 } })), true, 'switching a plan off is');
+  assert.equal(offersLine(plansOffered(s)), 'SGD 12.00 a month or SGD 120.00 a year');
 });
 console.log(`${pass} payment-rule checks passed`);

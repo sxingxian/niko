@@ -2,7 +2,7 @@
 import { and, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { appSettings, invites, signups, stripeEvents, users, type Db, type User } from '@niko/db';
 import {
-  accessState, addMonths, CODE_ALPHABET, cleanPayments, lengthLabel, money, plansOffered, UNPAID_SIGNUP_DAYS,
+  accessState, addMonths, CODE_ALPHABET, cleanPayments, lengthLabel, money, offersLine, plansFor, plansOffered, UNPAID_SIGNUP_DAYS,
   type AccessInfo, type PaymentSettings, type Plan,
 } from '@niko/shared';
 import { ALLOWED_HOSTS, type Env } from './env';
@@ -135,7 +135,7 @@ export async function accessFor(env: Env, db: Db, u: User): Promise<AccessInfo> 
     ...st,
     lifetime: u.lifetime,
     sub: u.subId ? { plan: (u.subPlan as Plan | null) ?? null, status: u.subStatus ?? '', periodEnd: u.subPeriodEnd ? u.subPeriodEnd.toISOString() : null, cancelAtEnd: u.subCancelAtEnd } : null,
-    plans: plansOffered(s),
+    plans: plansFor(u.planPrices, s),
     payments: now.ready,
     testMode: now.mode === 'test',
     portal: !!customerIn(u, portalMode) && !!keysFor(env, portalMode).STRIPE_SECRET_KEY,
@@ -290,8 +290,8 @@ export async function daily(env: Env, db: Db): Promise<void> {
     sql`(${users.subStatus} is null or ${users.subStatus} not in ('active','trialing'))`,
     sql`${users.role} <> 'admin'`,
   ));
-  const line = plansLine(s);
   for (const u of soon) {
+    const line = offersLine(plansFor(u.planPrices, s));
     // Claim the reminder first (copied in the database: a JavaScript date would drop the microseconds and never
     // match again). If two runs overlap, only the one whose update takes the row sends the email.
     const claimed = await db.update(users).set({ remindedFor: sql`${users.accessUntil}` })

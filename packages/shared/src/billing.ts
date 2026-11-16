@@ -72,6 +72,23 @@ export function plansOffered(s: PaymentSettings): { plan: Plan; cents: number }[
   return out;
 }
 
+// ---- Plan prices kept by an account
+// When the admin changes plan prices, they choose whether accounts that already exist move to the new prices at their
+// next plan, or keep the ones they had. Kept prices are stored on the account; null means it follows the current prices.
+export type PlanOffer = { plan: Plan; cents: number };
+export type PricesFor = 'everyone' | 'new';
+export function cleanPlanPrices(v: unknown): PlanOffer[] | null {
+  if (!Array.isArray(v)) return null;
+  const out = v.flatMap((p: any) => ((p?.plan === 'monthly' || p?.plan === 'yearly') && cents(p.cents) ? [{ plan: p.plan as Plan, cents: p.cents as number }] : []));
+  return out.length ? out.filter((p, i) => out.findIndex((q) => q.plan === p.plan) === i) : null;
+}
+/** The plans this account can choose: its kept prices, or else the current ones. */
+export const plansFor = (kept: unknown, s: PaymentSettings): PlanOffer[] => cleanPlanPrices(kept) ?? plansOffered(s);
+/** Whether two settings offer different plans or prices. */
+export const plansDiffer = (a: PaymentSettings, b: PaymentSettings) => JSON.stringify(plansOffered(a)) !== JSON.stringify(plansOffered(b));
+/** "SGD 9.00 a month or SGD 90.00 a year". */
+export const offersLine = (o: PlanOffer[]) => o.map((p) => `${money(p.cents)} a ${p.plan === 'monthly' ? 'month' : 'year'}`).join(' or ');
+
 export const money = (c: number | null | undefined) => (typeof c === 'number' ? `SGD ${(c / 100).toFixed(2)}` : 'SGD —');
 /** "12 months", "2 years", "1 month". */
 export function lengthLabel(months: number): string {
