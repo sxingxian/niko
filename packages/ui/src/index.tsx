@@ -53,6 +53,7 @@ const PATHS: Record<string, string> = {
   share: 'M12 15V4M8 8l4-4 4 4M5 13v6h14v-6',
   again: 'M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5',
   expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+  collapse: 'M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5',
   image: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM3 16l5-5 4 4 3-3 6 6M15.5 9.5a1.5 1.5 0 1 0 0-.01',
 };
 export function Icon({ name, size = 22 }: { name: keyof typeof PATHS | string; size?: number }) {

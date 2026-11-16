@@ -27,6 +27,7 @@
 .home { position: relative; z-index: 1; height: 100%; overflow: hidden; --s: min(720px, 80vh, 92vw, 100vh - 250px); }
 .home .top { position: absolute; left: 36px; right: 36px; top: 30px; display: flex; align-items: center; justify-content: space-between; gap: 14px; z-index: 3; }
 .home .top .left { display: flex; align-items: center; gap: 14px; }
+.home .top .right { display: flex; align-items: center; gap: 10px; }
 .home .top .chip .short { display: none; }
 .home .stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; padding-top: max(20px, calc(50vh - 430px)); overflow: hidden; }
 /* The core moves aside particle by particle (drawn inside a wider canvas), not as a sliding block. */

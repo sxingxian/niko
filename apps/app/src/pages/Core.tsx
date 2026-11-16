@@ -10,6 +10,7 @@ import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from 
 import { isStacked } from '../flow';
 import { PictureCard } from './Picture';
 import { GlanceStack } from './Glance';
+import { toggleFullscreen, useFullscreen } from '../fullscreen';
 import type { Brief, BriefPart, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
 
 // The mockups' rail: Home, Inbox, Calendar, Notes, Connections. Settings (appearance, engine, account) sit behind the last button.
@@ -120,6 +121,7 @@ const CARD_GAP = 0.6; // seconds between the answer card and the approval card b
 export function Home() {
   const n = useNiko();
   const wide = useWide();
+  const fs = useFullscreen();
   const [nav, setNav] = useState(false);
   const [typing, setTyping] = useState(false);
   const [text, setText] = useState('');
@@ -164,7 +166,10 @@ export function Home() {
           <button className="ib g" style={{ width: 44, height: 44 }} onClick={() => setNav(!nav)} aria-label="Show or hide navigation" aria-expanded={nav}><Icon name="menu" /></button>
           <span className="wordmark">NIKO</span>
         </div>
+        <div className="right">
+        {fs.offer && <button className="ib g" style={{ width: 44, height: 44 }} onClick={() => void toggleFullscreen()} aria-label={fs.on ? 'Leave full screen' : 'Full screen'} aria-pressed={fs.on} title={fs.on ? 'Leave full screen' : 'Full screen'}><Icon name={fs.on ? 'collapse' : 'expand'} /></button>}
         <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : n.me?.engine.brain === 'self-hosted-ai' ? 'Your model' : 'Workers AI'} · {voiceName(firstVoice(n.me))}</span><span className="short">Engine</span></Link>
+        </div>
       </div>
       <Dock className={'dock' + (nav ? ' show' : '')} />
       <GlanceStack wide={wide} />

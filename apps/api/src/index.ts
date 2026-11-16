@@ -87,7 +87,7 @@ function manifest(site: Site): Response {
   const start = site.kind === 'app' ? '/' : '/app/';
   return Response.json({
     name: 'Niko', short_name: 'Niko', description: 'Your voice assistant across mail, calendars, notes and chats.',
-    start_url: start, scope: start, display: 'standalone', orientation: 'any', background_color: '#05070d', theme_color: '#05070d',
+    start_url: start, scope: start, display: 'fullscreen', display_override: ['fullscreen', 'standalone'], orientation: 'any', background_color: '#05070d', theme_color: '#05070d',
     icons: [{ src: '/app/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' }],
   }, { headers: { 'content-type': 'application/manifest+json' } });
 }
