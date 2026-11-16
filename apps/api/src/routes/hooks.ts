@@ -5,6 +5,8 @@ import { auditLog, connections, messages } from '@niko/db';
 import { loadAppKeys } from '../providers';
 import type { AppEnv } from '../env';
 import { hmacSha256Hex, safeEqual, unseal } from '../lib/crypto';
+import { handleStripeEvent } from '../billing';
+import { verifyStripeSignature } from '../stripe';
 
 export const hooks = new Hono<AppEnv>();
 
@@ -81,5 +83,17 @@ hooks.post('/in/:connId', async (c) => {
   let body: any = {};
   try { body = JSON.parse(raw); } catch { /* plain text is fine */ }
   await db.insert(messages).values({ userId: conn.userId, provider: conn.provider, chatId: 'automation', chatTitle: String(body.title ?? conn.provider).slice(0, 120), sender: conn.provider, body: String(body.text ?? raw).slice(0, 4000), direction: 'in' });
+  return c.json({ ok: true });
+});
+
+// Stripe: payments, plans and renewals. Trusted only with a valid signature from this endpoint's signing secret.
+hooks.post('/stripe', async (c) => {
+  const raw = await c.req.text();
+  if (raw.length > 512_000) return c.json({ ok: false }, 413);
+  if (!c.env.STRIPE_WEBHOOK_SECRET || !(await verifyStripeSignature(c.env.STRIPE_WEBHOOK_SECRET, c.req.header('stripe-signature'), raw))) return c.json({ ok: false }, 400);
+  let event: any;
+  try { event = JSON.parse(raw); } catch { return c.json({ ok: false }, 400); }
+  // A failure answers 500, so Stripe sends the event again later.
+  await handleStripeEvent(c.env, c.get('db'), event);
   return c.json({ ok: true });
 });

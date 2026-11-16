@@ -41,7 +41,27 @@ How it behaves:
 2. Create an API key with **sending access only** → `RESEND_API_KEY`.
 3. The sender is the `EMAIL_FROM` variable in `apps/api/wrangler.jsonc` (`Niko <niko-noreply@app.midnightpoetry.studio>`). Change it there if you want another address; it must be on the verified domain.
 
-Niko sends two kinds of email: invitations and password-reset links. Until `RESEND_API_KEY` is set, invites are still created in the admin portal but no email goes out, and "Forgot password" sends nothing.
+Niko sends invitations (with the 6-character invite code), sign-up email codes, password-reset links, "your account is on" and "unlocked" notes, and a reminder 7 days before someone's paid time ends. Until `RESEND_API_KEY` is set, invites are still created in the admin portal (the code is shown to you once, so you can pass it on yourself) but no email goes out, open sign-up can't get past the email code, and "Forgot password" sends nothing.
+
+## 1c. Payments (Stripe)
+
+People pay once for a set time (12 months by default), and when that time ends they choose a monthly or yearly plan to keep going. You set the prices in **Admin → Payments**. Card and PayNow details are typed on Stripe's own Checkout page and never reach Niko. Until both Stripe secrets are set, only free and lifetime invites can be sent, open sign-ups don't pay, and no plans are offered.
+
+Start in Stripe's **test mode** (the toggle at the top of the dashboard) and switch to live once everything below works.
+
+1. **Keys.** Developers → API keys → copy the **Secret key** (`sk_test_…`, later `sk_live_…`) → `STRIPE_SECRET_KEY`. A restricted key works too: give it write access to Checkout Sessions, Customers, Subscriptions, Refunds and the Customer portal, and read access to Payment Intents.
+2. **Webhook.** Developers → Webhooks → Add endpoint:
+   - URL: `https://niko.sxingxian.com/api/hooks/stripe` (one endpoint is enough: both domains share the database).
+   - Events: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`.
+   - Copy its **Signing secret** (`whsec_…`) → `STRIPE_WEBHOOK_SECRET`. Test mode and live mode each have their own endpoint and secret.
+3. **Payment methods.** Settings → Payment methods: turn on Cards, and PayNow if you want it. PayNow is offered for the one-time payment only; Stripe doesn't support it for monthly or yearly plans, so plans are paid by card (or Apple Pay / Google Pay).
+4. **Customer portal.** Settings → Billing → Customer portal: allow updating the payment method, viewing invoices and cancelling (at the end of the period), then **Save**. Niko's **Account → Billing → Manage** button opens this page; it fails until the portal has been saved once.
+5. **Failed renewals.** Settings → Billing → Subscriptions and emails: keep Smart Retries on and turn on the failed-payment emails. Niko keeps access for the grace days you choose in Admin → Payments (7 by default) while Stripe retries.
+6. In **Admin → Payments**, enter the pay-once price and length and the monthly and yearly prices, then **Save pricing**. Prices are Singapore dollars; Stripe's smallest charge is SGD 0.50.
+
+Accounts that existed before this update keep using Niko as before: the update marks them lifetime. Admins never pay.
+
+A Cloudflare cron trigger (`17 3 * * *`, in `wrangler.jsonc`) runs once a day: it removes open sign-ups that haven't paid within 7 days and sends the reminder emails. Cron triggers are included in the Workers free plan.
 
 ## 2. Secrets
 
@@ -59,6 +79,8 @@ npx wrangler login
 npx wrangler secret put ENCRYPTION_KEY
 npx wrangler secret put BOOTSTRAP_TOKEN
 npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put STRIPE_SECRET_KEY
+npx wrangler secret put STRIPE_WEBHOOK_SECRET
 ```
 
 | Secret | Needed | What it does |
@@ -66,13 +88,15 @@ npx wrangler secret put RESEND_API_KEY
 | `DATABASE_URL` | Yes | Connects the Worker to Neon. **Set automatically**: `npm run release` uploads the build's `DATABASE_URL` with every deploy (`scripts/deploy-worker.mjs`). Cloudflare *build* variables are not visible to the running Worker, which is why it isn't left to a second copy |
 | `ENCRYPTION_KEY` | Yes | Encrypts saved connection tokens and admin second-factor keys before they reach the database |
 | `BOOTSTRAP_TOKEN` | Once | Lets you create the owner account on first run (section 4). Useless after one user exists; delete it then |
-| `RESEND_API_KEY` | For email | Sends invitations and reset links |
+| `RESEND_API_KEY` | For email | Sends invitations, sign-up codes, reset links and reminders |
+| `STRIPE_SECRET_KEY` | For payments | Creates Stripe Checkout pages, refunds and plan changes (section 1c) |
+| `STRIPE_WEBHOOK_SECRET` | For payments | Checks that payment notices really come from Stripe (section 1c) |
 
 There are no Google, Microsoft, Notion or Slack keys here. Each account adds its own on the Connections screen (section 5).
 
 **Keep a copy of `ENCRYPTION_KEY` in your password manager.** If it is lost or changed, every saved connection, every account's app keys and every admin second factor become unreadable: people add their keys and reconnect and admins run `reset-2fa` (see "Account recovery").
 
-**Without a computer:** let the first deploy run (section 3), then add `ENCRYPTION_KEY`, `BOOTSTRAP_TOKEN` and `RESEND_API_KEY` in Cloudflare → Workers & Pages → `niko` → Settings → **Variables and secrets** → Add → type **Secret**. Secrets set there are kept across deploys. Make the two random values with a password manager's generator (44+ characters for `BOOTSTRAP_TOKEN`; `ENCRYPTION_KEY` must be exactly 32 random bytes in base64, so use the `openssl` line when you can).
+**Without a computer:** let the first deploy run (section 3), then add `ENCRYPTION_KEY`, `BOOTSTRAP_TOKEN`, `RESEND_API_KEY` and the two Stripe secrets in Cloudflare → Workers & Pages → `niko` → Settings → **Variables and secrets** → Add → type **Secret**. Secrets set there are kept across deploys. Make the two random values with a password manager's generator (44+ characters for `BOOTSTRAP_TOKEN`; `ENCRYPTION_KEY` must be exactly 32 random bytes in base64, so use the `openssl` line when you can).
 
 **Never put any of these in `wrangler.jsonc`, a committed `.env` or `.dev.vars` file, or a GitHub variable.** Only `EMAIL_FROM` and `AI_MODEL` are plain variables.
 
@@ -232,6 +256,11 @@ Incoming addresses the Worker listens on:
 - [ ] Sign out of the admin portal and sign in again with a **recovery code**, then press **New recovery codes** and save the new set.
 - [ ] Invite a second email address and check the email arrives; accept it and sign in.
 - [ ] Use **Forgot password** and check the reset email arrives and works once only.
+- [ ] Payments, in Stripe test mode (card `4242 4242 4242 4242`, any future date and CVC): set prices in **Admin → Payments**; send a **Pay once** invite; open it, enter a wrong code (the answer says how many tries are left), then the right one; pay; check "Payment received", create the account, and see **Paid once · until …** in Admin → Users.
+- [ ] Revoke a paid invite before it is used and check the refund appears in Stripe.
+- [ ] Switch to **Open registration**, sign up with a new address, confirm the email code, pay, and check the admin email "A paid sign-up is waiting". Switch the account on and check the "account is on" email and that sign-in works.
+- [ ] In Neon, set that account's `access_until` to yesterday; reload Niko and choose the monthly plan; check access returns and **Account → Billing → Manage** opens Stripe's billing page.
+- [ ] **Unlock** an account for 6 months and check the dates shown before you confirm match the result.
 - [ ] Type a wrong password 5 times: the fifth answer should say to wait 1 minute, and the right password is refused until then. Clear it with `npm run user -- unlock <email>`.
 - [ ] Add a passkey in **Account** on each domain, sign out, and sign in with it.
 - [ ] Ask Niko something with the built-in brain (Workers AI) and by voice; say "Niko" to wake it.

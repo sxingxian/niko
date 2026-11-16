@@ -1,6 +1,6 @@
 import { neon } from '@neondatabase/serverless';
 import { drizzle } from 'drizzle-orm/neon-http';
-import { bigint, bigserial, boolean, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, bigserial, boolean, integer, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 const ts = (name: string) => timestamp(name, { withTimezone: true });
 
@@ -23,6 +23,19 @@ export const users = pgTable('users', {
   /** This account's changes to the admin's default limits for new items on Home. Set by an admin only. */
   glanceLimits: jsonb('glance_limits').notNull().default({}).$type<Record<string, unknown>>(),
   accountLimits: jsonb('account_limits').notNull().default({}).$type<Record<string, unknown>>(),
+  // ---- access and payments (see migration 0007)
+  lifetime: boolean('lifetime').notNull().default(false),
+  accessUntil: ts('access_until'),
+  accessKind: text('access_kind'),
+  accessPaidUntil: ts('access_paid_until'),
+  accessStartMonths: integer('access_start_months').notNull().default(0),
+  stripeCustomerId: text('stripe_customer_id'),
+  subId: text('sub_id'),
+  subStatus: text('sub_status'),
+  subPlan: text('sub_plan'),
+  subPeriodEnd: ts('sub_period_end'),
+  subCancelAtEnd: boolean('sub_cancel_at_end').notNull().default(false),
+  remindedFor: ts('reminded_for'),
   createdAt: ts('created_at').notNull().defaultNow(),
   lastActiveAt: ts('last_active_at'),
 });
@@ -49,6 +62,39 @@ export const invites = pgTable('invites', {
   expiresAt: ts('expires_at').notNull(),
   usedAt: ts('used_at'),
   revokedAt: ts('revoked_at'),
+  access: text('access').notNull().default('life'),
+  priceCents: integer('price_cents'),
+  months: integer('months'),
+  codeHash: text('code_hash'),
+  codeTries: integer('code_tries').notNull().default(0),
+  passHash: text('pass_hash'),
+  checkoutId: text('checkout_id'),
+  paidAt: ts('paid_at'),
+  paymentIntent: text('payment_intent'),
+  stripeCustomerId: text('stripe_customer_id'),
+  refundedAt: ts('refunded_at'),
+});
+
+/** Open sign-ups in progress: confirm email, pay, then wait for an admin. */
+export const signups = pgTable('signups', {
+  userId: uuid('user_id').primaryKey(),
+  tokenHash: text('token_hash').notNull(),
+  state: text('state').notNull().default('verify'),
+  codeHash: text('code_hash'),
+  codeExpiresAt: ts('code_expires_at'),
+  codeTries: integer('code_tries').notNull().default(0),
+  priceCents: integer('price_cents'),
+  months: integer('months'),
+  checkoutId: text('checkout_id'),
+  paidAt: ts('paid_at'),
+  paymentIntent: text('payment_intent'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export const stripeEvents = pgTable('stripe_events', {
+  id: text('id').primaryKey(),
+  type: text('type').notNull(),
+  createdAt: ts('created_at').notNull().defaultNow(),
 });
 
 export const passwordResets = pgTable('password_resets', {
@@ -173,7 +219,7 @@ export const providerApps = pgTable('provider_apps', {
 
 export const schema = {
   users, sessions, invites, passwordResets, passkeys, webauthnChallenges, appSettings,
-  connections, oauthStates, messages, pendingSends, chatTurns, auditLog, authAttempts, recoveryCodes, providerApps,
+  connections, oauthStates, messages, pendingSends, chatTurns, auditLog, authAttempts, recoveryCodes, providerApps, signups, stripeEvents,
 };
 
 export function createDb(databaseUrl: string) {
@@ -181,6 +227,8 @@ export function createDb(databaseUrl: string) {
 }
 export type Db = ReturnType<typeof createDb>;
 export type User = typeof users.$inferSelect;
+export type Invite = typeof invites.$inferSelect;
+export type Signup = typeof signups.$inferSelect;
 
 /** New items on Home: per account, when each kind was last checked, what has been shown, and the next few events. */
 export const glanceState = pgTable('glance_state', {

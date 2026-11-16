@@ -584,3 +584,42 @@ button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; 
   .glance-drain { margin: 8px -14px 0; }
 }
 @media (prefers-reduced-motion: reduce) { .glance { transition: opacity .2s; transform: none; } .glance-drain i { transition: none; } }
+
+/* ---- invite code, payment and plans (Invite-Flow, SignUp-Pay and Access-Ended mockups) */
+.auth .card .hd { display: flex; flex-direction: column; gap: 8px; }
+.auth .card .hd > .ic { width: 40px; height: 40px; stroke-width: 1.4; }
+.auth .card .sub.small, .set-card .sub.small { font-size: 13px; }
+.flowsteps { list-style: none; margin: 0; padding: 0; display: flex; gap: 8px; flex-wrap: wrap; }
+.flowsteps li { height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid rgba(255,255,255,.3); display: flex; align-items: center; font: 500 12px 'JetBrains Mono', monospace; letter-spacing: .08em; }
+.flowsteps li.done { border-color: #fff; }
+.flowsteps li.now { background: #fff; color: #05070d; border-color: #fff; }
+.codebox { position: relative; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+.codebox span { height: 64px; border-radius: 14px; border: 1px solid rgba(255,255,255,.3); background: rgba(255,255,255,.04); display: flex; align-items: center; justify-content: center; font: 500 26px 'JetBrains Mono', monospace; }
+.codebox input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; border: 0; padding: 0; cursor: text; font-size: 16px; }
+.codebox:focus-within { outline: 2px solid #fff; outline-offset: 4px; border-radius: 16px; }
+.codebox:focus-within span.cur { border-color: #fff; }
+.paysum { margin: 0; display: flex; flex-direction: column; border-radius: 18px; border: 1px solid rgba(255,255,255,.18); }
+.paysum > div { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; font-size: 15px; }
+.paysum > div + div { border-top: 1px solid rgba(255,255,255,.12); }
+.paysum dd { margin: 0; display: flex; align-items: center; gap: 8px; text-align: right; min-width: 0; overflow-wrap: anywhere; }
+.paysum dd.amount { font-weight: 600; font-size: 18px; }
+.waitbar { height: 4px; border-radius: 2px; background: rgba(255,255,255,.15); overflow: hidden; }
+.waitbar span { display: block; height: 100%; width: 40%; border-radius: 2px; background: #fff; animation: waitbar 1.2s ease-in-out infinite; }
+@keyframes waitbar { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+@media (prefers-reduced-motion: reduce) { .waitbar span { animation: none; width: 100%; opacity: .5; } }
+.notebox { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-radius: 16px; border: 1px solid rgba(255,255,255,.22); font-size: 15px; }
+.plans { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.plans legend { padding: 0; margin-bottom: 10px; }
+.plan-opt { display: flex; align-items: center; gap: 14px; padding: 16px 18px; border-radius: 18px; border: 1px solid rgba(255,255,255,.25); cursor: pointer; }
+.plan-opt.on { border-color: #fff; background: rgba(255,255,255,.08); }
+.plan-opt input { width: 20px; height: 20px; margin: 0; accent-color: #fff; flex: none; }
+.plan-opt:focus-within { outline: 2px solid #fff; outline-offset: 2px; }
+.plan-txt { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.plan-txt b { font-size: 16px; font-weight: 500; }
+.plan-txt .sub, .plan-price .sub { font-size: 13px; }
+.plan-price { display: flex; flex-direction: column; align-items: flex-end; }
+.plan-price b { font-size: 18px; font-weight: 600; white-space: nowrap; }
+@media (max-width: 860px) {
+  .auth .card { max-height: calc(100dvh - 140px); overflow-y: auto; }
+  .codebox span { height: 52px; font-size: 22px; }
+}

@@ -7,6 +7,10 @@ export interface Env {
   ENCRYPTION_KEY: string;
   BOOTSTRAP_TOKEN?: string;
   RESEND_API_KEY?: string;
+  /** Stripe secret key (sk_live_… or sk_test_…). Without it and the webhook secret, payments are off. */
+  STRIPE_SECRET_KEY?: string;
+  /** Signing secret of the Stripe webhook endpoint (whsec_…). */
+  STRIPE_WEBHOOK_SECRET?: string;
   EMAIL_FROM: string;
   AI_MODEL: string;
 }

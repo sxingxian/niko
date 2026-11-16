@@ -18,7 +18,7 @@ Both domains share one Neon database, so an account works on either. Sessions an
 apps/api       Cloudflare Worker (Hono): API, host/path routing, static assets
 apps/landing   Landing page: scroll-animated particles (vanilla TS + Lenis)
 apps/app       The app (React): home core, workspace, connections, engine, appearance, account, auth screens
-apps/admin     Admin portal (React): sign-in with second factor, users, registration, audit log
+apps/admin     Admin portal (React): sign-in with second factor, users, invites, payments, registration, audit log
 packages/db    Drizzle schema + SQL migration for Neon
 packages/shared  Provider list, types, validation
 packages/ui    Niko styles, particle core, shared components
@@ -26,7 +26,7 @@ packages/ui    Niko styles, particle core, shared components
 
 ## Stack (free tiers)
 
-Cloudflare Workers + Static Assets + Workers AI · Neon Postgres · Resend · browser speech recognition and speech synthesis · Workers AI and on-device (Kokoro) voices · optional voice server, ElevenLabs and your own AI key.
+Cloudflare Workers + Static Assets + Workers AI · Neon Postgres · Resend · Stripe (payments, no monthly fee) · browser speech recognition and speech synthesis · Workers AI and on-device (Kokoro) voices · optional voice server, ElevenLabs and your own AI key.
 
 ## Status: what works, what is untested, what is not built
 
@@ -35,6 +35,7 @@ Nothing here has run against live services yet. The code typechecks, all three f
 | Area | State |
 |---|---|
 | Landing, sign-in, invite, sign-up, forgot/reset password | Built |
+| Payments (Stripe Checkout, SGD): pay once for a set time, then a monthly or yearly plan; paid, free or lifetime invites with a 6-character code; open sign-up with an email code, payment, then admin switch-on; admin unlock (lifetime or a set time, after any paid time); refunds on revoking a paid invite; reminders and removal of unpaid sign-ups once a day | Built; tested end to end against a local PostgreSQL with Stripe and email stood in for, not yet against Stripe itself |
 | Passkeys (sign-in only; added from Account) | Built |
 | Admin: second factor (authenticator app), users on/off, invites, registration switch, audit log | Built |
 | Per-account provider app keys (Google, Microsoft, Notion, Slack), no server-wide keys | Built; not yet run against the providers |

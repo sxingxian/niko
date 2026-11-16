@@ -7,6 +7,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "none", "html_handling": "none" },
   "ai": { "binding": "AI" },
+  // Once a day at 03:17 UTC: remove unpaid sign-ups after 7 days, and email reminders before paid time ends.
+  "triggers": { "crons": ["17 3 * * *"] },
   "observability": { "enabled": true },
   // Answer only on the custom domains below, never on *.workers.dev or preview addresses.
   "workers_dev": false,
@@ -23,6 +25,6 @@
     "AI_MODEL": "@cf/meta/llama-4-scout-17b-16e-instruct,@cf/mistralai/mistral-small-3.1-24b-instruct"
   }
   // Secrets (set with `wrangler secret put NAME`, never committed):
-  // DATABASE_URL, ENCRYPTION_KEY, BOOTSTRAP_TOKEN, RESEND_API_KEY
+  // DATABASE_URL, ENCRYPTION_KEY, BOOTSTRAP_TOKEN, RESEND_API_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
   // Google, Microsoft, Notion and Slack keys are NOT set here: each account saves its own on the Connections screen.
 }

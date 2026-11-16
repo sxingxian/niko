@@ -2,10 +2,11 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, users } from '@niko/db';
 import { cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
-import { APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
+import { accessState, APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
 import { audit, requireUser, tooMany } from '../lib/session';
+import { accessFor, paymentSettings } from '../billing';
 import { eventDetail, mailDetail, noteDetail } from '../details';
 import { BrainFail, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveKeys, testEntry, think } from '../brains';
 import { cleanWhere, forecastText, geocode, stripWeatherTags, weatherTags } from '../weather';
@@ -24,6 +25,15 @@ import {
 
 export const app = new Hono<AppEnv>();
 app.use('*', requireUser);
+// Using Niko needs access: paid or free time left, a plan, lifetime, or an admin account. Without it only /me answers
+// (so the app can offer a plan); /api/billing sits outside this router.
+app.use('*', async (c, next) => {
+  if (c.req.method === 'GET' && c.req.path.endsWith('/api/me')) return next();
+  if (!accessState(c.get('user'), (await paymentSettings(c.get('db'))).graceDays).has) {
+    return c.json({ error: 'Your time with Niko has ended. Choose a plan to keep going.', code: 'plan_needed' }, 402);
+  }
+  await next();
+});
 
 const clampNum = (v: unknown, lo: number, hi: number, d: number) => (typeof v === 'number' && isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : d);
 
@@ -31,7 +41,7 @@ const clampNum = (v: unknown, lo: number, hi: number, d: number) => (typeof v ==
 app.get('/me', async (c) => {
   const u = c.get('user');
   const weather = !!(await getConnection(c.get('db'), u.id, 'open-meteo').catch(() => null));
-  return c.json({ id: u.id, email: u.email, name: u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: await offFor(c.get('db'), u), glanceLimits: await limitsFor(c.get('db'), u) });
+  return c.json({ id: u.id, email: u.email, name: u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: await offFor(c.get('db'), u), glanceLimits: await limitsFor(c.get('db'), u), access: await accessFor(c.env, c.get('db'), u) });
 });
 
 app.patch('/me', async (c) => {

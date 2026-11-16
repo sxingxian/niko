@@ -510,12 +510,13 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   startRecRef.current = startRec;
 
   useEffect(() => {
-    // Wake word listening starts only if the user enabled it, and only after sign-in.
+    // Wake word listening starts only if the user enabled it, only after sign-in, and only while the account has access
+    // (when paid time has ended, the plan screen is shown instead and Niko doesn't listen).
     const wake = (me?.engine as EnginePrefs | undefined)?.wake;
-    if (me && wake && SR) { wantRec.current = true; startRec(); }
+    if (me && wake && SR && me.access?.has !== false) { wantRec.current = true; startRec(); }
     return () => { wantRec.current = false; try { rec.current?.stop(); } catch { /* noop */ } };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [me?.id, (me?.engine as any)?.wake]);
+  }, [me?.id, (me?.engine as any)?.wake, me?.access?.has]);
 
   const toggleMic = useCallback(() => {
     stopSpeech();
