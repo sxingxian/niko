@@ -7,8 +7,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "none", "html_handling": "none" },
   "ai": { "binding": "AI" },
-  // Once a day at 03:17 UTC: remove unpaid sign-ups after 7 days, and email reminders before paid time ends.
-  "triggers": { "crons": ["17 3 * * *"] },
+  // No cron triggers: the Workers free plan allows only 5 per account. The daily job runs from traffic (maybeDaily).
+  "triggers": { "crons": [] },
   "observability": { "enabled": true },
   // Answer only on the custom domains below, never on *.workers.dev or preview addresses.
   "workers_dev": false,
