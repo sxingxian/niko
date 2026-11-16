@@ -2,8 +2,8 @@ import { and, desc, eq, gt, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { appSettings, auditLog, invites, recoveryCodes, sessions, signups, users } from '@niko/db';
 import { accessState, accountLimits, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, glanceLimits, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
-import { dateLabel, forgetPayments, forgetStripeMode, inviteCodeHash, keysOf, makeInviteCode, paymentSettings, PAYMENTS_KEY, payNow, plansLine, STRIPE_MODE_KEY, stripeMode } from '../billing';
-import { isMode, modeStatus, stripe, stripeReady } from '../stripe';
+import { connectInfo, connectStripe, dateLabel, forgetPayments, forgetStripeMode, inviteCodeHash, keysOf, makeInviteCode, paymentSettings, PAYMENTS_KEY, payNow, plansLine, secretsFor, STRIPE_MODE_KEY, stripeMode } from '../billing';
+import { isMode, keysFor, modeStatus, stripe, StripeError, stripeReady } from '../stripe';
 import { forgetGlanceDefaults, GLANCE_DEFAULT_KEY, glanceDefaults } from '../glance';
 import { accountDefaults, ACCOUNT_LIMITS_KEY, forgetAccountDefaults } from '../limits';
 import { AI_DEFAULT_KEY, aiDefaults, forgetAiDefaults } from '../access';
@@ -296,16 +296,35 @@ admin.delete('/users/:id', requireAdmin, async (c) => {
 admin.get('/payments', requireAdmin, async (c) => {
   const db = c.get('db');
   const mode = await stripeMode(db, true);
-  return c.json({ settings: await paymentSettings(db, true), stripe: stripeReady(keysOf(c.env, mode)), mode, modes: { test: modeStatus(c.env, 'test'), live: modeStatus(c.env, 'live') } });
+  const secrets = await secretsFor(c.env, db);
+  const info = await connectInfo(db, true);
+  const status = (m: 'test' | 'live') => ({ ...modeStatus(secrets, m), connectedAt: info[m]?.at ?? null, account: info[m]?.account ?? null });
+  return c.json({ settings: await paymentSettings(db, true), stripe: stripeReady(keysFor(secrets, mode)), mode, modes: { test: status('test'), live: status('live') } });
+});
+// Connect: Niko sets up this Stripe mode itself (checks the key, makes the webhook and the billing page settings), so
+// nothing is set up by hand in Stripe. Safe to press again.
+admin.post('/payments/connect', requireAdmin, async (c) => {
+  const b = await c.req.json<{ mode?: string }>().catch(() => ({} as { mode?: string }));
+  if (!isMode(b.mode)) return c.json({ error: 'Choose test or live.' }, 400);
+  const st = modeStatus(c.env, b.mode);
+  if (!st.secret || (st.problem && !/Press Connect|webhook/.test(st.problem))) return c.json({ error: st.problem ?? `Add the ${b.mode} secret key to the server first (docs/DEPLOYMENT.md, section 1c).` }, 400);
+  try {
+    const r = await connectStripe(c.env, c.get('db'), b.mode, new URL(c.req.url).origin);
+    await audit(c, 'payments.connect', { mode: b.mode, account: r.account }, c.get('user').id);
+    return c.json({ ok: true, ...r });
+  } catch (e) {
+    const se = e as StripeError;
+    return c.json({ error: se.status === 400 ? se.message : `Stripe didn’t accept the setup: ${se.message}` }, se.status === 400 ? 400 : 502);
+  }
 });
 // Test or live: which Stripe keys new payments use. Only to a mode whose keys are set and look right. Payments, plans and
 // refunds already made keep using their own mode either way.
 admin.put('/payments/mode', requireAdmin, async (c) => {
   const b = await c.req.json<{ mode?: string }>().catch(() => ({} as { mode?: string }));
   if (!isMode(b.mode)) return c.json({ error: 'Choose test or live.' }, 400);
-  const st = modeStatus(c.env, b.mode);
-  if (!st.ready) return c.json({ error: st.problem ?? `Add the ${b.mode} secret key and webhook signing secret to the server first (docs/DEPLOYMENT.md, section 1c).` }, 400);
   const db = c.get('db');
+  const st = modeStatus(await secretsFor(c.env, db), b.mode);
+  if (!st.ready) return c.json({ error: st.problem ?? `Add the ${b.mode} secret key to the server, then press Connect (docs/DEPLOYMENT.md, section 1c).` }, 400);
   const before = await stripeMode(db, true);
   await db.insert(appSettings).values({ key: STRIPE_MODE_KEY, value: b.mode }).onConflictDoUpdate({ target: appSettings.key, set: { value: b.mode } });
   forgetStripeMode();

@@ -5,7 +5,7 @@ import { auditLog, connections, messages } from '@niko/db';
 import { loadAppKeys } from '../providers';
 import type { AppEnv } from '../env';
 import { hmacSha256Hex, safeEqual, unseal } from '../lib/crypto';
-import { handleStripeEvent } from '../billing';
+import { handleStripeEvent, secretsFor } from '../billing';
 import { verifyStripeEvent } from '../stripe';
 
 export const hooks = new Hono<AppEnv>();
@@ -94,7 +94,7 @@ hooks.post('/stripe', async (c) => {
   try { event = JSON.parse(raw); } catch { return c.json({ ok: false }, 400); }
   // One address for both modes: the event is checked against the live and the test signing secret, and handled in the
   // mode it was signed for, whichever mode new payments use now (renewals and refunds of the other mode keep working).
-  const mode = await verifyStripeEvent(c.env, c.req.header('stripe-signature'), raw, event);
+  const mode = await verifyStripeEvent(await secretsFor(c.env, c.get('db')), c.req.header('stripe-signature'), raw, event);
   if (!mode) return c.json({ ok: false }, 400);
   // A failure answers 500, so Stripe sends the event again later.
   await handleStripeEvent(c.env, c.get('db'), event, mode);

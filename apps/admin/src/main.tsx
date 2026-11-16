@@ -19,7 +19,7 @@ interface UserRow {
 }
 interface InviteRow { id: string; email: string; role: string; expiresAt: string; access: 'paid' | 'free' | 'life'; priceCents: number | null; months: number | null; paidAt: string | null; stripeMode: Mode | null; codeTries: number; hasCode: boolean }
 type Mode = 'test' | 'live';
-type ModeStatus = { ready: boolean; secret: boolean; webhook: boolean; problem: string | null };
+type ModeStatus = { ready: boolean; secret: boolean; webhook: boolean; problem: string | null; connectedAt: string | null; account: string | null };
 const testTag = (m: Mode | null | undefined) => (m === 'test' ? ' · test' : '');
 interface AuditRow { id: string; action: string; detail: Record<string, unknown>; createdAt: string }
 
@@ -358,10 +358,20 @@ function TestBanner({ onOpen }: { onOpen?: () => void }) {
 }
 
 /** Test or live: which Stripe keys new payments use. The keys themselves stay in the server's secrets. */
-function ModeCard({ mode, modes, onSwitched, guard }: { mode: Mode; modes: Record<Mode, ModeStatus>; onSwitched: (m: Mode) => void; guard: (e: unknown) => void }) {
+function ModeCard({ mode, modes, onSwitched, onReload, guard }: { mode: Mode; modes: Record<Mode, ModeStatus>; onSwitched: (m: Mode) => void; onReload: (text: string, ok: boolean) => void; guard: (e: unknown) => void }) {
   const [asking, setAsking] = useState<Mode | null>(null);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [connecting, setConnecting] = useState<Mode | null>(null);
+  const connect = async (m: Mode) => {
+    setConnecting(m);
+    try {
+      const r = await api<{ account: string; chargesEnabled: boolean | null }>('/admin/payments/connect', { body: { mode: m } });
+      onReload(m === 'live' && r.chargesEnabled === false
+        ? `Connected to ${r.account || 'your Stripe account'} (live), but Stripe hasn’t activated it for payments yet. Finish activating it in Stripe before going live.`
+        : `Connected to ${r.account || 'your Stripe account'} (${m}). Niko set up the webhook and the billing page there.`, true);
+    } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else onReload((e as Error).message, false); } finally { setConnecting(null); }
+  };
   const go = async () => {
     if (!asking) return;
     setBusy(true); setErr('');
@@ -370,10 +380,14 @@ function ModeCard({ mode, modes, onSwitched, guard }: { mode: Mode; modes: Recor
   };
   const line = (m: Mode) => {
     const st = modes[m];
+    const sub = !st.secret ? `Add the ${m} secret key to the server (docs/DEPLOYMENT.md, 1c)`
+      : st.problem && !/Press Connect/.test(st.problem) ? st.problem
+      : st.connectedAt ? `Connected${st.account ? ` to ${st.account}` : ''} · ${fmtDate(st.connectedAt)}`
+      : st.webhook ? 'Webhook secret set by hand' : 'Key set · not connected yet';
     return (
       <div className="mode-row">
-        <span className="pay-txt"><span>{m === 'live' ? 'Live' : 'Test'} keys</span>
-          <span className="sub small">{st.problem ?? [st.secret ? 'Secret key set' : 'Secret key missing', st.webhook ? 'webhook secret set' : 'webhook secret missing'].join(' · ')}</span></span>
+        <span className="pay-txt"><span>{m === 'live' ? 'Live' : 'Test'}</span><span className="sub small">{sub}</span></span>
+        {st.secret && (!st.problem || /Press Connect/.test(st.problem)) && <button className="bt sm" disabled={connecting !== null} onClick={() => connect(m)}>{connecting === m ? 'Connecting…' : st.connectedAt ? 'Connect again' : 'Connect'}</button>}
         <span className={'pill-st ' + (st.ready ? 'ok' : 'no')}>{st.ready ? 'Ready' : 'Not ready'}</span>
       </div>
     );
@@ -390,7 +404,7 @@ function ModeCard({ mode, modes, onSwitched, guard }: { mode: Mode; modes: Recor
         </div>
       </div>
       <div className="mode-rows">{line('test')}{line('live')}</div>
-      <p className="sub small">Switching changes only new payments. Payments, plans and refunds already made keep working in the mode they were made in, and are labelled “test” in Users when they were test payments. The keys are kept in the server’s secrets, never here.</p>
+      <p className="sub small">Nothing is set up by hand in Stripe: Connect has Niko make its webhook and billing page there, and prices and products go from Niko with each payment. Switching changes only new payments; payments, plans and refunds already made keep working in their own mode, and test ones are labelled “test” in Users. The secret keys stay in the server’s secrets, never here.</p>
       {asking && (
         <div className="scrim" onClick={(e) => { if (e.target === e.currentTarget) setAsking(null); }}>
           <div className="dialog" role="dialog" aria-modal="true" aria-labelledby="modeh">
@@ -472,7 +486,7 @@ function PaymentsAdmin({ guard }: { guard: (e: unknown) => void }) {
     {mode === 'test' && <TestBanner />}
     <header><h1>Payments</h1><p className="sub" style={{ fontSize: 15, display: 'flex', alignItems: 'center', gap: 10 }}><i className={'dot' + (ready ? (mode === 'live' ? ' on' : ' test') : '')} />{ready ? `Stripe ${mode === 'live' ? 'live' : 'test mode'} · SGD · pay once for a set time, then a monthly or yearly plan` : `Stripe ${mode} mode isn’t set up: paid invites, paid sign-ups and plans are off until its keys are added (docs/DEPLOYMENT.md).`}</p></header>
     {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
-    {modes && <ModeCard mode={mode} modes={modes} guard={guard} onSwitched={(m) => { setMode(m); setReady(modes[m].ready); setNote({ ok: true, text: m === 'live' ? 'Live. New payments now charge real money.' : 'Test mode. New payments use test cards.' }); }} />}
+    {modes && <ModeCard mode={mode} modes={modes} guard={guard} onReload={(text, ok) => { setNote({ ok, text }); api<{ stripe: boolean; mode: Mode; modes: Record<Mode, ModeStatus> }>('/admin/payments').then((r) => { setReady(r.stripe); setMode(r.mode); setModes(r.modes); }).catch(guard); }} onSwitched={(m) => { setMode(m); setReady(modes[m].ready); setNote({ ok: true, text: m === 'live' ? 'Live. New payments now charge real money.' : 'Test mode. New payments use test cards.' }); }} />}
     <div className="pay-grid">
       <section className="g card" aria-label="Pricing">
         <div><span className="k">Pricing</span><p className="sub" style={{ marginTop: 6 }}>The default for new invites and sign-ups. Each invite can change it.</p></div>
@@ -518,7 +532,7 @@ function PaymentsAdmin({ guard }: { guard: (e: unknown) => void }) {
               {GRACE_STEPS.map((d) => <button key={d} className="seg" aria-pressed={s.graceDays === d} onClick={() => set({ graceDays: d })}>{d} days</button>)}
             </div>
           </div>
-          <p className="sub small">Stripe retries the card and emails them. After that, they choose a plan again to keep going.</p>
+          <p className="sub small">Stripe retries the card and Niko emails them to update it. After that, they choose a plan again to keep going.</p>
           <div className="pay-row">
             <Switch on={s.remind} onChange={(v) => set({ remind: v })} label="Email a reminder before paid time ends" />
             <span className="pay-txt"><span>Email a reminder 7 days before someone’s paid time ends</span></span>

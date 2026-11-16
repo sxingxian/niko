@@ -40,6 +40,8 @@ const emails = [];
 const stripeCalls = [];
 const sessions = new Map();
 const subs = new Map();
+const endpoints = new Map();
+const made = {};
 let seq = 0;
 const unflat = (params) => {
   const out = {};
@@ -78,6 +80,18 @@ globalThis.fetch = async (input, init = {}) => {
     return Response.json(sub);
   }
   if (method === 'POST' && path === '/billing_portal/sessions') return Response.json({ url: 'https://billing.stripe.com/p/session/test' });
+  if (method === 'GET' && path === '/account') return Response.json({ id: 'acct_1', charges_enabled: call.mode === 'test', business_profile: { name: 'Midnight Poetry' } });
+  if (method === 'GET' && path === '/webhook_endpoints') return Response.json({ data: [...endpoints.values()].filter((e) => e.mode === call.mode) });
+  if (method === 'DELETE' && (m = path.match(/^\/webhook_endpoints\/(we_\w+)$/))) { endpoints.delete(m[1]); return Response.json({ id: m[1], deleted: true }); }
+  if (method === 'POST' && path === '/webhook_endpoints') {
+    const id = `we_${call.mode}_${++seq}`;
+    const secret = `whsec_made_${call.mode}_${seq}`;
+    made[call.mode] = secret;
+    endpoints.set(id, { id, url: call.p.url, mode: call.mode, events: Object.entries(call.p).filter(([k]) => k.startsWith('enabled_events')).map(([, v]) => v) });
+    return Response.json({ id, secret, url: call.p.url });
+  }
+  if (method === 'POST' && path === '/billing_portal/configurations') return Response.json({ id: `bpc_${call.mode}` });
+  if (method === 'POST' && path === '/products') return Response.json({ id: `prod_${call.mode}_${call.p['metadata[niko]']}` });
   throw new Error(`unexpected Stripe call ${method} ${path}`);
 };
 
@@ -85,7 +99,8 @@ globalThis.fetch = async (input, init = {}) => {
 const env = {
   DATABASE_URL: url, ENCRYPTION_KEY: randomBytes(32).toString('base64'), BOOTSTRAP_TOKEN: 'boot-' + randomBytes(12).toString('hex'),
   RESEND_API_KEY: 're_test', EMAIL_FROM: 'Niko <niko-noreply@app.midnightpoetry.studio>', AI_MODEL: '@cf/x',
-  STRIPE_TEST_SECRET_KEY: 'sk_test_niko', STRIPE_TEST_WEBHOOK_SECRET: 'whsec_test_niko', STRIPE_LIVE_SECRET_KEY: 'sk_live_niko', STRIPE_LIVE_WEBHOOK_SECRET: 'whsec_live_niko',
+  // Only the secret keys are set by hand; Connect has Niko make the webhooks (and their signing secrets) in Stripe.
+  STRIPE_TEST_SECRET_KEY: 'sk_test_niko', STRIPE_LIVE_SECRET_KEY: 'sk_live_niko',
   ASSETS: { fetch: async () => new Response('page') }, AI: { run: async () => ({ response: 'ok' }) },
 };
 const waits = [];
@@ -114,8 +129,8 @@ class Browser {
   del(p) { return this.call('DELETE', p); }
 }
 let evt = 0;
-async function webhook(type, object, { secret = env.STRIPE_TEST_WEBHOOK_SECRET, id, livemode } = {}) {
-  const raw = JSON.stringify({ id: id ?? `evt_${++evt}`, type, livemode: livemode ?? secret === env.STRIPE_LIVE_WEBHOOK_SECRET, data: { object } });
+async function webhook(type, object, { secret = made.test, id, livemode } = {}) {
+  const raw = JSON.stringify({ id: id ?? `evt_${++evt}`, type, livemode: livemode ?? secret === made.live, data: { object } });
   const t = Math.floor(Date.now() / 1000);
   const sig = createHmac('sha256', secret).update(`${t}.${raw}`).digest('hex');
   const res = await worker.fetch(new Request(ORIGIN + '/api/hooks/stripe', { method: 'POST', headers: { 'stripe-signature': `t=${t},v1=${sig}`, 'content-type': 'application/json' }, body: raw }), env, ctx);
@@ -149,6 +164,30 @@ await ok('first owner is set up; existing accounts never need to pay', async () 
   assert.equal(me.data.access.has, true); assert.equal(me.data.access.kind, 'admin');
 });
 
+await ok('nothing set up in Stripe: Connect has Niko make the webhook and billing page in each mode', async () => {
+  let r = await admin.get('/admin/payments');
+  assert.equal(r.data.modes.test.ready, false); assert.match(r.data.modes.test.problem, /Press Connect/);
+  assert.equal((await admin.put('/admin/payments/mode', { mode: 'live' })).status, 400);
+  r = await admin.post('/admin/payments/connect', { mode: 'test' });
+  assert.equal(r.status, 200, JSON.stringify(r.data)); assert.equal(r.data.account, 'Midnight Poetry');
+  const ep = [...endpoints.values()].find((e) => e.mode === 'test');
+  assert.equal(ep.url, `${ORIGIN}/api/hooks/stripe`);
+  assert.deepEqual(ep.events.sort(), ['checkout.session.async_payment_succeeded', 'checkout.session.completed', 'customer.subscription.created', 'customer.subscription.deleted', 'customer.subscription.updated', 'invoice.paid', 'invoice.payment_failed']);
+  // Pressed again: the old endpoint is replaced, not doubled.
+  r = await admin.post('/admin/payments/connect', { mode: 'test' });
+  assert.equal(r.status, 200);
+  assert.equal([...endpoints.values()].filter((e) => e.mode === 'test').length, 1);
+  r = await admin.post('/admin/payments/connect', { mode: 'live' });
+  assert.equal(r.status, 200); assert.equal(r.data.chargesEnabled, false, 'live account not yet activated is reported');
+  const row = (await q(`select value from app_settings where key = 'stripe-connect'`))[0].value;
+  assert.ok(row.test.hook.startsWith('v1.') && !JSON.stringify(row).includes('whsec_'), 'the signing secret is stored encrypted');
+  assert.equal(row.test.portal, 'bpc_test'); assert.equal(row.live.portal, 'bpc_live');
+  r = await admin.get('/admin/payments');
+  assert.equal(r.data.modes.test.ready, true); assert.equal(r.data.modes.live.ready, true); assert.ok(r.data.modes.live.connectedAt);
+  assert.ok(!JSON.stringify(r.data).includes('whsec_') && !JSON.stringify(r.data).includes('sk_'), 'no secret reaches the browser');
+  const keep = env.STRIPE_LIVE_SECRET_KEY; env.STRIPE_LIVE_SECRET_KEY = 'sk_live_bad';
+  try { assert.equal((await admin.post('/admin/payments/connect', { mode: 'sandbox' })).status, 400); } finally { env.STRIPE_LIVE_SECRET_KEY = keep; }
+});
 await ok('a paid invite needs a price; the Payments page saves prices and refuses both plans off', async () => {
   let r = await admin.post('/admin/invites', { email: 'early@example.com', access: 'paid' });
   assert.equal(r.status, 400); assert.match(r.data.error, /price/);
@@ -199,6 +238,8 @@ await ok('Checkout is made on Stripe with the fixed price and the invite’s ema
   const c = stripeCalls.at(-1);
   assert.equal(c.p.mode, 'payment'); assert.equal(c.p.customer_email, 'priya@example.com'); assert.equal(c.p['line_items[0][price_data][unit_amount]'], '4900');
   assert.equal(c.p['line_items[0][price_data][currency]'], 'sgd'); assert.equal(c.p['metadata[kind]'], 'invite'); assert.match(c.p.success_url, /paid=\{CHECKOUT_SESSION_ID\}/);
+  assert.equal(c.p['line_items[0][price_data][product]'], 'prod_test_access-12', 'Niko’s own product, made in Stripe when first needed');
+  assert.equal(c.p['line_items[0][price_data][product_data][name]'], undefined);
   pSession = r.data.url.split('/').at(-1);
   const s = await priya.get(`/auth/invite/${pToken}/status?session=${pSession}`);
   assert.equal(s.data.paid, false, 'returning from Stripe proves nothing while Stripe says unpaid');
@@ -392,6 +433,8 @@ await ok('choosing a plan makes a Stripe subscription Checkout; the webhook turn
   const c = stripeCalls.at(-1);
   assert.equal(c.p.mode, 'subscription'); assert.equal(c.p.customer, 'cus_priya'); assert.equal(c.p['line_items[0][price_data][recurring][interval]'], 'month');
   assert.equal(c.p['line_items[0][price_data][unit_amount]'], '900'); assert.equal(c.p['subscription_data[metadata][user_id]'], (await user('priya@example.com')).id);
+  assert.equal(c.p['line_items[0][price_data][product]'], 'prod_test_plan-monthly');
+  assert.equal(stripeCalls.filter((x) => x.path === '/products' && x.p['metadata[niko]'] === 'access-12' && x.mode === 'test').length, 1, 'a product is made once and reused');
   assert.equal(c.p['subscription_data[trial_end]'], undefined, 'no time left, so billing starts now');
   const end = Math.floor(Date.now() / 1000) + 30 * 86400;
   const sub = { id: 'sub_priya', status: 'active', customer: 'cus_priya', cancel_at_period_end: false, metadata: { user_id: (await user('priya@example.com')).id, plan: 'monthly' }, items: { data: [{ current_period_end: end, price: { recurring: { interval: 'month' } } }] } };
@@ -406,7 +449,9 @@ await ok('choosing a plan makes a Stripe subscription Checkout; the webhook turn
 await ok('a failed renewal keeps access for the grace days, then ends it', async () => {
   const sub = subs.get('sub_priya');
   sub.status = 'past_due'; sub.items.data[0].current_period_end = Math.floor(Date.now() / 1000) - 2 * 86400;
-  await webhook('customer.subscription.updated', sub);
+  await webhook('invoice.payment_failed', { subscription: 'sub_priya' });
+  assert.match(lastEmail('priya@example.com').subject, /didn’t go through/);
+  assert.match(lastEmail('priya@example.com').html, /7 days/);
   assert.equal((await priya.get('/me')).data.access.kind, 'grace');
   sub.items.data[0].current_period_end = Math.floor(Date.now() / 1000) - 8 * 86400;
   await webhook('customer.subscription.updated', sub);
@@ -501,6 +546,7 @@ await ok('switching is refused when that mode’s key is missing or is the other
   env.STRIPE_LIVE_SECRET_KEY = undefined;
   r = await admin.put('/admin/payments/mode', { mode: 'live' });
   assert.equal(r.status, 400);
+  assert.equal((await admin.post('/admin/payments/connect', { mode: 'live' })).status, 400, 'no key, nothing to connect');
   env.STRIPE_LIVE_SECRET_KEY = keep;
   assert.equal((await admin.put('/admin/payments/mode', { mode: 'sandbox' })).status, 400);
 });
@@ -521,9 +567,9 @@ await ok('switched to live: new payments use the live key and live webhooks', as
   assert.match(sid, /^cs_live_/);
   Object.assign(sessions.get(sid), { payment_status: 'paid', payment_intent: 'pi_liv', customer: 'cus_liv' });
   // Signed with the test secret, or claiming the wrong mode: refused.
-  assert.equal(await webhook('checkout.session.completed', sessions.get(sid), { secret: env.STRIPE_TEST_WEBHOOK_SECRET, livemode: true }), 400);
-  assert.equal(await webhook('checkout.session.completed', sessions.get(sid), { secret: env.STRIPE_LIVE_WEBHOOK_SECRET, livemode: false }), 400);
-  assert.equal(await webhook('checkout.session.completed', sessions.get(sid), { secret: env.STRIPE_LIVE_WEBHOOK_SECRET }), 200);
+  assert.equal(await webhook('checkout.session.completed', sessions.get(sid), { secret: made.test, livemode: true }), 400);
+  assert.equal(await webhook('checkout.session.completed', sessions.get(sid), { secret: made.live, livemode: false }), 400);
+  assert.equal(await webhook('checkout.session.completed', sessions.get(sid), { secret: made.live }), 200);
   assert.equal((await b.get(`/auth/invite/${tk}/status`)).data.paid, true);
   assert.equal((await b.post(`/auth/invite/${tk}`, { name: 'Liv', password: PW })).status, 200);
   const u = await user('liv@example.com');
@@ -536,7 +582,7 @@ await ok('after switching, a test payment is refunded and a test plan changed wi
   assert.equal(stripeCalls.at(-1).path, '/refunds'); assert.equal(stripeCalls.at(-1).auth, 'Bearer sk_test_niko');
   // The test plan still renews through test webhooks while new payments are live.
   const sub = subs.get('sub_jun'); sub.items.data[0].current_period_end = Math.floor(Date.now() / 1000) + 50 * 86400;
-  assert.equal(await webhook('customer.subscription.updated', sub, { secret: env.STRIPE_TEST_WEBHOOK_SECRET }), 200);
+  assert.equal(await webhook('customer.subscription.updated', sub, { secret: made.test }), 200);
   const jid = (await user('jun@example.com')).id;
   r = await admin.post(`/admin/users/${jid}/unlock`, { kind: 'set', months: 1 });
   assert.equal(r.status, 200);
@@ -546,6 +592,7 @@ await ok('after switching, a test payment is refunded and a test plan changed wi
   assert.equal((await jb.post('/auth/sign-in', { email: 'jun@example.com', password: PW })).status, 200);
   r = await jb.post('/billing/portal');
   assert.equal(r.status, 200); assert.equal(stripeCalls.at(-1).auth, 'Bearer sk_test_niko'); assert.equal(stripeCalls.at(-1).p.customer, 'cus_jun_test');
+  assert.equal(stripeCalls.at(-1).p.configuration, 'bpc_test', 'the billing page settings Niko made');
   const list = (await admin.get('/admin/users')).data;
   assert.equal(list.stripeMode, 'live');
   assert.equal(list.users.find((x) => x.email === 'jun@example.com').sub.mode, 'test');

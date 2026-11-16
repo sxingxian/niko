@@ -4,7 +4,7 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { appSettings, invites, passkeys, passwordResets, sessions, signups, users, webauthnChallenges, type Invite } from '@niko/db';
 import { addMonths, CODE_TRIES, CURRENCY, isCodeShape, isEmail, lengthLabel, normalizeCode, passwordProblem, plansOffered } from '@niko/shared';
-import { emailCodeHash, inviteCodeHash, makeEmailCode, paymentSettings, payNow, setCustomer, syncCheckout, tellAdmins } from '../billing';
+import { emailCodeHash, inviteCodeHash, makeEmailCode, paymentSettings, payNow, priceLine, setCustomer, syncCheckout, tellAdmins } from '../billing';
 import { isMode, NOT_READY, stripe } from '../stripe';
 import type { AppEnv } from '../env';
 import { b64url, randomToken, safeEqual, sha256, unb64 } from '../lib/crypto';
@@ -202,7 +202,7 @@ auth.post('/sign-up/checkout', async (c) => {
   const months = row.su.months ?? 12;
   const s = await stripe(now.keys, 'POST', '/checkout/sessions', {
     mode: 'payment', customer_email: row.u.email, customer_creation: 'always', client_reference_id: row.u.id,
-    line_items: [{ quantity: 1, price_data: { currency: CURRENCY, unit_amount: row.su.priceCents, product_data: { name: `Niko · ${lengthLabel(months)} of access` } } }],
+    line_items: [await priceLine(c.env, c.get('db'), now.mode, now.keys, row.su.priceCents, { months })],
     metadata: { kind: 'signup', user_id: row.u.id }, payment_intent_data: { metadata: { kind: 'signup', user_id: row.u.id } },
     success_url: `${app}/sign-up?paid={CHECKOUT_SESSION_ID}`, cancel_url: `${app}/sign-up?cancelled=1`,
   });
@@ -291,7 +291,7 @@ auth.post('/invite/:token/checkout', async (c) => {
   const months = inv.months ?? 12;
   const s = await stripe(now.keys, 'POST', '/checkout/sessions', {
     mode: 'payment', customer_email: inv.email, customer_creation: 'always', client_reference_id: inv.id,
-    line_items: [{ quantity: 1, price_data: { currency: CURRENCY, unit_amount: inv.priceCents, product_data: { name: `Niko · ${lengthLabel(months)} of access` } } }],
+    line_items: [await priceLine(c.env, db, now.mode, now.keys, inv.priceCents, { months })],
     metadata: { kind: 'invite', invite_id: inv.id }, payment_intent_data: { metadata: { kind: 'invite', invite_id: inv.id } },
     success_url: `${app}/invite?token=${token}&paid={CHECKOUT_SESSION_ID}`, cancel_url: `${app}/invite?token=${token}&cancelled=1`,
   });

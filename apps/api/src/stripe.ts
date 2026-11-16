@@ -38,6 +38,7 @@ export function modeStatus(env: StripeSecrets, mode: StripeMode): { ready: boole
   if (secret && keyMode(secret) === other) problem = `The ${mode} secret key is a ${other} key (it starts ${secret.slice(0, 8)}).`;
   else if (secret && !keyMode(secret)) problem = `The ${mode} secret key doesn’t look like a Stripe secret key (sk_${mode}_… or rk_${mode}_…).`;
   else if (hook && !hook.startsWith('whsec_')) problem = `The ${mode} webhook signing secret should start with whsec_.`;
+  else if (secret && !hook) problem = `Press Connect so Niko sets up ${mode} mode in Stripe.`;
   return { ready: !problem && !!secret && !!hook, secret: !!secret, webhook: !!hook, problem };
 }
 export const NOT_READY = 'Payments aren’t set up on this server yet. Ask your admin.';

@@ -6,9 +6,9 @@ import {
   type AccessInfo, type PaymentSettings, type Plan,
 } from '@niko/shared';
 import type { Env } from './env';
-import { randomChars, sha256 } from './lib/crypto';
+import { randomChars, seal, sha256, unseal } from './lib/crypto';
 import { esc, sendEmail } from './lib/email';
-import { idOf, invoiceSubscription, isMode, keysFor, periodEnd, planOf, stripe, stripeReady, type StripeEnv, type StripeMode } from './stripe';
+import { idOf, invoiceSubscription, isMode, keysFor, periodEnd, planOf, stripe, StripeError, stripeReady, type StripeEnv, type StripeMode, type StripeSecrets } from './stripe';
 
 export const PAYMENTS_KEY = 'payments';
 let cache: { at: number; v: PaymentSettings } | null = null;
@@ -32,14 +32,91 @@ export async function stripeMode(db: Db, fresh = false): Promise<StripeMode> {
   return modeCache.v;
 }
 export const forgetStripeMode = () => { modeCache = null; };
+// ---------------------------------------------------------------- what Niko set up in Stripe
+// Nothing is set up by hand in Stripe. With a mode's secret key in place, Admin → Payments → Connect has Niko create, in
+// that Stripe mode: the webhook endpoint (its signing secret is kept here, encrypted), the billing page settings, and,
+// as payments need them, one product per kind of purchase. Prices always come from Niko with each payment.
+export const STRIPE_CONNECT_KEY = 'stripe-connect';
+interface ModeConnect { hook?: string; endpoint?: string; portal?: string; products?: Record<string, string>; at?: string; account?: string }
+type Connect = Partial<Record<StripeMode, ModeConnect>>;
+let connCache: { at: number; v: Connect } | null = null;
+export async function connectInfo(db: Db, fresh = false): Promise<Connect> {
+  if (!fresh && connCache && Date.now() - connCache.at < 30_000) return connCache.v;
+  const row = (await db.select().from(appSettings).where(eq(appSettings.key, STRIPE_CONNECT_KEY)).limit(1).catch(() => []))[0];
+  const v = (row?.value && typeof row.value === 'object' ? row.value : {}) as Connect;
+  connCache = { at: Date.now(), v };
+  return v;
+}
+async function saveConnect(db: Db, mode: StripeMode, patch: ModeConnect) {
+  const all = await connectInfo(db, true);
+  const next = { ...all, [mode]: { ...all[mode], ...patch } };
+  await db.insert(appSettings).values({ key: STRIPE_CONNECT_KEY, value: next }).onConflictDoUpdate({ target: appSettings.key, set: { value: next } });
+  connCache = null;
+}
+/** The Worker secrets, with the webhook signing secrets Niko made filled in where none is set by hand. */
+export async function secretsFor(env: Env, db: Db): Promise<StripeSecrets> {
+  const info = await connectInfo(db);
+  const open = async (m: StripeMode) => (info[m]?.hook ? await unseal<string>(env.ENCRYPTION_KEY, info[m]!.hook!).catch(() => null) : null) ?? undefined;
+  return {
+    ...env,
+    STRIPE_TEST_WEBHOOK_SECRET: env.STRIPE_TEST_WEBHOOK_SECRET ?? await open('test'),
+    STRIPE_LIVE_WEBHOOK_SECRET: env.STRIPE_LIVE_WEBHOOK_SECRET ?? await open('live'),
+  };
+}
 /** The mode and keys new payments use now. */
 export async function payNow(env: Env, db: Db): Promise<{ mode: StripeMode; keys: StripeEnv; ready: boolean }> {
   const mode = await stripeMode(db);
-  const keys = keysFor(env, mode);
+  const keys = keysFor(await secretsFor(env, db), mode);
   return { mode, keys, ready: stripeReady(keys) };
 }
-/** The keys for something made in a given mode (an invite's payment, a plan); test when unknown. */
+/** The secret key for something made in a given mode (an invite's payment, a plan); test when unknown. */
 export const keysOf = (env: Env, mode: string | null | undefined) => keysFor(env, isMode(mode) ? mode : 'test');
+
+const HOOK_EVENTS = ['checkout.session.completed', 'checkout.session.async_payment_succeeded', 'customer.subscription.created', 'customer.subscription.updated', 'customer.subscription.deleted', 'invoice.paid', 'invoice.payment_failed'];
+/** Sets up a Stripe mode for Niko: checks the key, then (re)creates Niko's webhook endpoint and billing page settings.
+ * Safe to run again; an older Niko endpoint at the same address is replaced. */
+export async function connectStripe(env: Env, db: Db, mode: StripeMode, origin: string): Promise<{ account: string; chargesEnabled: boolean | null }> {
+  const keys = keysFor(env, mode);
+  if (!keys.STRIPE_SECRET_KEY) throw new StripeError(`Add the ${mode} secret key to the server first (docs/DEPLOYMENT.md, section 1c).`, 400);
+  let account = '', chargesEnabled: boolean | null = null;
+  try {
+    const a = await stripe(keys, 'GET', '/account');
+    account = String(a.business_profile?.name || a.settings?.dashboard?.display_name || a.email || a.id || '');
+    chargesEnabled = typeof a.charges_enabled === 'boolean' ? a.charges_enabled : null;
+  } catch (e) { if ((e as StripeError).status === 401) throw new StripeError(`Stripe didn’t accept the ${mode} secret key. Copy it again from Stripe → Developers → API keys.`, 400); }
+  const url = `${origin}/api/hooks/stripe`;
+  const list = await stripe(keys, 'GET', '/webhook_endpoints', { limit: 100 });
+  for (const ep of list.data ?? []) if (ep.url === url) await stripe(keys, 'DELETE', `/webhook_endpoints/${ep.id}`);
+  const ep = await stripe(keys, 'POST', '/webhook_endpoints', { url, enabled_events: HOOK_EVENTS, description: 'Niko (made by Niko; do not edit)', metadata: { niko: 'true' } });
+  const portal = await stripe(keys, 'POST', '/billing_portal/configurations', {
+    business_profile: { headline: 'Niko · manage your plan' },
+    features: {
+      payment_method_update: { enabled: true }, invoice_history: { enabled: true },
+      subscription_cancel: { enabled: true, mode: 'at_period_end' }, customer_update: { enabled: false },
+    },
+    metadata: { niko: 'true' },
+  });
+  await saveConnect(db, mode, { hook: await seal(env.ENCRYPTION_KEY, ep.secret), endpoint: ep.id, portal: portal.id, at: new Date().toISOString(), account });
+  return { account, chargesEnabled };
+}
+
+/** A Checkout line item with the price from Niko. The product is Niko's own, made in Stripe the first time it is needed,
+ * so Stripe's product list stays short; if it can't be made, the name is sent with the price instead. */
+export async function priceLine(env: Env, db: Db, mode: StripeMode, keys: StripeEnv, cents: number, what: { months: number } | { plan: Plan }) {
+  const key = 'plan' in what ? `plan-${what.plan}` : `access-${what.months}`;
+  const name = 'plan' in what ? (what.plan === 'monthly' ? 'Niko · monthly plan' : 'Niko · yearly plan') : `Niko · ${lengthLabel(what.months)} of access`;
+  const recurring = 'plan' in what ? { recurring: { interval: what.plan === 'monthly' ? 'month' : 'year' } } : {};
+  let product = (await connectInfo(db))[mode]?.products?.[key];
+  if (!product) {
+    try {
+      const p = await stripe(keys, 'POST', '/products', { name, metadata: { niko: key } }, `niko-product-${mode}-${key}`);
+      product = p.id as string;
+      const info = await connectInfo(db, true);
+      await saveConnect(db, mode, { products: { ...info[mode]?.products, [key]: product } });
+    } catch { product = undefined; }
+  }
+  return { quantity: 1, price_data: { currency: 'sgd', unit_amount: cents, ...recurring, ...(product ? { product } : { product_data: { name } }) } };
+}
 /** An account's Stripe customer in a mode, and the update that sets it. */
 export const customerIn = (u: { stripeCustomerTest: string | null; stripeCustomerLive: string | null }, mode: StripeMode) => (mode === 'live' ? u.stripeCustomerLive : u.stripeCustomerTest);
 export const setCustomer = (mode: StripeMode, id: string | null) => (!id ? {} : mode === 'live' ? { stripeCustomerLive: id } : { stripeCustomerTest: id });
@@ -57,7 +134,7 @@ export async function accessFor(env: Env, db: Db, u: User): Promise<AccessInfo> 
     plans: plansOffered(s),
     payments: now.ready,
     testMode: now.mode === 'test',
-    portal: !!customerIn(u, portalMode) && stripeReady(keysFor(env, portalMode)),
+    portal: !!customerIn(u, portalMode) && !!keysFor(env, portalMode).STRIPE_SECRET_KEY,
     endedAt: !st.has ? (latest(u.accessUntil, u.subPeriodEnd)?.toISOString() ?? null) : null,
     since: u.createdAt.toISOString(),
   };
@@ -127,7 +204,7 @@ export async function applySubscription(db: Db, sub: any, mode: StripeMode): Pro
  * webhook is slow; this is Niko asking Stripe, not trusting the returning page. */
 export async function syncCheckout(env: Env, db: Db, id: string, mode: StripeMode): Promise<any | null> {
   const keys = keysFor(env, mode);
-  if (!/^cs_[A-Za-z0-9_]{3,250}$/.test(id) || !stripeReady(keys)) return null;
+  if (!/^cs_[A-Za-z0-9_]{3,250}$/.test(id) || !keys.STRIPE_SECRET_KEY) return null;
   const s = await stripe(keys, 'GET', `/checkout/sessions/${id}`, { expand: ['subscription'] });
   if (s.mode === 'payment') await applyPaidSession(env, db, s, mode);
   else if (s.mode === 'subscription' && s.status === 'complete' && s.subscription) {
@@ -159,7 +236,14 @@ export async function handleStripeEvent(env: Env, db: Db, event: any, mode: Stri
       case 'invoice.paid':
       case 'invoice.payment_failed': {
         const id = invoiceSubscription(o);
-        if (id) await applySubscription(db, await stripe(keys, 'GET', `/subscriptions/${id}`), mode);
+        const userId = id ? await applySubscription(db, await stripe(keys, 'GET', `/subscriptions/${id}`), mode) : null;
+        // Niko tells the person itself, so nothing needs switching on in Stripe's email settings.
+        if (event.type === 'invoice.payment_failed' && userId) {
+          const u = (await db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1))[0];
+          const s = await paymentSettings(db);
+          if (u) await sendEmail(env, u.email, 'Your Niko payment didn’t go through', 'Your Niko payment didn’t go through',
+            `Stripe couldn’t take your plan’s payment. It will try again over the next few days, and Niko keeps working for ${s.graceDays} days. To fix it now, open Niko → Account → Billing → Manage, and update your card.`);
+        }
         break;
       }
     }

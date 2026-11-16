@@ -113,6 +113,7 @@ await ok('test and live keys: each mode uses only its own keys; the older single
   assert.match(modeStatus({ STRIPE_LIVE_SECRET_KEY: 'sk_test_x', STRIPE_LIVE_WEBHOOK_SECRET: 'whsec_l' }, 'live').problem, /is a test key/);
   assert.match(modeStatus({ STRIPE_TEST_SECRET_KEY: 'sk_test_x', STRIPE_TEST_WEBHOOK_SECRET: 'abc' }, 'test').problem, /whsec_/);
   assert.deepEqual(modeStatus({}, 'live'), { ready: false, secret: false, webhook: false, problem: null });
+  assert.match(modeStatus({ STRIPE_LIVE_SECRET_KEY: 'sk_live_x' }, 'live').problem, /Press Connect/);
   const old = { STRIPE_SECRET_KEY: 'sk_live_old', STRIPE_WEBHOOK_SECRET: 'whsec_old' };
   assert.equal(keysFor(old, 'live').STRIPE_SECRET_KEY, 'sk_live_old'); assert.equal(keysFor(old, 'test').STRIPE_SECRET_KEY, undefined);
   assert.equal(keyMode('sk_live_1'), 'live'); assert.equal(keyMode('rk_test_1'), 'test'); assert.equal(keyMode('pk_live_1'), null);

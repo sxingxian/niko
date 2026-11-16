@@ -5,7 +5,7 @@ import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { users } from '@niko/db';
 import { CURRENCY, plansOffered, type Plan } from '@niko/shared';
-import { accessFor, customerIn, keysOf, paymentSettings, payNow, syncCheckout } from '../billing';
+import { accessFor, connectInfo, customerIn, keysOf, paymentSettings, payNow, priceLine, syncCheckout } from '../billing';
 import type { AppEnv } from '../env';
 import { audit, requireUser, tooMany } from '../lib/session';
 import { isMode, keysFor, NOT_READY, stripe, stripeReady, type StripeMode } from '../stripe';
@@ -36,7 +36,7 @@ billing.post('/checkout', async (c) => {
   const s = await stripe(now.keys, 'POST', '/checkout/sessions', {
     mode: 'subscription', client_reference_id: u.id,
     ...(customer ? { customer } : { customer_email: u.email }),
-    line_items: [{ quantity: 1, price_data: { currency: CURRENCY, unit_amount: offer.cents, recurring: { interval: plan === 'monthly' ? 'month' : 'year' }, product_data: { name: plan === 'monthly' ? 'Niko · monthly plan' : 'Niko · yearly plan' } } }],
+    line_items: [await priceLine(c.env, db, now.mode, now.keys, offer.cents, { plan })],
     subscription_data: { metadata: { user_id: u.id, plan }, ...(trialEnd ? { trial_end: trialEnd } : {}) },
     metadata: { kind: 'plan', user_id: u.id, plan },
     success_url: `${app}${b.from === 'account' ? '/account' : '/'}?plan={CHECKOUT_SESSION_ID}`, cancel_url: `${app}${b.from === 'account' ? '/account' : '/'}?plan=cancelled`,
@@ -68,8 +68,10 @@ billing.post('/portal', async (c) => {
   const mode: StripeMode = isMode(u.subMode) ? u.subMode : (await payNow(c.env, c.get('db'))).mode;
   const keys = keysOf(c.env, mode);
   const customer = customerIn(u, mode);
-  if (!stripeReady(keys)) return c.json({ error: NOT_READY }, 503);
+  if (!keys.STRIPE_SECRET_KEY) return c.json({ error: NOT_READY }, 503);
   if (!customer) return c.json({ error: 'There’s nothing to manage yet.' }, 400);
-  const s = await stripe(keys, 'POST', '/billing_portal/sessions', { customer, return_url: `${c.get('site').appUrl}/account` });
+  // The billing page settings Niko made when this mode was connected.
+  const configuration = (await connectInfo(c.get('db')))[mode]?.portal;
+  const s = await stripe(keys, 'POST', '/billing_portal/sessions', { customer, return_url: `${c.get('site').appUrl}/account`, ...(configuration ? { configuration } : {}) });
   return c.json({ url: s.url });
 });

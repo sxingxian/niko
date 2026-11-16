@@ -45,25 +45,29 @@ Niko sends invitations (with the 6-character invite code), sign-up email codes, 
 
 ## 1c. Payments (Stripe): test and live
 
-People pay once for a set time (12 months by default), and when that time ends they choose a monthly or yearly plan to keep going. You set the prices in **Admin → Payments**. Card and PayNow details are typed on Stripe's own Checkout page and never reach Niko.
+People pay once for a set time (12 months by default), and when that time ends they choose a monthly or yearly plan to keep going. Card and PayNow details are typed on Stripe's own Checkout page and never reach Niko.
 
-Niko holds **two sets of Stripe keys**, one for test mode and one for live mode, as Worker secrets. **Admin → Payments → Stripe mode** switches which set new payments use (it starts on Test). The keys themselves are never entered in the admin portal, so a stolen admin session can't read or swap them. Switching changes only new payments: anything already paid, and every plan, keeps working in the mode it was made in, including renewals, refunds, unlock changes and the billing page. Test payments are labelled "test" in Admin → Users. Until a mode's two secrets are set, Admin → Payments shows it as "Not ready" and won't switch to it. A key in the wrong slot (for example `sk_test_…` as the live key) is refused and never used.
+**Nothing is set up by hand in Stripe.** You don't create products, prices, webhooks or billing-page settings there. Niko sends each price with each payment, and **Admin → Payments → Connect** has Niko create what it needs in your Stripe account through Stripe's API:
+- a webhook endpoint at `https://<your admin address>/api/hooks/stripe`, with its signing secret kept in Niko's database, encrypted;
+- the billing-page settings people use from Account → Billing (change card, receipts, cancel at the end of the period);
+- one product per kind of purchase ("Niko · 1 year of access", "Niko · monthly plan", "Niko · yearly plan"), made the first time it's needed.
 
-Do these steps twice: once with Stripe's **test mode** toggle on (test keys), and once with it off (live keys). Activate your Stripe account (business details and bank account) before going live.
+The one thing you copy from Stripe is each mode's **secret key**, because Niko can't fetch it for you.
 
-1. **Keys.** Developers → API keys → copy the **Secret key** → `STRIPE_TEST_SECRET_KEY` (`sk_test_…`) and `STRIPE_LIVE_SECRET_KEY` (`sk_live_…`). A restricted key (`rk_…`) works too: give it write access to Checkout Sessions, Customers, Subscriptions, Refunds and the Customer portal, and read access to Payment Intents.
-2. **Webhook.** Developers → Webhooks → Add endpoint. **The same URL in both modes**: `https://niko.sxingxian.com/api/hooks/stripe` (one is enough, as both domains share the database). Niko tells the modes apart by which signing secret matches.
-   - Events: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`.
-   - Copy each endpoint's **Signing secret** → `STRIPE_TEST_WEBHOOK_SECRET` and `STRIPE_LIVE_WEBHOOK_SECRET` (both start `whsec_`).
-3. **Payment methods.** Settings → Payment methods: turn on Cards, and PayNow if you want it. PayNow is offered for the one-time payment only; Stripe doesn't support it for monthly or yearly plans, so plans are paid by card (or Apple Pay / Google Pay).
-4. **Customer portal.** Settings → Billing → Customer portal: allow updating the payment method, viewing invoices and cancelling (at the end of the period), then **Save**. Niko's **Account → Billing → Manage** button opens this page; it fails until the portal has been saved once in that mode.
-5. **Failed renewals.** Settings → Billing → Subscriptions and emails: keep Smart Retries on and turn on the failed-payment emails. Niko keeps access for the grace days you choose in Admin → Payments (7 by default) while Stripe retries.
-6. In **Admin → Payments**, enter the pay-once price and length and the monthly and yearly prices, then **Save pricing**. Prices are Singapore dollars, the same in both modes; Stripe's smallest charge is SGD 0.50.
-7. Run the payment checks in section 6 in **Test**, then press **Live** in Admin → Payments → Stripe mode and confirm.
+1. **Keys.** In Stripe → Developers → API keys, copy the **Secret key** with the Test mode toggle on (`sk_test_…`) and with it off (`sk_live_…`). Save them as Worker secrets `STRIPE_TEST_SECRET_KEY` and `STRIPE_LIVE_SECRET_KEY` (section 2). Use the standard secret key; a restricted key would need write access to Checkout Sessions, Customers, Products, Subscriptions, Refunds, Webhook Endpoints and Billing Portal, so it isn't worth it here.
+2. **Connect.** In **Admin → Payments → Stripe mode**, press **Connect** next to Test, then next to Live. Each shows **Ready** once Niko has set that mode up. Pressing Connect again is safe: it replaces Niko's webhook instead of adding a second one.
+3. **Prices.** In Admin → Payments, enter the pay-once price and length and the monthly and yearly prices, then **Save pricing**. Prices are in Singapore dollars and are the same in both modes. Stripe's smallest charge is SGD 0.50.
+4. Run the payment checks in section 6 in **Test**, then press **Live** and confirm.
+
+Payment methods: cards (and Apple Pay / Google Pay) work as Stripe accounts come. PayNow appears on the one-time payment by itself if it's on in your Stripe account's payment methods. Stripe doesn't support PayNow for monthly or yearly plans. Failed renewals: Stripe retries the card on its usual schedule, and Niko emails the person itself and keeps access for the grace days you set (7 by default).
+
+**Going live needs an activated Stripe account.** Stripe asks for your business and bank details once, when you open the account; that's Stripe's sign-up, not setup for Niko. Connect warns you if the live account can't take payments yet.
+
+**Admin → Payments → Stripe mode** chooses which key new payments use (it starts on Test). The keys never pass through the admin portal, so a stolen admin session can't read or swap them. Switching changes only new payments: anything already paid, and every plan, keeps working in the mode it was made in, including renewals, refunds, unlock changes and the billing page. Test payments are labelled "test" in Admin → Users. Niko won't switch to a mode that isn't Ready, or one whose key is in the wrong slot (for example `sk_test_…` saved as the live key).
 
 **While Test is on, anyone who pays with a test card (such as `4242 4242 4242 4242`) gets real access to Niko.** The admin portal shows a banner and the pay screens say "Test mode" the whole time. Switch to Live as soon as you've checked things, and switch off or unlock any accounts that were only for testing.
 
-If you already set the single pair `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` from an earlier version of these steps, it is still read, for the mode its key belongs to. Replace it with the named pairs when you can.
+If you'd rather run your own webhook, you can still set `STRIPE_TEST_WEBHOOK_SECRET` / `STRIPE_LIVE_WEBHOOK_SECRET`, and they are used instead of the ones Niko made. The single pair `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` from an earlier version of these steps is also still read, for the mode its key belongs to.
 
 Accounts that existed before this update keep using Niko as before: the update marks them lifetime. Admins never pay.
 
@@ -86,9 +90,7 @@ npx wrangler secret put ENCRYPTION_KEY
 npx wrangler secret put BOOTSTRAP_TOKEN
 npx wrangler secret put RESEND_API_KEY
 npx wrangler secret put STRIPE_TEST_SECRET_KEY
-npx wrangler secret put STRIPE_TEST_WEBHOOK_SECRET
 npx wrangler secret put STRIPE_LIVE_SECRET_KEY
-npx wrangler secret put STRIPE_LIVE_WEBHOOK_SECRET
 ```
 
 | Secret | Needed | What it does |
@@ -97,14 +99,13 @@ npx wrangler secret put STRIPE_LIVE_WEBHOOK_SECRET
 | `ENCRYPTION_KEY` | Yes | Encrypts saved connection tokens and admin second-factor keys before they reach the database |
 | `BOOTSTRAP_TOKEN` | Once | Lets you create the owner account on first run (section 4). Useless after one user exists; delete it then |
 | `RESEND_API_KEY` | For email | Sends invitations, sign-up codes, reset links and reminders |
-| `STRIPE_TEST_SECRET_KEY`, `STRIPE_LIVE_SECRET_KEY` | For payments | Each mode's Stripe key: Checkout pages, refunds and plan changes (section 1c). Admin → Payments chooses the mode |
-| `STRIPE_TEST_WEBHOOK_SECRET`, `STRIPE_LIVE_WEBHOOK_SECRET` | For payments | Each mode's webhook signing secret: checks that payment notices really come from Stripe (section 1c) |
+| `STRIPE_TEST_SECRET_KEY`, `STRIPE_LIVE_SECRET_KEY` | For payments | Each mode's Stripe secret key, the only thing copied from Stripe. Admin → Payments → Connect then sets that mode up, and the Stripe mode switch picks which one new payments use (section 1c) |
 
 There are no Google, Microsoft, Notion or Slack keys here. Each account adds its own on the Connections screen (section 5).
 
 **Keep a copy of `ENCRYPTION_KEY` in your password manager.** If it is lost or changed, every saved connection, every account's app keys and every admin second factor become unreadable: people add their keys and reconnect and admins run `reset-2fa` (see "Account recovery").
 
-**Without a computer:** let the first deploy run (section 3), then add `ENCRYPTION_KEY`, `BOOTSTRAP_TOKEN`, `RESEND_API_KEY` and the four Stripe secrets in Cloudflare → Workers & Pages → `niko` → Settings → **Variables and secrets** → Add → type **Secret**. Secrets set there are kept across deploys. Make the two random values with a password manager's generator (44+ characters for `BOOTSTRAP_TOKEN`; `ENCRYPTION_KEY` must be exactly 32 random bytes in base64, so use the `openssl` line when you can).
+**Without a computer:** let the first deploy run (section 3), then add `ENCRYPTION_KEY`, `BOOTSTRAP_TOKEN`, `RESEND_API_KEY` and the two Stripe secret keys in Cloudflare → Workers & Pages → `niko` → Settings → **Variables and secrets** → Add → type **Secret**. Secrets set there are kept across deploys. Make the two random values with a password manager's generator (44+ characters for `BOOTSTRAP_TOKEN`; `ENCRYPTION_KEY` must be exactly 32 random bytes in base64, so use the `openssl` line when you can).
 
 **Never put any of these in `wrangler.jsonc`, a committed `.env` or `.dev.vars` file, or a GitHub variable.** Only `EMAIL_FROM` and `AI_MODEL` are plain variables.
 
@@ -264,7 +265,7 @@ Incoming addresses the Worker listens on:
 - [ ] Sign out of the admin portal and sign in again with a **recovery code**, then press **New recovery codes** and save the new set.
 - [ ] Invite a second email address and check the email arrives; accept it and sign in.
 - [ ] Use **Forgot password** and check the reset email arrives and works once only.
-- [ ] Payments, in Stripe test mode (card `4242 4242 4242 4242`, any future date and CVC): set prices in **Admin → Payments**; send a **Pay once** invite; open it, enter a wrong code (the answer says how many tries are left), then the right one; pay; check "Payment received", create the account, and see **Paid once · until …** in Admin → Users.
+- [ ] Payments, in Stripe test mode (card `4242 4242 4242 4242`, any future date and CVC): press **Connect** for Test in **Admin → Payments** and check it shows Ready; set prices; send a **Pay once** invite; open it, enter a wrong code (the answer says how many tries are left), then the right one; pay; check "Payment received", create the account, and see **Paid once · until …** in Admin → Users.
 - [ ] Revoke a paid invite before it is used and check the refund appears in Stripe.
 - [ ] Switch to **Open registration**, sign up with a new address, confirm the email code, pay, and check the admin email "A paid sign-up is waiting". Switch the account on and check the "account is on" email and that sign-in works.
 - [ ] In Neon, set that account's `access_until` to yesterday; reload Niko and choose the monthly plan; check access returns and **Account → Billing → Manage** opens Stripe's billing page.
