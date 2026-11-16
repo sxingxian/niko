@@ -191,3 +191,25 @@ export function pageRequest(raw: string): 'next' | 'prev' | 'first' | 'last' | n
   const n = new RegExp(`^${go}${pg} (?:number |no )?(\\d{1,3})$`).exec(p);
   return n ? Number(n[1]) : null;
 }
+
+// ---- After a stop: carrying on, asking again, or repeating
+/** "continue" (carry on from where Niko stopped), "retry" (ask the last question again for a fresh answer),
+ * "replay" (say the last answer again from the start), or null. */
+export function resumeIntent(raw: string): 'continue' | 'retry' | 'replay' | null {
+  const t = raw.toLowerCase().replace(/[.,!?;:"“”…]+/g, ' ').replace(/\s+/g, ' ').trim()
+    .replace(/^(?:(?:ok|okay|so|and|um|uh|niko|please)\s+)+/, '').replace(/\s+(?:please|niko)$/, '');
+  if (/^(continue|go on|carry on|keep going|resume|proceed|and then|then what|go ahead and finish|finish( that| it| what you were saying)?|where were we|continue (that|it|where you (left off|stopped)|from where you stopped|what you were saying)|you can continue|keep talking|carry on talking)$/.test(t)) return 'continue';
+  if (/^(try again|try that again|retry|ask (it |that )?again|answer (it |that )?again|redo( that)?|one more time|give me (a )?(another|new|fresh) answer|can you try again|answer my (last )?question again)$/.test(t)) return 'retry';
+  if (/^(repeat( that| it)?|say (that|it) again|start (it )?over|from the (beginning|start)|what did you say|come again|pardon|sorry what|again)$/.test(t)) return 'replay';
+  return null;
+}
+
+/** Where to pick up a stopped answer: the start of the sentence that was being said at character `pos`. */
+export function sentenceStart(text: string, pos: number): number {
+  const p = Math.max(0, Math.min(Math.floor(pos), text.length));
+  if (p >= text.length - 1) return text.length; // it had finished
+  let start = 0;
+  const re = /[.!?…]["”’)]*\s+|\n+/g;
+  for (let m: RegExpExecArray | null; (m = re.exec(text)) && m.index + m[0].length <= p;) start = m.index + m[0].length;
+  return start;
+}

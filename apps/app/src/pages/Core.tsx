@@ -37,6 +37,18 @@ function mergeBrief(r: Brief, read: BriefPart[]) {
   briefCache.data = d;
 }
 
+/** After a stop: carry on the answer, or ask the question again (the same as saying "continue" / "try again"). */
+function ResumeRow() {
+  const n = useNiko();
+  if (!n.resumable || n.mode === 'thinking' || n.mode === 'speaking') return null; // shown while idle or listening for "continue"
+  return (
+    <div className="resume" role="group" aria-label="Pick up where Niko stopped">
+      {n.resumable.canContinue && <button className="pri" onClick={n.resume}>Continue</button>}
+      <button className="sec" onClick={n.retry}>Ask again</button>
+    </div>
+  );
+}
+
 function useWide() {
   const q = '(min-width: 901px)';
   const [on, setOn] = useState(() => typeof window !== 'undefined' && window.matchMedia(q).matches);
@@ -137,6 +149,7 @@ export function Home() {
           <span className="k accent" role="status">{n.label}</span>
           <p>{n.line}</p>
           {n.voiceProblem && <Link to="/voice" className="voice-note">Your first voice could not speak, so the next one in your list was used. {n.voiceProblem}</Link>}
+          <ResumeRow />
         </div>
       </div>
       <div className="top">
@@ -520,6 +533,7 @@ export function Workspace() {
           {counting && <div className="num" role="status">{send.left}</div>}
         </div>
         <div className="status"><span className="k accent" role="status">{n.label}</span><span>{n.line}</span></div>
+        <ResumeRow />
         <div className="ws-mic">
           <button className={'micbtn' + (n.mode === 'listening' ? ' live' : '')} onClick={n.toggleMic} aria-label="Talk to Niko"><Icon name="mic" /></button>
           {n.mode !== 'idle' && <button className="ib g" onClick={n.stop} aria-label="Stop"><Icon name="stop" /></button>}

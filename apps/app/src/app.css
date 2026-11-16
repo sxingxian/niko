@@ -91,6 +91,10 @@
 .panels .meta { display: flex; justify-content: space-between; align-items: baseline; }
 .panels .meta span:last-child { font-size: 12px; color: var(--muted); }
 .panels .two { display: flex; gap: 10px; padding-top: 4px; }
+/* After a stop: Continue / Ask again, under the status line (Home and workspace). */
+.resume { display: flex; justify-content: center; gap: 10px; animation: fadeIn .3s ease both; }
+.resume .pri, .resume .sec { height: 44px; padding: 0 20px; font-size: 15px; }
+.ws .resume { margin-top: -4px; }
 .panels .two .sec, .panels .two .pri { height: 46px; font-size: 14px; flex: 1; padding: 0 12px; }
 .panels .two .pri { flex: 1.5; }
 @media (max-width: 900px) {

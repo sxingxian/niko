@@ -82,3 +82,16 @@ for (const p of ['What is the weather like?', 'Who emailed me today?', 'Make it 
 for (const [p, want] of Object.entries({ 'Go to the next page of my inbox.': 'next', 'Navigate to the next page.': 'next', 'Show me the next page of emails, please.': 'next', 'Can I see page 2 of my notes?': 2, 'Take me back to the previous page of the calendar.': 'prev', 'Open page four.': 4, 'Show me the last page of events.': 'last', 'Next page of results.': 'next', 'Go back a page.': 'prev' }))
   ok(pageRequest(p) === want, `page ${want}: "${p}"`);
 for (const p of ['What is on page six of the report tomorrow?', 'Read me the next email.', 'Open my inbox.']) ok(pageRequest(p) === null, `not a page move: "${p}"`);
+
+// ---- After a stop
+import { resumeIntent, sentenceStart } from '../apps/app/src/speech.ts';
+const ri = { 'continue': 'continue', 'go on': 'continue', 'Carry on.': 'continue', 'ok niko continue please': 'continue', 'continue where you left off': 'continue', 'keep going': 'continue',
+  'try again': 'retry', 'ask it again': 'retry', 'Retry.': 'retry', 'answer that again': 'retry', 'give me a fresh answer': 'retry',
+  'repeat that': 'replay', 'say that again': 'replay', 'start over': 'replay', 'again': 'replay',
+  'continue to the calendar': null, 'what is the weather': null, 'go on holiday next week': null, 'try again tomorrow with Maya': null };
+for (const [p, want] of Object.entries(ri)) ok(resumeIntent(p) === want, `"${p}" → ${want ?? 'not a resume'} (got ${resumeIntent(p)})`);
+const ans = 'Men’s talk usually means candid conversations. To fix your hairstyle, dampen your hair. Then work in some clay! Shape it with your fingers.';
+ok(sentenceStart(ans, 10) === 0, 'stopped in the first sentence → from the start');
+ok(ans.slice(sentenceStart(ans, 60)).startsWith('To fix your hairstyle'), 'stopped mid second sentence → that sentence again');
+ok(ans.slice(sentenceStart(ans, ans.indexOf('clay'))).startsWith('Then work in'), 'after an exclamation too');
+ok(sentenceStart(ans, ans.length) === ans.length, 'finished → nothing left');

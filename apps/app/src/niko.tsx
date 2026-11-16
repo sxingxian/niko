@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { hearOrder, isWeatherQuestion, voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
-import { isEcho, matchWake, screenFor, screenName, scrollRequest, takeItemTag, takeMoveTags, takeScreenTag } from './speech';
+import { isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeItemTag, takeMoveTags, takeScreenTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
@@ -23,6 +23,12 @@ interface NikoState {
   toggleMic: () => void;
   stop: () => void;
   ask: (text: string) => Promise<void>;
+  /** After a stop: true when there is an answer to carry on, or a question to ask again. */
+  resumable: { canContinue: boolean } | null;
+  /** Carries on the stopped answer from the sentence where it stopped. */
+  resume: () => void;
+  /** Asks the last question again for a fresh answer. */
+  retry: () => void;
   dismissReply: () => void;
   /** A page (the workspace) can claim "send it" / "cancel". Returns true when it handled the phrase. */
   setCommandHandler: (fn: ((phrase: string, quiet?: boolean) => boolean) | null) => void;
@@ -120,6 +126,16 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   /** The mic is switched off while Niko talks: whatever it was holding (Niko's own voice) is thrown away. */
   const muteMic = () => { try { rec.current?.abort(); } catch { /* not running */ } rec.current = null; };
   const unmuteMic = () => { if (wantRec.current && !rec.current) startRecRef.current(); };
+  // The last question and Niko's answer, and where a stopped answer picks up again ("continue").
+  const last = useRef<{ question: string; answer: string | null; from: number } | null>(null);
+  const [resumable, setResumable] = useState<{ canContinue: boolean } | null>(null);
+  // What is being said now: when it started, with which voice, and the last word position the voice reported.
+  const progress = useRef<{ text: string; base: number; startAt: number; source: string; heard: number } | null>(null);
+  // How fast each voice speaks (characters per second), learnt from lines it finished, for working out where it stopped.
+  const rates = useRef<Record<string, number>>({});
+  // Each question to the AI gets a number; an answer arriving after Stop (or after a newer question) is kept, not spoken.
+  const askId = useRef(0);
+  const inFlight = useRef(0); // the number of the question still waiting for its answer, or 0
   const [voiceProblem, setVoiceProblem] = useState<string | null>(null);
   const [pendingOpen, setPendingOpen] = useState<NikoState['pendingOpen']>(null);
   const SR: any = typeof window !== 'undefined' ? (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition : null;
@@ -176,8 +192,19 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   // Each line Niko says gets a number; anything still arriving for an older line is dropped.
   const speechId = useRef(0);
   const current = useRef<{ stop: () => void } | null>(null);
+  /** Where a stopped answer picks up: the start of the sentence that was being said. */
+  const markStopped = () => {
+    const pr = progress.current, l = last.current;
+    progress.current = null;
+    if (!pr || pr.base < 0 || !l?.answer) return;
+    const secs = pr.startAt ? (performance.now() - pr.startAt) / 1000 : 0;
+    const heard = pr.heard >= 0 ? pr.heard : secs * (rates.current[pr.source] ?? 14);
+    l.from = Math.max(pr.base, sentenceStart(l.answer, pr.base + heard));
+    setResumable(l.from < l.answer.length ? { canContinue: true } : { canContinue: false });
+  };
   const stopSpeech = () => {
     const was = speaking.current;
+    if (was) markStopped();
     speechId.current++; speaking.current = false;
     window.speechSynthesis?.cancel(); audio.current?.pause(); audio.current = null;
     current.current?.stop(); current.current = null;
@@ -199,14 +226,21 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, [SR, idle]);
 
   /** Speaks with the first voice in the user's order that works, ending with the device voice. */
-  const say = useCallback((text: string) => {
+  const say = useCallback((text: string, answerFrom = -1) => {
     const engine = meRef.current?.engine as EnginePrefs | undefined;
     stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null;
     const id = speechId.current;
     const live = () => id === speechId.current;
+    // answerFrom ≥ 0: this is (the rest of) the last answer, starting at that character, so a stop can be picked up.
+    progress.current = { text, base: answerFrom, startAt: 0, source: '', heard: -1 };
+    const began = (source: string) => { if (live() && progress.current) { progress.current.startAt = performance.now(); progress.current.source = source; } };
     // When Niko has finished: a short pause (the speaker's last sound fades), then the mic comes back for the follow-up.
     const done = () => {
       if (!live()) return;
+      const pr = progress.current;
+      if (pr?.startAt) { const secs = (performance.now() - pr.startAt) / 1000; if (secs > 1.5) rates.current[pr.source] = Math.min(40, Math.max(6, pr.text.length / secs)); }
+      if (pr && pr.base >= 0 && last.current?.answer) { last.current.from = last.current.answer.length; setResumable(null); }
+      progress.current = null;
       lastSaid.current = { text, until: Date.now() + ECHO_MS };
       window.setTimeout(() => { if (!live()) return; speaking.current = false; unmuteMic(); listenForFollowUp(); }, 450);
     };
@@ -217,7 +251,17 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     const device = () => {
       if (!window.speechSynthesis) return done();
       const u = new SpeechSynthesisUtterance(text);
-      u.onend = done; u.onerror = done;
+      u.onstart = () => began('device');
+      u.onboundary = (e) => { if (live() && progress.current) progress.current.heard = e.charIndex; }; // exact word position
+      u.onend = done;
+      u.onerror = (e) => {
+        if (e.error === 'interrupted' || e.error === 'canceled') return; // Niko stopped it itself
+        // The device voice gave up part-way: keep the place, so "continue" carries on from there.
+        if (!live()) return;
+        markStopped(); speaking.current = false; unmuteMic();
+        setMode('idle'); setLabel('Stopped'); setLine('The voice stopped. Say “continue” to carry on, or “try again”.');
+        if (wantRec.current) window.setTimeout(() => { if (live()) listenForFollowUp(); }, 400);
+      };
       window.speechSynthesis.speak(u);
     };
     void (async () => {
@@ -234,6 +278,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         try {
           await s.started;
           if (!live()) return s.stop();
+          began(source);
           setVoiceProblem(first);
           await s.done;
           return done();
@@ -269,6 +314,16 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     endFollowUp();
     // Ending the conversation.
     if (/^(that'?s all|that is all|thanks?( you)?|thank you niko|stop|never ?mind|cancel that|bye)\b[.!]?$/.test(lower)) { active.current = false; stopSpeech(); idle(); return; }
+    // After a stop: "continue" carries on the answer, "try again" asks the question again, "repeat" says it again.
+    const intent = resumeIntent(text);
+    if (intent && last.current) {
+      const l = last.current;
+      if (intent === 'retry' || !l.answer) { setResumable(null); return askAI(l.question); }
+      setReply(l.answer); setResumable(null);
+      if (intent === 'replay') { l.from = 0; return say(l.answer, 0); }
+      if (l.from >= l.answer.length) { setMode('speaking'); setLabel('Heard'); setLine('That was the end of my answer. Say “repeat” to hear it again.'); window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 1600); return; }
+      return say(l.answer.slice(l.from), l.from);
+    }
     setReply(null);
     // 1. Phrases a page has claimed (send it / cancel).
     if (handler.current?.(lower)) return;
@@ -286,27 +341,40 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     const screen = screenFor(text);
     if (screen) { goTo(screen); return; }
     // 4. Everything else goes to the brain.
+    return askAI(text);
+  }, [navigate, idle, say, goTo, listenForFollowUp, SR]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const askAI = async (text: string) => {
+    const mine = ++askId.current;
+    inFlight.current = mine;
+    last.current = { question: text, answer: null, from: 0 };
+    setResumable(null); setReply(null);
     setMode('thinking'); setLabel('Thinking'); setLine(`“${text}”`);
     try {
       // A weather question carries where this device is, rounded to about 1 km, when a weather service is connected.
       const where = meRef.current?.weather && isWeatherQuestion(text) ? await whereAmI() : undefined;
-      const r = await api<{ reply: string; brief: Brief }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}) } });
+      const r = await api<{ reply: string; brief: Brief }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}) } }).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
       // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
       const { text: noScreen, path: asked } = takeScreenTag(r.reply);
       const { text: noItem, item } = takeItemTag(noScreen);
       // …or to scroll ([[scroll:down]]) or turn the list's page ([[page:next]]), which this screen then does.
       const { text: answer, scroll, page } = takeMoveTags(noItem);
-      setBrief(r.brief); setReply(answer); say(answer);
+      if (last.current?.question === text) last.current.answer = answer;
+      // Stopped while Niko was thinking (or a newer question came): keep the answer for "continue", don't speak it.
+      if (mine !== askId.current) { if (last.current?.question === text) setResumable({ canContinue: true }); return; }
+      setBrief(r.brief); setReply(answer); say(answer, 0);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) navigate('/' + item.view); }
       else if (asked) navigate(asked);
       else if (page && handler.current?.(page, true)) { /* the list on screen turned its page, quietly: Niko is speaking */ }
       else if (scroll || page) scrollScreen(scroll ?? (page === 'previous page' || page === 'first page' ? 'up' : 'down'));
     } catch (e: any) {
+      if (mine !== askId.current) return;
       if (e?.data?.brief) setBrief(e.data.brief);
-      setReply(e.message); setMode('idle'); setLabel('Problem'); setLine(e.message);
+      setReply(e.message); setMode('idle'); setLabel('Problem'); setLine(`${e.message} Say “try again” to ask once more.`);
+      setResumable({ canContinue: false });
     }
-  }, [navigate, idle, say, goTo, listenForFollowUp, SR]);
+  };
   askRef.current = (t: string) => { void ask(t); };
 
   // Speech recognition: runs while the app is open and the mic is allowed.
@@ -368,7 +436,19 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     active.current = true; setMode('listening'); setLabel('Listening'); setLine('Go ahead.');
   }, [SR, startRec]);
 
-  const stop = useCallback(() => { stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; active.current = false; idle(); unmuteMic(); }, [idle]);
+  const stop = useCallback(() => {
+    const thinking = inFlight.current !== 0 && inFlight.current === askId.current;
+    inFlight.current = 0;
+    askId.current++; // an answer still on its way is kept for "continue", not spoken
+    stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; active.current = false; unmuteMic();
+    const l = last.current;
+    if (l && (thinking || (l.answer && l.from < l.answer.length))) {
+      if (thinking) setResumable({ canContinue: true });
+      setMode('idle'); setLabel('Stopped'); setLine('Say “continue” to carry on, or “try again” to ask again.');
+      // Listening for a few seconds, so "continue" works without saying "Niko" first.
+      if (wantRec.current) window.setTimeout(() => listenForFollowUp(), 400);
+    } else idle();
+  }, [idle, listenForFollowUp]);
 
   const value = useMemo<NikoState>(() => ({
     me, refreshMe, mode, label, line, reply, brief, micOn, voiceSupported: !!SR || (hearOrder(me?.engine as EnginePrefs | undefined).length > 0 && captureSupported()), toggleMic, stop, ask,
@@ -381,7 +461,10 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     voiceProblem,
     pendingOpen,
     clearPendingOpen: () => setPendingOpen(null),
-  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp]);
+    resumable,
+    resume: () => { void ask('continue'); },
+    retry: () => { void ask('try again'); },
+  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
