@@ -7,7 +7,7 @@
 import { and, eq } from 'drizzle-orm';
 import { connections, users, type Db } from '@niko/db';
 import {
-  aiAllowed, bdToGcj, gcjToBd, gcjToWgs, mapChain, mapCountryLists, mapHandoff, mapOption, mapPreset, mapSkipped, MAX_MAP_KEYS, wgsToGcj,
+  aiAllowed, mapsOn, bdToGcj, gcjToBd, gcjToWgs, mapChain, mapCountryLists, mapHandoff, mapOption, mapPreset, mapSkipped, MAX_MAP_KEYS, wgsToGcj,
   type BrainRest, type EnginePrefs, type MapKeyInfo, type MapMode, type MapPlace, type MapProvider, type MapResult, type MapRoute, type MapSource, type MapStep,
 } from '@niko/shared';
 import type { Env } from './env';
@@ -426,7 +426,7 @@ export interface MapAsk { to: string; from?: string; mode: MapMode | 'place'; he
 type Entry = { entry: MapSource; provider: MapProvider | 'osm'; label: string; key?: MapKey };
 
 export async function findRoute(env: Env, db: Db, user: { id: string; engine: unknown }, ask: MapAsk, off: readonly string[] = []): Promise<MapResult> {
-  if (off.includes('sec:maps')) throw new BrainFail('not on account', 'refused', 0, 'Maps aren’t available on your account.');
+  if (!mapsOn(off)) throw new BrainFail('not on account', 'refused', 0, 'Maps aren’t available on your account.');
   const engine = (user.engine ?? {}) as EnginePrefs;
   const keys = await loadMapKeys(env, db, user.id);
   const t0 = Date.now();
@@ -456,6 +456,7 @@ export async function findRoute(env: Env, db: Db, user: { id: string; engine: un
   };
   const worked = (e: Entry) => { if (rest[e.entry]) { delete rest[e.entry]; changed = true; } };
 
+  if (!entries(null).length && !Object.keys(lists).some((cc) => entries(cc).length)) throw new BrainFail('no services', 'refused', 0, 'No map service is set up yet. Add one on the Engine screen.');
   try {
     // 1. The place (and the start, when they named one), from the first service that finds it.
     const placeList = ordered(entries(country)).filter((e) => {

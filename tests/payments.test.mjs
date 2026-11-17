@@ -54,11 +54,18 @@ const unflat = (params) => {
   return out;
 };
 const mapCalls = [];
+const slowCal = { on: false };
 globalThis.fetch = async (input, init = {}) => {
   // Like Cloudflare Workers: redirect must be 'follow' or 'manual'.
   if (init.redirect && !['follow', 'manual'].includes(init.redirect)) throw new TypeError(`Invalid redirect value, must be one of "follow" or "manual"`);
   const u = new URL(String(input));
   if (u.hostname === 'api.resend.com') { const b = JSON.parse(init.body); emails.push({ to: b.to[0], subject: b.subject, html: b.html }); return Response.json({ id: 'em_' + emails.length }); }
+  if (u.hostname === 'cal.example.com') {
+    if (slowCal.on) await new Promise((r) => setTimeout(r, 3000));
+    const at = (d) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+    const st = new Date(Date.now() + 3600_000);
+    return new Response(`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//t//EN\r\nBEGIN:VEVENT\r\nUID:d1@t\r\nDTSTAMP:${at(new Date())}\r\nDTSTART:${at(st)}\r\nDTEND:${at(new Date(st.getTime() + 1800_000))}\r\nSUMMARY:Dentist visit\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n`, { headers: { 'content-type': 'text/calendar' } });
+  }
   if (u.hostname === 'api.mapbox.com') {
     mapCalls.push(String(input));
     if (u.pathname.startsWith('/search/geocode/v6/')) return Response.json({ features: [{ properties: { name: 'Marina Bay Sands' }, geometry: { coordinates: [103.8607, 1.2834] } }] });
@@ -824,6 +831,29 @@ await ok('maps: a key is saved encrypted and never shown again; routes come back
   r = await b.del(`/map/keys/${id}`);
   me = await b.get('/me');
   assert.deepEqual(me.data.engine.maps, ['osm']); assert.deepEqual(me.data.engine.mapCountries, { SG: [] });
+});
+
+await ok('a slow calendar never holds up an answer: Niko answers within the wait, and the calendar joins the next answer', async () => {
+  const b = new Browser();
+  assert.equal((await b.post('/auth/sign-in', { email: 'jun@example.com', password: 'a brand new long passphrase 42' })).status, 200);
+  let r = await b.post('/calendars', { name: 'Work', url: 'https://cal.example.com/work.ics', kind: 'private' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  // Eleven minutes on: the kept copy of the feed is old, so it is read from the (now slow) server again.
+  const realNow = Date.now; Date.now = () => realNow() + 11 * 60_000;
+  const seen = [], run = env.AI.run;
+  env.AI.run = async (...args) => { seen.push(JSON.stringify(args)); return { response: 'ok' }; };
+  try {
+    slowCal.on = true;
+    const t0 = Date.now();
+    r = await b.post('/chat', { message: 'hello there', tz: 0 });
+    const took = Date.now() - t0;
+    assert.equal(r.status, 200); assert.ok(took < 2500, `answered in ${took} ms`);
+    assert.ok(!seen.at(-1).includes('Dentist'), 'the slow calendar was left out of this answer');
+    await Promise.all(waits.splice(0));
+    slowCal.on = false;
+    r = await b.post('/chat', { message: 'what is on today', tz: 0 });
+    assert.ok(seen.at(-1).includes('Dentist visit'), 'it was read in the background and is in the next answer');
+  } finally { env.AI.run = run; slowCal.on = false; Date.now = realNow; }
 });
 
 await sqlc.end();

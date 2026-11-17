@@ -4,6 +4,7 @@
 // line up with the map.
 import assert from 'node:assert/strict';
 import { countryOf, decodeFlexible, decodePolyline, findRoute, findWith, mapKeyProblem, routeWith } from '../apps/api/src/maps.ts';
+import { mapsOn } from '../packages/shared/src/index.ts';
 import { bdToGcj, gcjToBd, gcjToWgs, mapChain, mapHandoff, mapSkipped, wgsToGcj } from '../packages/shared/src/maps.ts';
 import { countryCommand, countryFromName, mapCommand, takeMapTag } from '../apps/app/src/speech.ts';
 import { store, fakeDb } from './brains-stubs.mjs';
@@ -157,6 +158,13 @@ await ok('the administrator’s choices: maps off for the account, or one servic
   const r = await findRoute(env, fakeDb, user({ maps: ['mkey:g'] }), { to: 'Louvre', mode: 'drive', here: null, country: 'auto' }, ['map:google']);
   assert.ok(!calls.some((c) => c.url.includes('google')));
   assert.deepEqual(r.chain, ['OpenStreetMap']);
+});
+await ok('every map service off for the account means no maps; the built-in map off with no services means none set up', async () => {
+  const all = ['map:osm', 'map:google', 'map:mapbox', 'map:onemap', 'map:openrouteservice', 'map:naver', 'map:kakao', 'map:amap', 'map:baidu', 'map:here', 'map:tomtom', 'map:geoapify', 'map:maptiler', 'map:self-hosted'];
+  assert.equal(mapsOn(all), false); assert.equal(mapsOn(['sec:maps']), false); assert.equal(mapsOn(['map:osm']), true); assert.equal(mapsOn([]), true);
+  await assert.rejects(findRoute(env, fakeDb, user({}), { to: 'x', mode: 'drive', here: null, country: 'auto' }, all), /not on account/);
+  store.creds['map-keys'] = null;
+  await assert.rejects(findRoute(env, fakeDb, user({}), { to: 'Louvre', mode: 'drive', here: null, country: 'auto' }, ['map:osm']), /no services/);
 });
 await ok('nothing found: not the service’s fault, so nothing rests', async () => {
   store.creds['map-keys'] = { keys: [key('m', 'mapbox')] }; store.engineWrites = [];

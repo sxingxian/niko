@@ -397,6 +397,8 @@ export function aiAllowed(off: readonly string[], key: string): boolean {
   const g = AI_OPTION_GROUPS.find((x) => x.items.some((i) => i.key === key));
   return !(g?.section && off.includes(g.section));
 }
+/** Maps are available unless the administrator turned them off, or turned off every map service. */
+export const mapsOn = (off: readonly string[]) => !off.includes('sec:maps') && AI_OPTION_GROUPS.find((g) => g.id === 'maps')!.items.some((i) => !off.includes(i.key));
 /** At least one brain must stay on for an account, or Niko could not answer. */
 export const aiHasBrain = (off: readonly string[]) => AI_OPTION_GROUPS[0]!.items.some((i) => !off.includes(i.key));
 /** Which option a brain, image, voice or speech-in entry belongs to; keys go by the service they were saved for. */

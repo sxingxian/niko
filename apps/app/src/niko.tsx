@@ -1,7 +1,7 @@
 // Shared Niko state: who is signed in, and the voice loop (wake word, commands, speech).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { aiAllowed, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource } from '@niko/shared';
+import { aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource } from '@niko/shared';
 import { countryCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
@@ -428,7 +428,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       return;
     }
     // 3. Which country's maps: "I'm in Korea", "use worldwide". Lasts for this visit.
-    const cc = countryCommand(text);
+    const cc = mapsOn(meRef.current?.aiOff ?? []) ? countryCommand(text) : null;
     if (cc) {
       setMapCountryFn(cc);
       const listed = cc !== 'ww' && !!meRef.current?.engine.mapCountries?.[cc]?.length;
@@ -469,7 +469,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // Stopped while Niko was thinking (or a newer question came): keep the answer for "continue", don't speak it.
       if (mine !== askId.current) { if (last.current?.question === text) setResumable({ canContinue: true }); return; }
       setBrief(r.brief);
-      if (wantMap) {
+      if (wantMap && mapsOn(meRef.current?.aiOff ?? [])) {
         if (wantMap.to.toLowerCase() === 'same' && mapRef.current) { say(answer || 'Changing the route.', 0); if (wantMap.how !== 'any' && wantMap.how !== 'place') setMapModeFn(wantMap.how); return; }
         say(answer || 'Here’s the map.', 0);
         if (here.current !== '/') navigate('/');

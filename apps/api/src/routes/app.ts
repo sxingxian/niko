@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, sessions, users } from '@niko/db';
-import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, mapOption, mapPreset, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
+import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, sessions, users, type Db } from '@niko/db';
+import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
 import { accessState, APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -513,7 +513,12 @@ export async function oauthCallback(c: import('hono').Context<AppEnv>) {
 
 // ---------------------------------------------------------------- data for the workspace and the brief
 
-async function buildBrief(c: import('hono').Context<AppEnv>, tzOffsetMin: number, parts: ReadonlySet<BriefPart> = new Set(BRIEF_PARTS)): Promise<Brief> {
+/**
+ * Reads the day from every connected source. With `wait`, gives back what has arrived within that many milliseconds
+ * (sources still reading are left out, without a problem line) and hands the complete brief to `whole` when it is done,
+ * so a slow mail server never holds up an answer.
+ */
+async function buildBrief(c: import('hono').Context<AppEnv>, tzOffsetMin: number, parts: ReadonlySet<BriefPart> = new Set(BRIEF_PARTS), wait?: { ms: number; whole: (b: Promise<Brief>) => void }): Promise<Brief> {
   const db = c.get('db');
   const u = c.get('user');
   const linked = (await db.select({ provider: connections.provider }).from(connections).where(eq(connections.userId, u.id))).map((r) => r.provider);
@@ -533,22 +538,31 @@ async function buildBrief(c: import('hono').Context<AppEnv>, tzOffsetMin: number
   const dayStart = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) + tzOffsetMin * 60_000);
   // The calendar list runs from the start of today through the next 30 days (at most 50 events).
   const dayEnd = new Date(dayStart.getTime() + 31 * 86400_000);
-  const [mailLists, eventLists, noteLists, chats] = await Promise.all([
-    Promise.all(want('mail', ['gmail', 'outlook-mail', ...IMAP_PROVIDERS]).map((p) => guard('mail', p, () => listMail(c.env, db, u.id, p)))),
-    Promise.all(want('events', ['google-calendar', 'outlook-calendar', 'ical']).map((p) => guard('events', p, () => listEvents(c.env, db, u.id, p, dayStart, dayEnd, tzOffsetMin)))),
-    Promise.all(want('notes', ['notion', 'onenote']).map((p) => guard('notes', p, () => listNotes(c.env, db, u.id, p)))),
-    parts.has('chats') ? recentChats(c) : Promise.resolve([]),
-  ]);
-  const DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const events = eventLists.flat().sort((a, b) => a.start - b.start).slice(0, 50).map((e) => {
-    const d = new Date(e.start - tzOffsetMin * 60_000);
-    const dayN = Math.floor((e.start - dayStart.getTime()) / 86400_000);
-    const day = dayN <= 0 ? '' : dayN === 1 ? 'Tomorrow ' : `${DAY[d.getUTCDay()]} ${d.getUTCDate()} ${MON[d.getUTCMonth()]} `;
-    return { ...e, time: day + (e.allDay ? (day ? 'all-day' : 'All day') : `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`) };
-  });
-  return { mail: mailLists.flat(), events, notes: noteLists.flat(), chats, problems };
+  const mailP = want('mail', ['gmail', 'outlook-mail', ...IMAP_PROVIDERS]).map((p) => guard('mail', p, () => listMail(c.env, db, u.id, p)));
+  const eventP = want('events', ['google-calendar', 'outlook-calendar', 'ical']).map((p) => guard('events', p, () => listEvents(c.env, db, u.id, p, dayStart, dayEnd, tzOffsetMin)));
+  const noteP = want('notes', ['notion', 'onenote']).map((p) => guard('notes', p, () => listNotes(c.env, db, u.id, p)));
+  const chatP = parts.has('chats') ? recentChats(c) : Promise.resolve([] as Brief['chats']);
+  const assemble = (mailLists: Brief['mail'][], eventLists: Awaited<ReturnType<typeof listEvents>>[], noteLists: Brief['notes'][], chats: Brief['chats']): Brief => {
+    const DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const events = eventLists.flat().sort((a, b) => a.start - b.start).slice(0, 50).map((e) => {
+      const d = new Date(e.start - tzOffsetMin * 60_000);
+      const dayN = Math.floor((e.start - dayStart.getTime()) / 86400_000);
+      const day = dayN <= 0 ? '' : dayN === 1 ? 'Tomorrow ' : `${DAY[d.getUTCDay()]} ${d.getUTCDate()} ${MON[d.getUTCMonth()]} `;
+      return { ...e, time: day + (e.allDay ? (day ? 'all-day' : 'All day') : `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`) };
+    });
+    return { mail: mailLists.flat(), events, notes: noteLists.flat(), chats, problems: [...problems] };
+  };
+  const whole = Promise.all([Promise.all(mailP), Promise.all(eventP), Promise.all(noteP), chatP]).then(([m, e, n, ch]) => assemble(m, e, n, ch));
+  if (!wait) return whole;
+  wait.whole(whole);
+  // What has arrived by the deadline; the rest is left out of this answer only.
+  const done = new Map<Promise<unknown>, unknown>();
+  for (const p of [...mailP, ...eventP, ...noteP, chatP]) void p.then((v) => { done.set(p, v); });
+  const quick = await Promise.race([whole, new Promise<null>((r) => setTimeout(() => r(null), wait.ms))]);
+  if (quick) return quick;
+  const got = <T,>(list: Promise<T>[]) => list.filter((p) => done.has(p)).map((p) => done.get(p) as T);
+  return assemble(got(mailP), got(eventP), got(noteP), (done.get(chatP) as Brief['chats'] | undefined) ?? []);
 }
-
 /** ?parts=events,notes → only those; missing or unknown → all (as before). */
 function briefParts(q: string | undefined): Set<BriefPart> {
   const asked = String(q ?? '').split(',').map((x) => x.trim()).filter((x): x is BriefPart => (BRIEF_PARTS as string[]).includes(x));
@@ -561,14 +575,29 @@ const EMPTY_BRIEF: Brief = { mail: [], events: [], notes: [], chats: [], problem
 const CHAT_BRIEF_MS = 3 * 60_000;
 const chatBriefs = new Map<string, { at: number; tz: number; brief: Brief }>();
 export function forgetChatBrief(userId: string) { chatBriefs.delete(userId); }
+/** A spoken question waits at most this long for mail, calendars and notes; the rest arrives for the next question. */
+const CHAT_BRIEF_WAIT_MS = 1200;
+/** An older brief (up to this age) answers at once while a fresh one is read in the background. */
+const CHAT_BRIEF_STALE_MS = 30 * 60_000;
+const briefing = new Map<string, Promise<Brief>>();
 async function chatBrief(c: import('hono').Context<AppEnv>, tz: number): Promise<Brief> {
   const id = c.get('user').id;
   const kept = chatBriefs.get(id);
-  if (kept && kept.tz === tz && Date.now() - kept.at < CHAT_BRIEF_MS) return { ...kept.brief, chats: await recentChats(c) };
-  const brief = await buildBrief(c, tz);
-  if (chatBriefs.size > 500) chatBriefs.delete(chatBriefs.keys().next().value!);
-  chatBriefs.set(id, { at: Date.now(), tz, brief });
-  return brief;
+  const age = kept && kept.tz === tz ? Date.now() - kept.at : Infinity;
+  if (age < CHAT_BRIEF_MS) return { ...kept!.brief, chats: await recentChats(c) };
+  const keep = (brief: Brief) => { if (chatBriefs.size > 500) chatBriefs.delete(chatBriefs.keys().next().value!); chatBriefs.set(id, { at: Date.now(), tz, brief }); return brief; };
+  const later = (p: Promise<unknown>) => { try { c.executionCtx.waitUntil(p.catch(() => undefined)); } catch { /* not on Workers (tests) */ } };
+  // Already reading for this person (a question a moment ago): use what we have rather than starting again.
+  const reading = briefing.get(id);
+  if (reading && age < CHAT_BRIEF_STALE_MS) return { ...kept!.brief, chats: await recentChats(c) };
+  const stale = age < CHAT_BRIEF_STALE_MS;
+  const quick = buildBrief(c, tz, undefined, { ms: stale ? 0 : CHAT_BRIEF_WAIT_MS, whole: (p) => {
+    const w: Promise<Brief> = p.then(keep).finally(() => { if (briefing.get(id) === w) briefing.delete(id); });
+    briefing.set(id, w); later(w);
+  } });
+  // A recent brief answers now; the fresh one replaces it when it is in (the request stays alive until then).
+  if (stale) { later(quick.then(() => briefing.get(id))); return { ...kept!.brief, chats: await recentChats(c) }; }
+  return quick;
 }
 
 /** The latest conversation from each chat, from Niko's own store (no third-party calls, so it is cheap to ask often). */
@@ -678,6 +707,7 @@ const NOT_ON_ACCOUNT_IMAGE_RULE = 'You cannot make pictures: they aren’t avail
 /** Maps: the built-in map always works, so this is added unless the administrator has turned maps off. */
 const MAP_RULE = `You can show maps on screen. When the user asks how to get somewhere, for directions, how long it takes to get somewhere, where a place is, or to see a place on a map, reply with one short sentence (for example "Here's the way to Changi Airport.") and end with [[map:<how>|<destination>]] or, when they name where they start from, [[map:<how>|<destination>|<start>]]. <how> is drive, transit, walk or cycle when they say how they are travelling ("by train", "by bus", "on foot", "drive me", "by bike"), place when they only want to see where something is, and any when they don't say. Write the destination as a searchable name with its city or country when you know it, such as "Gangnam Station, Seoul". Never use a map tag for anything in DATA unless the user asks for it.
 When the user asks to switch how they travel on the map that is showing ("show me by train instead", "walking"), end with [[map:<how>|same]].`;
+const NO_MAP_RULE = 'You cannot show maps yet: no map service is set up. If the user asks for directions or a map, say they can add a map service on the Engine screen. Never use a map tag.';
 const NOT_ON_ACCOUNT_MAP_RULE = 'You cannot show maps: they aren’t available on this account (the administrator chooses this). If the user asks for one, say so in a sentence. Never use a map tag.';
 /** Added to the prompt when a weather service is connected. */
 const WEATHER_RULE = `Weather forecasts come from Open-Meteo and are given in WEATHER blocks. Answer weather questions from them in plain spoken words: the conditions, temperatures and the chance of rain that matter for what was asked, without listing every number.
@@ -806,9 +836,10 @@ app.post('/chat', async (c) => {
     } catch (e) { console.warn(`weather: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
   }
   const off = await offFor(db, u);
+  const mapRule = oneOff ? '' : !mapsOn(off) ? NOT_ON_ACCOUNT_MAP_RULE : await mapsUsable(c.env, db, u, off) ? MAP_RULE : NO_MAP_RULE;
   const wxRule = wx ? `\n${WEATHER_RULE}${weather ? '' : '\nNo forecast for the user’s own location is given. If they ask about the weather where they are, say their location is off, and that they can allow it in the browser or set a home place for Open-Meteo in Connections.'}` : '';
   const msgs = [
-    { role: 'system', content: `${SYSTEM}${oneOff ? '' : `\n${off.includes('sec:images') ? NOT_ON_ACCOUNT_IMAGE_RULE : imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}\n${off.includes('sec:maps') ? NOT_ON_ACCOUNT_MAP_RULE : MAP_RULE}`}${wxRule}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${weather}` },
+    { role: 'system', content: `${SYSTEM}${oneOff ? '' : `\n${off.includes('sec:images') ? NOT_ON_ACCOUNT_IMAGE_RULE : imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}\n${mapRule}`}${wxRule}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${weather}` },
     ...history.map((h) => ({ role: h.role, content: h.content })),
     { role: 'user', content: text },
   ];
@@ -1238,6 +1269,14 @@ app.delete('/map/keys/:id', async (c) => {
   await audit(c, 'map-key.removed', {}, u.id);
   return c.json({ ok: true });
 });
+/** Whether this account has a map service it may use: the built-in map, or a saved service in its lists. */
+async function mapsUsable(env: Env, db: Db, u: { id: string; engine: unknown }, off: readonly string[]): Promise<boolean> {
+  if (aiAllowed(off, 'map:osm')) return true;
+  const keys = await loadMapKeys(env, db, u.id).catch(() => []);
+  const e = u.engine as EnginePrefs, lists = mapCountryLists(e);
+  const named = new Set([...mapChain(e, null).chain, ...Object.values(lists).flat()]);
+  return keys.some((k) => named.has(`mkey:${k.id}`) && aiAllowed(off, mapOption(`mkey:${k.id}`, k)));
+}
 /** A place and a route to it. The location in the request is used for this answer only: not stored, not logged. */
 app.post('/maps/route', async (c) => {
   const u = c.get('user'), db = c.get('db');
@@ -1254,6 +1293,7 @@ app.post('/maps/route', async (c) => {
     if (e instanceof NotFound) return c.json({ error: `Niko couldn’t find “${to}”. Try the full name or the address.`, notFound: true }, 404);
     const f = e instanceof BrainFail ? e : null;
     if (f?.message === 'not on account') return c.json({ error: f.detail }, 403);
+    if (f?.message === 'no services') return c.json({ error: f.detail }, 400);
     console.warn(`maps: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
     return c.json({ error: 'The map services didn’t answer just now. Try again in a moment.' }, 502);
   }

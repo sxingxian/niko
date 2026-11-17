@@ -2,7 +2,7 @@
 // Keys are saved from the sheet straight away (and go to the server only); the order of the lists is saved with the
 // Engine screen's "Save changes".
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { aiAllowed, MAP_PROVIDERS, MAP_MODE_NAMES, mapOption, mapPreset, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type BrainRest, type MapKeyInfo, type MapProvider, type MapSource } from '@niko/shared';
+import { aiAllowed, mapsOn, MAP_PROVIDERS, MAP_MODE_NAMES, mapOption, mapPreset, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type BrainRest, type MapKeyInfo, type MapProvider, type MapSource } from '@niko/shared';
 import { api, Field, Icon, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
 
@@ -56,7 +56,9 @@ export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
   }, [me, load]);
   bind({ maps: [...maps, 'osm'], mapCountries: lists, dirty, saved: () => setDirty(false) });
   useEffect(() => { if (draft) dlg.current?.showModal(); }, [draft]);
-  if (!me || off.includes('sec:maps')) return null;
+  // Maps off for this account, or every map service off: the whole section goes, as Niko can't show maps.
+  if (!me || !mapsOn(off)) return null;
+  const osm = aiAllowed(off, 'map:osm');
 
   const keyOf = (s: MapSource) => keys.find((k) => `mkey:${k.id}` === s);
   const ok = (s: MapSource) => { const k = keyOf(s); return !!k && aiAllowed(off, mapOption(s, k)); };
@@ -192,20 +194,21 @@ export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
   return (
     <section className="g eng-card wide" aria-label="Maps">
       <span className="k" style={{ paddingBottom: 6 }}>Maps · Niko uses in this order</span>
-      <p className="hint" style={{ paddingBottom: 8 }}>Ask Niko the way somewhere (“how do I get to the airport by train?”) or to show a place. The first service that works finds it, switching to the next when one reaches its limit, refuses its key or stops answering. When you’re in a country with its own list (or say you are, like “I’m in Korea”), that list comes first. The map itself is OpenStreetMap, built in; keys stay on Niko’s server.</p>
+      <p className="hint" style={{ paddingBottom: 8 }}>Ask Niko the way somewhere (“how do I get to the airport by train?”) or to show a place. The first service that works finds it, switching to the next when one reaches its limit, refuses its key or stops answering. When you’re in a country with its own list (or say you are, like “I’m in Korea”), that list comes first. The map picture is OpenStreetMap; keys stay on Niko’s server.</p>
       {note && <p className={'hint' + (note.ok ? '' : ' vrow-warn')} role="status">{note.text}</p>}
 
       <div className="map-subhead"><span className="k">Everywhere</span><span className="hint">Used in every country, after that country’s own list</span></div>
       <ol className="vlist">
         {shown.map((s, i) => row(s, i, 'ww'))}
-        <li className="vrow on">
+        {osm && <li className="vrow on">
           <div className="vrow-head">
             <span className="n" aria-hidden="true">{shown.length + 1}</span>
             <span className="vrow-title"><b>OpenStreetMap</b><span className="sub">Built in · free, no key · the map and places; opens directions in the local maps app</span></span>
             <span className="k tag">Built in</span>
           </div>
-        </li>
+        </li>}
       </ol>
+      {!osm && !shown.length && <p className="hint vrow-warn" style={{ padding: '4px 0 8px' }}>No map service is on yet, so Niko can’t show maps. Add one below.</p>}
       {notInUse.length > 0 && <><span className="k" style={{ padding: '18px 0 6px' }}>Not in use</span><ul className="vlist">{notInUse.map((s) => row(s, null, 'off'))}</ul></>}
 
       <div className="map-subhead"><span className="k">By country</span><span className="hint">Used first for trips in that country</span></div>
