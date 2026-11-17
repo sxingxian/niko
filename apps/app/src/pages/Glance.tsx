@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { cleanGlancePrefs, GLANCE_PARTS, glanceEvery, GLANCE_LIMIT_DEFAULTS, type GlanceItem } from '@niko/shared';
-import { api, currentHue, Icon, sphereOf, spots } from '@niko/ui';
+import { api, currentHue, Icon, lockedSignal, sphereOf, spots } from '@niko/ui';
 import { useNiko } from '../niko';
 import { cleanCommand } from '../speech';
 
@@ -80,10 +80,11 @@ export function GlanceStack({ wide }: { wide: boolean }) {
       if (document.visibilityState === 'visible' && Date.now() - lastActive.current < IDLE_PAUSE_MS) {
         running = true;
         try {
+          const sent = Date.now();
           const r = await api<{ items: GlanceItem[]; waitMs?: number; off?: boolean; locked?: boolean }>('/glance', { body: { tz: new Date().getTimezoneOffset() } });
           if (r.off) stop = true;
           // Locked from somewhere else (another tab, the time ran out): this screen locks too.
-          if (r.locked && !nRef.current.locked) window.dispatchEvent(new Event('niko:locked'));
+          if (r.locked && !nRef.current.locked) lockedSignal(sent);
           const known = new Set([...queue.current.map((x) => x.key), ...cardsRef.current.map((c) => c.it.key)]);
           queue.current.push(...(r.items ?? []).filter((x) => !known.has(x.key)));
           wait = Math.max(45_000, r.waitMs ?? 60_000);

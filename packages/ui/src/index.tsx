@@ -13,8 +13,14 @@ export function appUrl(path = ''): string {
 export class ApiError extends Error {
   constructor(message: string, public status: number, public data: any) { super(message); }
 }
+/** Tells the app the server refused a request because the screen is locked, with when that request was sent: an
+ * answer to a request sent before the latest unlock is old news and must not lock the screen again. */
+export function lockedSignal(sent: number) {
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('niko:locked', { detail: { sent } }));
+}
 /** Same-origin JSON call. Cookies carry the session; nothing is kept in browser storage. */
 export async function api<T = any>(path: string, init: { method?: string; body?: unknown; form?: FormData } = {}): Promise<T> {
+  const sent = Date.now();
   const res = await fetch('/api' + path, {
     method: init.method ?? (init.body || init.form ? 'POST' : 'GET'),
     credentials: 'same-origin',
@@ -24,7 +30,7 @@ export async function api<T = any>(path: string, init: { method?: string; body?:
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     // The server keeps the screen lock: any refused call tells the app to show the lock.
-    if (res.status === 423 && data?.locked && typeof window !== 'undefined') window.dispatchEvent(new Event('niko:locked'));
+    if (res.status === 423 && data?.locked && typeof window !== 'undefined') lockedSignal(sent);
     throw new ApiError(data?.error ?? 'Something went wrong.', res.status, data);
   }
   return data as T;

@@ -8,7 +8,7 @@ import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sen
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
-import { api, ApiError, setAppearance, type CoreMode } from '@niko/ui';
+import { api, ApiError, lockedSignal, setAppearance, type CoreMode } from '@niko/ui';
 
 export type { Brief } from '@niko/shared';
 
@@ -731,8 +731,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     };
     void (async () => {
       try {
+        const sent = Date.now();
         const r = await fetch('/api/image', { method: 'POST', credentials: 'same-origin', signal: ctl.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, shape, asked: words }) });
-        if (!r.ok) { const j = await r.json().catch(() => ({})); if (r.status === 423 && j.locked) window.dispatchEvent(new Event('niko:locked')); throw Object.assign(new Error(j.error ?? 'The picture could not be made just now.'), { declined: !!j.declined }); }
+        if (!r.ok) { const j = await r.json().catch(() => ({})); if (r.status === 423 && j.locked) lockedSignal(sent); throw Object.assign(new Error(j.error ?? 'The picture could not be made just now.'), { declined: !!j.declined }); }
         const blob = await r.blob();
         if (!/^image\/(jpeg|png|webp)$/.test(blob.type)) throw new Error('The picture could not be read.');
         if (!picturesRef.current.some((x) => x.id === id)) return;
@@ -886,6 +887,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   function lockNowFn() { void api<{ locked: boolean }>('/lock/now', { body: {} }).then((r) => { if (r.locked) enterLockRef.current(); }).catch(() => undefined); }
   /** Unlocked (here, or in another tab of this sign-in): back to normal, and whatever was waiting goes ahead. */
   const leaveLock = async (runPending: boolean) => {
+    unlockedAt.current = Date.now();
     lockedRef.current = false; setLocked(false); setLockAsk(null);
     lastUse.current = Date.now();
     const then = runPending ? afterUnlock.current : null;
@@ -921,12 +923,27 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     return { ok: true };
   };
   // The server can say the screen is locked at any time (another tab, the time ran out, a reload): Home shows the lock.
+  // But an answer to a request sent before the latest unlock (new items take seconds to read) is old news: it locked
+  // the screen again right after unlocking. Such answers are ignored, and any other is checked with the server first.
+  const unlockedAt = useRef(0);
+  const checking = useRef(false);
+  const confirmLock = async () => {
+    if (lockedRef.current || checking.current) return;
+    checking.current = true;
+    try { const r = await api<{ locked: boolean }>('/lock'); if (r.locked) enterLockRef.current(); }
+    catch { /* offline: the server still keeps the lock */ } finally { checking.current = false; }
+  };
   useEffect(() => {
-    const on = () => enterLockRef.current();
+    const on = (e: Event) => {
+      const sent = (e as CustomEvent<{ sent?: number }>).detail?.sent ?? 0;
+      if (sent && sent < unlockedAt.current) return;
+      void confirmLock();
+    };
     window.addEventListener('niko:locked', on);
     return () => window.removeEventListener('niko:locked', on);
-  }, []);
-  useEffect(() => { if (me?.locked && !lockedRef.current) enterLockRef.current(); }, [me]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Opening Niko on a locked sign-in locks straight away; after an unlock in this visit, the server is asked first.
+  useEffect(() => { if (me?.locked && !lockedRef.current) { if (unlockedAt.current) void confirmLock(); else enterLockRef.current(); } }, [me]); // eslint-disable-line react-hooks/exhaustive-deps
   // Use: touches, keys, the pointer moving, and anything Niko is doing for the person (listening, thinking, speaking).
   useEffect(() => { if (mode !== 'idle') lastUse.current = Date.now(); }, [mode]);
   useEffect(() => {
