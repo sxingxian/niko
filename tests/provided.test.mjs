@@ -33,6 +33,12 @@ ok('setups accept only provided ids, up to 6 a kind, and free unless fixed', () 
   assert.equal(s.order, 'free');
   assert.ok(PROVIDED_ID.test('px0123456789') && !PROVIDED_ID.test('px012345678') && !PROVIDED_ID.test('PX0123456789'));
 });
+ok('the built-in’s place is kept in a setup, once, and never for maps', () => {
+  const s = cleanProvided({ keys: { brain: ['builtin', 'px0000000001', 'builtin'], map: ['builtin', 'px0000000002'] } });
+  assert.deepEqual(s.keys.brain, ['builtin', 'px0000000001']);
+  assert.deepEqual(s.keys.map, ['px0000000002']);
+  assert.deepEqual(arrangeOrder(['key:mine', 'key:px0000000001', 'workers-ai'], ['workers-ai', 'key:px0000000001'], 'fixed'), ['workers-ai', 'key:px0000000001', 'key:mine']);
+});
 ok('monthly amounts: only the offered steps are kept, and no limit until one is set', () => {
   assert.deepEqual(cleanAccountLimits({ brain: 1000, voice: 7, hear: 300, image: '50', map: 0 }), { brain: 1000, hear: 300, map: 0 });
   const l = accountLimits({}, {});

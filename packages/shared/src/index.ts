@@ -539,11 +539,23 @@ export function includedEntry(kind: UsageKind, entry: string): boolean {
 }
 /** The person's setup from the admin: which provided keys they get for each kind (in order), and whether they may
  * reorder them ('free') or the provided ones stay first ('fixed'). */
+export const BUILTIN_TOKEN = 'builtin';
+/** Niko's built-in service for each kind, as it appears in an order. */
+export const BUILTIN_ENTRY: Record<UsageKind, string> = { brain: 'workers-ai', voice: 'workers', hear: 'workers', image: 'workers', map: 'osm' };
+/** The provided key ids in a setup list (without the built-in's place). */
+export const providedIds = (l: string[] | undefined) => (l ?? []).filter((x) => x !== BUILTIN_TOKEN);
 export interface ProvidedSetup { keys: Partial<Record<UsageKind, string[]>>; order: 'free' | 'fixed'; setAt?: string }
 export function cleanProvided(v: unknown): ProvidedSetup {
   const o = (v && typeof v === 'object' ? v : {}) as Record<string, any>;
   const keys: Partial<Record<UsageKind, string[]>> = {};
-  for (const k of USAGE_KINDS) if (Array.isArray(o.keys?.[k])) { const l = [...new Set((o.keys[k] as unknown[]).map(String).filter((x) => PROVIDED_ID.test(x)))].slice(0, 6); if (l.length) keys[k] = l; }
+  // "builtin" marks where Niko's built-in service sits among the provided ones (maps keep OpenStreetMap last).
+  for (const k of USAGE_KINDS) if (Array.isArray(o.keys?.[k])) {
+    const all = [...new Set((o.keys[k] as unknown[]).map(String).filter((x) => PROVIDED_ID.test(x) || (x === BUILTIN_TOKEN && k !== 'map')))];
+    const l = [...all.filter((x) => x !== BUILTIN_TOKEN).slice(0, 6)];
+    const at = all.indexOf(BUILTIN_TOKEN);
+    if (at >= 0) l.splice(Math.min(at, l.length), 0, BUILTIN_TOKEN);
+    if (l.length) keys[k] = l;
+  }
   return { keys, order: o.order === 'fixed' ? 'fixed' : 'free', ...(typeof o.setAt === 'string' ? { setAt: o.setAt } : {}) };
 }
 /** An order with the provided services placed as the admin set them: first, in the admin's order, when fixed. */

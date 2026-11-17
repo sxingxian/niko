@@ -5,7 +5,7 @@
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { invites, providedKeys, users } from '@niko/db';
-import { accountLimits, aiHasBrain, aiOff, aiProviderOf, cleanAccountLimits, cleanAiAccess, cleanProvided, NOT_CHAT, USAGE_KINDS, type EnginePrefs, type ProvidedSetup, type UsageKind } from '@niko/shared';
+import { accountLimits, aiHasBrain, aiOff, aiProviderOf, BUILTIN_TOKEN, providedIds, cleanAccountLimits, cleanAiAccess, cleanProvided, NOT_CHAT, USAGE_KINDS, type EnginePrefs, type ProvidedSetup, type UsageKind } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { audit, requireAdmin } from '../lib/session';
 import { publicHttpsUrl } from '../providers';
@@ -87,12 +87,12 @@ async function giveKey(db: any, who: 'user' | 'invite', id: string, kind: UsageK
   if (who === 'user') {
     const u = await setupOfUser(db, id); if (!u) return;
     const s = cleanProvided(u.provided);
-    s.keys[kind] = [keyId, ...(s.keys[kind] ?? []).filter((x) => x !== keyId)].slice(0, 6);
+    s.keys[kind] = [keyId, ...(s.keys[kind] ?? []).filter((x) => x !== keyId)];
     await db.update(users).set({ provided: { ...s, setAt: new Date().toISOString() }, engine: engineWithProvided(u.engine as Partial<EnginePrefs>, s) as any }).where(eq(users.id, u.id));
   } else {
     const inv = await setupOfInvite(db, id); if (!inv) return;
     const cur = inviteSetup(inv.setup), s = cleanProvided(cur.provided);
-    s.keys[kind] = [keyId, ...(s.keys[kind] ?? []).filter((x) => x !== keyId)].slice(0, 6);
+    s.keys[kind] = [keyId, ...(s.keys[kind] ?? []).filter((x) => x !== keyId)];
     await db.update(invites).set({ setup: { ...cur, provided: s, engine: engineWithProvided((cur.engine ?? {}) as Partial<EnginePrefs>, s) } }).where(eq(invites.id, inv.id));
   }
 }
@@ -199,7 +199,7 @@ setup.put('/:who/:id', async (c) => {
   const kept = await db.select({ id: providedKeys.id, kind: providedKeys.kind }).from(providedKeys);
   const asked = cleanProvided({ keys: b.keys, order: b.order });
   const s: ProvidedSetup = { keys: {}, order: asked.order, setAt: new Date().toISOString() };
-  for (const k of KINDS) { const l = (asked.keys[k] ?? []).filter((id) => kept.some((x) => x.id === id && x.kind === k)); if (l.length) s.keys[k] = l; }
+  for (const k of KINDS) { const l = (asked.keys[k] ?? []).filter((id) => id === BUILTIN_TOKEN || kept.some((x) => x.id === id && x.kind === k)); if (providedIds(l).length || l.length) s.keys[k] = l; }
   const defaults = await aiDefaults(db), limitDefaults = accountLimits(await accountDefaults(db, true), {});
   const target = who === 'user' ? await setupOfUser(db, c.req.param('id')) : await setupOfInvite(db, c.req.param('id'));
   if (!target) return c.json({ error: who === 'user' ? 'No such user.' : 'That invite is no longer open.' }, 404);
@@ -211,7 +211,11 @@ setup.put('/:who/:id', async (c) => {
     const on = b.builtins[k] as boolean;
     if (on === (defaults[opt] ?? true)) delete access[opt]; else access[opt] = on;
   }
-  if (!aiHasBrain(aiOff(defaults, access)) && !s.keys.brain?.length) return c.json({ error: 'Nothing would be left to answer. Keep Workers AI, or add an AI key.' }, 400);
+  // Something must answer: a provided AI key, or Workers AI.
+  if (!providedIds(s.keys.brain).length && aiOff(defaults, access).includes('workers-ai')) return c.json({ error: 'Nothing would be left to answer. Add a service with your key, or keep Workers AI.' }, 400);
+  if (!aiHasBrain(aiOff(defaults, access)) && !providedIds(s.keys.brain).length) return c.json({ error: 'Nothing would be left to answer. Keep Workers AI, or add an AI key.' }, 400);
+  // The built-in's place means nothing once it is removed.
+  for (const k of KINDS) if (s.keys[k] && BUILTIN[k] && aiOff(defaults, access).includes(BUILTIN[k]!)) { s.keys[k] = providedIds(s.keys[k]); if (!s.keys[k]!.length) delete s.keys[k]; }
   const own = Object.fromEntries(Object.entries(cleanAccountLimits(b.limits)).filter(([k, v]) => v !== (limitDefaults as unknown as Record<string, unknown>)[k]));
   if (who === 'user') {
     const u = target as typeof users.$inferSelect;
@@ -219,12 +223,12 @@ setup.put('/:who/:id', async (c) => {
     const limitsNow = cleanAccountLimits(u.accountLimits) as Record<string, unknown>;
     if (b.limits !== undefined) { for (const k of KINDS) delete limitsNow[k]; Object.assign(limitsNow, own); }
     await db.update(users).set({ provided: s, engine: engineWithProvided(u.engine as Partial<EnginePrefs>, s) as any, aiAccess: access, accountLimits: limitsNow }).where(eq(users.id, u.id));
-    await audit(c, 'setup.user', { target: u.email, keys: KINDS.reduce((n, k) => n + (s.keys[k]?.length ?? 0), 0), order: s.order }, c.get('user').id);
+    await audit(c, 'setup.user', { target: u.email, keys: KINDS.reduce((n, k) => n + providedIds(s.keys[k]).length, 0), order: s.order }, c.get('user').id);
   } else {
     const inv = target as typeof invites.$inferSelect;
     const cur = inviteSetup(inv.setup);
     await db.update(invites).set({ setup: { ...cur, provided: s, aiAccess: access, engine: engineWithProvided((cur.engine ?? {}) as Partial<EnginePrefs>, s), ...(b.limits !== undefined ? { limits: own } : {}) } }).where(eq(invites.id, inv.id));
-    await audit(c, 'setup.invite', { target: inv.email, keys: KINDS.reduce((n, k) => n + (s.keys[k]?.length ?? 0), 0), order: s.order }, c.get('user').id);
+    await audit(c, 'setup.invite', { target: inv.email, keys: KINDS.reduce((n, k) => n + providedIds(s.keys[k]).length, 0), order: s.order }, c.get('user').id);
   }
   return c.json({ ok: true });
 });

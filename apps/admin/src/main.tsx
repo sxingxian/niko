@@ -2,7 +2,7 @@
 import { StrictMode, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api, ApiError, Field, PasswordField, Switch } from '@niko/ui';
-import { AI_OPTION_GROUPS, AI_PRESETS, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
+import { AI_OPTION_GROUPS, AI_PRESETS, aiAllowed, BUILTIN_TOKEN, hearPresetOf, imagePresetOf, presetOf, providedIds, voicePresetOf, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
 import '@niko/ui/src/styles.css';
 import './admin.css';
 
@@ -888,35 +888,6 @@ function serviceName(kind: UsageKind, info: Record<string, string>): string {
 }
 const firstName = (s: string) => (s.includes('@') ? s : s.split(/\s+/)[0] || s);
 
-/** What the admin types for a new key: the service, then that service's own fields. */
-function KeyForm({ kind, value, onChange }: { kind: UsageKind; value: Record<string, string>; onChange: (v: Record<string, string>) => void }) {
-  const set = (k: string, v: string) => onChange({ ...value, [k]: v });
-  const presets: { id: string; name: string; note?: string }[] = kind === 'brain' ? AI_PRESETS : kind === 'voice' ? VOICE_PROVIDERS : kind === 'hear' ? HEAR_PROVIDERS : kind === 'image' ? IMAGE_PROVIDERS : MAP_PROVIDERS;
-  const preset = value.preset || presets[0]!.id;
-  const p = presets.find((x) => x.id === preset) as any;
-  const other = preset === 'other';
-  const models: string[] = p?.models ?? [];
-  const field = (key: string, label: string, opts: { secret?: boolean; placeholder?: string; list?: string[] } = {}) => (
-    <label className="kf" key={key}><span className="k">{label}</span>
-      <input className="in" type={opts.secret ? 'password' : 'text'} autoComplete={opts.secret ? 'new-password' : 'off'} spellCheck={false} value={value[key] ?? ''} placeholder={opts.placeholder} list={opts.list?.length ? `kf-${kind}-${key}` : undefined} onChange={(e) => set(key, e.target.value)} />
-      {opts.list?.length ? <datalist id={`kf-${kind}-${key}`}>{opts.list.map((m) => <option key={m} value={m} />)}</datalist> : null}
-    </label>
-  );
-  return <div className="kform">
-    <label className="kf"><span className="k">Service</span>
-      <select className="in" value={preset} onChange={(e) => onChange({ preset: e.target.value })}>{presets.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
-    {p?.note && <p className="sub small">{p.note}</p>}
-    {kind === 'map' ? (p?.fields as MapField[]).map((f) => field(f.key, f.label + (f.optional ? ' (optional)' : ''), { secret: f.secret, placeholder: f.placeholder }))
-      : <>
-        {other && field('baseUrl', 'Base URL', { placeholder: 'https://…/v1' })}
-        {field('model', kind === 'image' && p?.modelLabel ? p.modelLabel : 'Model', { placeholder: kind === 'brain' ? p?.example || 'model name' : models[0] ?? '', list: models })}
-        {kind === 'voice' && field('voice', 'Voice', { placeholder: p?.voices?.[0]?.id ?? 'voice id', list: (p?.voices ?? []).map((v: { id: string }) => v.id) })}
-        {(kind === 'voice' || kind === 'hear') && p?.provider === 'azure' && field('region', 'Region', { placeholder: 'southeastasia' })}
-        {field('apiKey', 'API key', { secret: true })}
-      </>}
-    {field('label', 'Name (optional)', { placeholder: 'Shown to them as an included service' })}
-  </div>;
-}
 /** The form, as the server expects it for that kind. */
 function keyBody(kind: UsageKind, v: Record<string, string>): Record<string, string> {
   const t = (k: string) => (v[k] ?? '').trim();
@@ -927,165 +898,315 @@ function keyBody(kind: UsageKind, v: Record<string, string>): Record<string, str
   return { provider: p.provider, baseUrl: p.id === 'other' ? t('baseUrl') : p.baseUrl ?? '', model: t('model') || p.models?.[0] || '', voice: t('voice'), region: t('region').toLowerCase(), apiKey: t('apiKey'), label: t('label') };
 }
 
-function SetupSheet({ target, onClose, onSaved }: { target: { who: 'user' | 'invite'; id: string; name: string }; onClose: () => void; onSaved: (text: string) => void }) {
+/** One provider's fields for a new key (the service is chosen with the chips above). */
+function NewKeyFields({ kind, preset, value, onChange }: { kind: UsageKind; preset: string; value: Record<string, string>; onChange: (v: Record<string, string>) => void }) {
+  const set = (k: string, v: string) => onChange({ ...value, [k]: v });
+  const p = presetList(kind).find((x) => x.id === preset) as any;
+  const field = (key: string, label: string, opts: { secret?: boolean; placeholder?: string; list?: string[]; wide?: boolean } = {}) => (
+    <label className={'kf' + (opts.wide ? ' wide' : '')} key={key}><span className="sr">{label}</span>
+      <input className="in" aria-label={label} type={opts.secret ? 'password' : 'text'} autoComplete={opts.secret ? 'new-password' : 'off'} spellCheck={false} value={value[key] ?? ''} placeholder={opts.placeholder ?? label} list={opts.list?.length ? `kf-${kind}-${key}` : undefined} onChange={(e) => set(key, e.target.value)} />
+      {opts.list?.length ? <datalist id={`kf-${kind}-${key}`}>{opts.list.map((m) => <option key={m} value={m} />)}</datalist> : null}
+    </label>
+  );
+  const models: string[] = p?.models ?? [];
+  return <div className="kform" onClick={(e) => e.stopPropagation()}>
+    {field('label', 'Name, e.g. Team key')}
+    {kind === 'map' ? (p?.fields as MapField[]).map((f) => field(f.key, f.label + (f.optional ? ' (optional)' : ''), { secret: f.secret, placeholder: f.placeholder ?? (f.secret ? `Paste the ${f.label.toLowerCase()}` : f.label) }))
+      : field('apiKey', 'Paste the API key', { secret: true, wide: true })}
+    {kind !== 'map' && preset === 'other' && field('baseUrl', 'Base URL, https://…/v1', { wide: true })}
+    {kind !== 'map' && field('model', kind === 'image' && p?.modelLabel ? p.modelLabel : `Model${kind === 'brain' && p?.example ? `, e.g. ${p.example}` : models[0] ? `, e.g. ${models[0]}` : ''}`, { list: models })}
+    {kind === 'voice' && field('voice', `Voice${p?.voices?.[0] ? `, e.g. ${p.voices[0].id}` : ''}`, { list: (p?.voices ?? []).map((v: { id: string }) => v.id) })}
+    {(kind === 'voice' || kind === 'hear') && p?.provider === 'azure' && field('region', 'Region, e.g. southeastasia')}
+    {p?.note && <p className="sub small wide">{p.note}</p>}
+  </div>;
+}
+const presetList = (kind: UsageKind): { id: string; name: string; provider?: string; baseUrl?: string }[] => (kind === 'brain' ? AI_PRESETS : kind === 'voice' ? VOICE_PROVIDERS : kind === 'hear' ? HEAR_PROVIDERS : kind === 'image' ? IMAGE_PROVIDERS : MAP_PROVIDERS);
+const OPTION_PREFIX: Record<UsageKind, string> = { brain: 'ai:', voice: 'v:', hear: 'h:', image: 'img:', map: 'map:' };
+/** Which provider chip a kept key belongs to. */
+function presetOfKey(kind: UsageKind, info: Record<string, string>): string {
+  const b = info.baseUrl ?? '';
+  if (kind === 'brain') return presetOf(b);
+  if (kind === 'voice') return voicePresetOf({ provider: info.provider as any, baseUrl: b });
+  if (kind === 'hear') return hearPresetOf({ provider: info.provider as any, baseUrl: b });
+  if (kind === 'image') return imagePresetOf({ provider: info.provider as any, baseUrl: b });
+  return info.provider ?? '';
+}
+const BUILT_SHORT: Record<UsageKind, string> = { brain: 'Workers AI', voice: 'Workers AI voice', hear: 'Workers AI', image: 'Workers AI', map: 'OpenStreetMap' };
+const BUILT_ROW: Record<UsageKind, string> = { brain: 'Workers AI', voice: 'Workers AI voice', hear: 'Workers AI · Whisper', image: 'Workers AI · FLUX', map: 'OpenStreetMap' };
+const DEVICE_ROW: Partial<Record<UsageKind, [string, string]>> = { voice: ['Device voice', 'Always last, on every device'], hear: ['Device speech recognition', 'Always last; it also hears “Niko”'] };
+/** The list as the admin set it: provided keys and the built-in, in order (the built-in last when not placed). */
+const listOf = (keys: Partial<Record<UsageKind, string[]>>, builtins: Record<UsageKind, boolean>, k: UsageKind) => {
+  const l = (keys[k] ?? []).filter((x) => x !== BUILTIN_TOKEN || (builtins[k] && k !== 'map'));
+  return builtins[k] && k !== 'map' && !l.includes(BUILTIN_TOKEN) ? [...l, BUILTIN_TOKEN] : l;
+};
+const capText = (n: number) => (n ? n.toLocaleString() : 'No cap');
+type SetupDraft = { keys: Partial<Record<UsageKind, string[]>>; order: 'free' | 'fixed'; builtins: Record<UsageKind, boolean>; limits: Partial<AccountLimits> };
+
+function SetupSheet({ target, startTab, copy, others, onClose, onSaved }: {
+  target: { who: 'user' | 'invite'; id: string; name: string }; startTab?: UsageKind | 'caps'; copy?: { from: string; draft: SetupDraft } | null;
+  others: { id: string; label: string; kind: 'user' | 'invite' }[]; onClose: () => void; onSaved: (text: string) => void;
+}) {
   const first = firstName(target.name);
-  const [data, setData] = useState<SetupReply | null>(null);
+  const joined = target.who === 'user';
+  const [data, setData] = useState<(SetupReply & { off: string[] }) | null>(null);
   const [lib, setLib] = useState<PKey[]>([]);
-  const [tab, setTab] = useState<UsageKind | 'caps'>('brain');
-  const [keys, setKeys] = useState<Partial<Record<UsageKind, string[]>>>({});
-  const [order, setOrder] = useState<'free' | 'fixed'>('free');
-  const [builtins, setBuiltins] = useState<Record<UsageKind, boolean> | null>(null);
-  const [caps, setCaps] = useState<Partial<AccountLimits>>({});
-  const [adding, setAdding] = useState<null | { how: 'reuse' | 'new'; reuse: string; form: Record<string, string>; give: string[] }>(null);
-  const [others, setOthers] = useState<{ id: string; label: string; kind: 'user' | 'invite' }[]>([]);
+  const [tab, setTab] = useState<UsageKind | 'caps'>(startTab ?? 'brain');
+  const [d, setD] = useState<SetupDraft | null>(null);
+  const [adding, setAdding] = useState<null | { preset: string; how: 'reuse' | 'new'; reuse: string; form: Record<string, string>; give: string[] }>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [addErr, setAddErr] = useState('');
+  const [note, setNote] = useState('');
   const [dirty, setDirty] = useState(false);
+  const [find, setFind] = useState('');
   const box = useRef<HTMLDivElement>(null);
   const loadLib = useCallback(async () => { const r = await api<{ keys: PKey[] }>('/admin/setup/keys'); setLib(r.keys); }, []);
   useEffect(() => {
     (async () => {
       try {
-        const [r] = await Promise.all([api<SetupReply>(`/admin/setup/${target.who}/${target.id}`), loadLib()]);
-        setData(r); setKeys(r.setup.keys); setOrder(r.setup.order); setBuiltins(r.builtins); setCaps(r.limits);
+        const [r] = await Promise.all([api<SetupReply & { off: string[] }>(`/admin/setup/${target.who}/${target.id}`), loadLib()]);
+        setData(r);
+        if (copy) { setD(copy.draft); setDirty(true); setNote(`Copied from ${copy.from}. Check it, then save.`); }
+        else setD({ keys: r.setup.keys, order: r.setup.order, builtins: r.builtins, limits: r.limits });
       } catch (e) { setErr((e as Error).message); }
     })();
-  }, [target.who, target.id, loadLib]);
+  }, [target.who, target.id, loadLib, copy]);
   const close = useCallback(() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; onClose(); }, [dirty, onClose]);
   useEffect(() => {
     const key = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
   }, [close]);
-  useEffect(() => { box.current?.querySelector<HTMLElement>('button')?.focus(); }, [data]);
-  const touch = () => { setDirty(true); setErr(''); };
-  const kindKeys = (k: UsageKind) => keys[k] ?? [];
-  const setKind = (k: UsageKind, l: string[]) => { touch(); setKeys({ ...keys, [k]: l }); };
-  const move = (k: UsageKind, i: number, d: -1 | 1) => { const l = [...kindKeys(k)]; [l[i], l[i + d]] = [l[i + d]!, l[i]!]; setKind(k, l); };
-  const openAdd = async () => {
-    const k = tab as UsageKind;
-    const free = lib.filter((x) => x.kind === k && !kindKeys(k).includes(x.id));
-    setAdding({ how: free.length ? 'reuse' : 'new', reuse: free[0]?.id ?? '', form: {}, give: [] });
-    if (!others.length) {
-      try {
-        const r = await api<ListReply>('/admin/users?per=100');
-        setOthers(r.items.filter((i) => i.id !== target.id).map((i) => ({ id: i.id, kind: i.kind, label: i.kind === 'user' ? `${i.name || i.email}` : `${i.email} · invited` })));
-      } catch { /* the "also give to" list is optional */ }
-    }
+  useEffect(() => { box.current?.querySelector<HTMLElement>('.tab[aria-pressed="true"], button')?.focus(); }, [!!d]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!data || !d) return <div className="scrim"><div className="dialog" role="dialog" aria-modal="true" aria-label="Set up Niko">{err ? <><p className="err" role="alert">{err}</p><div className="dialog-acts"><button className="bt" onClick={onClose}>Close</button></div></> : <p className="sub">Loading…</p>}</div></div>;
+
+  const change = (p: Partial<SetupDraft>) => { setD({ ...d, ...p }); setDirty(true); setErr(''); setNote(''); };
+  const list = (k: UsageKind) => listOf(d.keys, d.builtins, k);
+  const setList = (k: UsageKind, l: string[]) => change({ keys: { ...d.keys, [k]: l } });
+  const libOf = (id: string) => lib.find((x) => x.id === id);
+  const provCount = (k: UsageKind) => providedIds(d.keys[k]).length;
+  const brainEmpty = !provCount('brain') && !d.builtins.brain;
+  const off = data.off ?? [];
+  const k = tab === 'caps' ? null : tab;
+  const tabs: [UsageKind | 'caps', string][] = [['brain', 'AI · answers'], ['voice', 'Voice'], ['hear', 'Listening'], ['image', 'Pictures'], ['map', 'Maps'], ['caps', 'Usage cap']];
+  const tabName = tabs.find((t) => t[0] === tab)![1];
+
+  const openAdd = () => {
+    if (!k) return;
+    const presets = presetList(k).filter((p) => aiAllowed(off, OPTION_PREFIX[k] + p.id));
+    const withKey = presets.find((p) => lib.some((x) => x.kind === k && !list(k).includes(x.id) && presetOfKey(k, x.info) === p.id));
+    const preset = (withKey ?? presets[0])?.id ?? '';
+    const reuse = lib.find((x) => x.kind === k && !list(k).includes(x.id) && presetOfKey(k, x.info) === preset);
+    setAddErr(''); setAdding({ preset, how: reuse ? 'reuse' : 'new', reuse: reuse?.id ?? '', form: {}, give: [] });
+  };
+  const pickPreset = (preset: string) => {
+    if (!k || !adding) return;
+    const reuse = lib.find((x) => x.kind === k && !list(k).includes(x.id) && presetOfKey(k, x.info) === preset);
+    setAddErr(''); setAdding({ ...adding, preset, how: reuse ? 'reuse' : 'new', reuse: reuse?.id ?? '', form: {} });
   };
   const add = async () => {
-    if (!adding) return;
-    const k = tab as UsageKind;
+    if (!k || !adding) return;
     setAddErr('');
-    if (kindKeys(k).length >= 6) return setAddErr('Up to 6 included services of one kind.');
-    if (adding.how === 'reuse') { if (adding.reuse) { setKind(k, [adding.reuse, ...kindKeys(k)]); setAdding(null); } return; }
+    if (provCount(k) >= 6) return setAddErr('Up to 6 of your keys for each part.');
+    if (adding.how === 'reuse') { setList(k, [adding.reuse, ...list(k)]); setAdding(null); return; }
     setBusy(true);
     try {
       const give = { users: adding.give.filter((id) => others.find((o) => o.id === id)?.kind === 'user'), invites: adding.give.filter((id) => others.find((o) => o.id === id)?.kind === 'invite') };
-      const r = await api<{ key: { id: string } }>('/admin/setup/keys', { body: { kind: k, key: keyBody(k, adding.form), give } });
+      const r = await api<{ key: { id: string } }>('/admin/setup/keys', { body: { kind: k, key: keyBody(k, { ...adding.form, preset: adding.preset }), give } });
       await loadLib();
-      setKind(k, [r.key.id, ...kindKeys(k)]); setAdding(null);
+      setList(k, [r.key.id, ...list(k)]); setAdding(null);
     } catch (e) { setAddErr((e as Error).message); } finally { setBusy(false); }
   };
   const save = async () => {
+    if (brainEmpty) { setTab('brain'); return setErr(`Add a way for Niko to answer ${first} first.`); }
     setBusy(true); setErr('');
     try {
-      await api(`/admin/setup/${target.who}/${target.id}`, { method: 'PUT', body: { keys, order, builtins, limits: caps } });
-      setDirty(false); onSaved(target.who === 'user' ? `Saved. ${first} sees it the next time Niko answers.` : `Saved. ${first} starts with this when they join.`);
+      const keys = Object.fromEntries(USAGE_KINDS.map((x) => [x, list(x)]));
+      await api(`/admin/setup/${target.who}/${target.id}`, { method: 'PUT', body: { keys, order: d.order, builtins: d.builtins, limits: d.limits } });
+      setDirty(false); onSaved(joined ? `Saved for ${first}. They get it the next time Niko opens.` : `Saved. It waits with the invite and is in place at ${first}’s first sign-in.`);
     } catch (e) { setErr((e as Error).message); setBusy(false); }
   };
-  if (!data || !builtins) return <div className="scrim"><div className="dialog" role="dialog" aria-modal="true" aria-label="Set up Niko">{err ? <><p className="err" role="alert">{err}</p><div className="dialog-acts"><button className="bt" onClick={onClose}>Close</button></div></> : <p className="sub">Loading…</p>}</div></div>;
+
+  // ---- one part's list
+  const rows = k ? list(k) : [];
+  const fixedRows: [string, string, string][] = k === 'map' ? [['OpenStreetMap', 'Built in · always last', 'Built in']] : k && DEVICE_ROW[k] ? [[DEVICE_ROW[k]![0], DEVICE_ROW[k]![1], 'Device']] : [];
+  const move = (i: number, by: -1 | 1) => { if (!k) return; const l = [...rows]; const j = i + by; [l[i], l[j]] = [l[j]!, l[i]!]; setList(k, l); };
+  const remove = (token: string) => {
+    if (!k) return;
+    if (token === BUILTIN_TOKEN) change({ builtins: { ...d.builtins, [k]: false }, keys: { ...d.keys, [k]: rows.filter((x) => x !== token) } });
+    else setList(k, rows.filter((x) => x !== token));
+  };
+  const presets = k ? presetList(k).filter((p) => aiAllowed(off, OPTION_PREFIX[k] + p.id)) : [];
+  const reusable = k && adding ? lib.filter((x) => x.kind === k && !rows.includes(x.id) && presetOfKey(k, x.info) === adding.preset) : [];
+  const provName = adding ? presets.find((p) => p.id === adding.preset)?.name ?? 'the service' : '';
+  const sel = (on: boolean) => ({ className: 'opt' + (on ? ' on' : ''), 'aria-pressed': on });
+  // "Also give it to": the people picked, then up to 8 more (matching the search).
+  const q = find.trim().toLowerCase();
+  const picked = adding ? others.filter((o) => adding.give.includes(o.id)) : [];
+  const matches = others.filter((o) => !picked.includes(o) && (!q || o.label.toLowerCase().includes(q)));
+  const giveShown = [...picked, ...matches.slice(0, 8)];
+  const giveMore = Math.max(0, matches.length - 8);
+
+  // ---- caps
   const defs = data.limitDefaults;
-  const capOf = (k: UsageKind) => caps[k] ?? defs[k];
-  const count = (k: UsageKind) => kindKeys(k).length + (builtins[k] ? 1 : 0);
-  const k = tab === 'caps' ? null : tab;
-  const libOf = (id: string) => lib.find((x) => x.id === id);
-  const freeLib = k ? lib.filter((x) => x.kind === k && !kindKeys(k).includes(x.id)) : [];
-  const provName = (x: PKey) => serviceName(x.kind, x.info);
+  const capOf = (u: UsageKind) => d.limits[u] ?? defs[u];
+  const usedOf = (u: UsageKind) => (data.usage ? (u === 'hear' ? Math.ceil(data.usage[u].included / 60) : data.usage[u].included) : 0);
+  const changedCaps = USAGE_KINDS.filter((u) => d.limits[u] !== undefined && d.limits[u] !== defs[u]);
+
   return (
     <div className="scrim" onClick={(e) => { if (e.target === e.currentTarget) close(); }}>
-      <div ref={box} className="dialog sheet" role="dialog" aria-modal="true" aria-labelledby="suh">
-        <div className="psec-row" style={{ alignItems: 'flex-start' }}>
-          <div><h2 id="suh">Set up Niko for {first}</h2><p className="sub">{data.joined ? `What ${first} gets included. They can still add their own keys.` : `${target.name} hasn’t joined yet. This is copied to their account when they accept the invite.`}</p></div>
+      <section ref={box} className="setup" role="dialog" aria-modal="true" aria-labelledby="suh">
+        <header className="setup-head">
+          <div><h2 id="suh">Set up Niko for {target.name}{joined ? '' : ' · before they join'}</h2>
+            <p className="sub">{joined ? `Choose the services Niko uses for ${first}, in order, with your keys where a service needs one, and how much they can use each month. Niko tries them top to bottom and moves to the next when one fails, runs out or reaches the cap.`
+              : `It waits with the invite and is in place the first time ${first} signs in. Choose the services, in order, with your keys where a service needs one, and how much they can use each month.`}</p></div>
           <button className="bt x" onClick={close} aria-label="Close">✕</button>
-        </div>
-        <div className="chips" role="tablist" aria-label="Parts of Niko">
-          {SETUP_TABS.map(([t, name]) => <button key={t} role="tab" className="chip" aria-selected={tab === t} aria-pressed={tab === t} onClick={() => { setTab(t); setAdding(null); }}>{name} <b>{count(t)}</b></button>)}
-          <button role="tab" className="chip" aria-selected={tab === 'caps'} aria-pressed={tab === 'caps'} onClick={() => { setTab('caps'); setAdding(null); }}>Usage cap</button>
-        </div>
-        {k && <section aria-label={`${SETUP_TABS.find((t) => t[0] === k)![1]} services`} className="svc">
-          <p className="k">{SETUP_TABS.find((t) => t[0] === k)![1]} · in the order Niko tries them</p>
-          {kindKeys(k).map((id, i) => {
-            const x = libOf(id);
-            return <div key={id} className="srow">
-              <span className="snum">{i + 1}</span>
-              <span className="ai-txt"><span>{x?.label ?? 'Removed key'}</span><span className="sub">{x ? `${provName(x)} · key ending ${x.info.hint || '····'}` : 'No longer kept'}</span></span>
-              <span className="tag own">Your key</span>
-              <button className="bt sm arrow" onClick={() => move(k, i, -1)} disabled={i === 0} aria-label={`Move ${x?.label ?? 'key'} up`}>↑</button>
-              <button className="bt sm arrow" onClick={() => move(k, i, 1)} disabled={i === kindKeys(k).length - 1} aria-label={`Move ${x?.label ?? 'key'} down`}>↓</button>
-              <button className="lnk" onClick={() => setKind(k, kindKeys(k).filter((y) => y !== id))}>Remove</button>
-            </div>;
-          })}
-          <div className="srow">
-            <span className="snum">{kindKeys(k).length + 1}</span>
-            <span className="ai-txt"><span>{BUILTIN_NAME[k]}</span><span className="sub">{k === 'map' ? 'Built in. Always kept as the last resort for places.' : builtins[k] ? 'Built in · counted in the usage cap' : k === 'brain' && !kindKeys('brain').length ? `Removed · ${first} needs an AI key of their own to get answers` : `Removed for ${first}`}</span></span>
-            {k === 'map' ? <span className="tag">Always on</span>
-              : <Switch on={builtins[k]} onChange={() => { touch(); setBuiltins({ ...builtins, [k]: !builtins[k] }); }} label={`${BUILTIN_NAME[k]} for ${first}`} />}
-          </div>
-          <p className="sub small">Then {first}’s own keys{order === 'free' ? `, in whatever order ${first} sets` : ''}. {k === 'voice' ? 'The on-device voice always stays last.' : k === 'hear' ? 'The device’s own recognition always stays last.' : ''}</p>
-          {!adding && kindKeys(k).length < 6 && <button className="bt" style={{ alignSelf: 'flex-start' }} onClick={openAdd}>＋ Add a service with your key</button>}
-          {adding && <div className="addbox">
-            <div role="group" aria-label="Which key" className="segs">
-              <button className="seg" aria-pressed={adding.how === 'reuse'} disabled={!freeLib.length} onClick={() => setAdding({ ...adding, how: 'reuse' })}>A key you’ve added before</button>
-              <button className="seg" aria-pressed={adding.how === 'new'} onClick={() => setAdding({ ...adding, how: 'new' })}>A new key</button>
-            </div>
-            {adding.how === 'reuse' ? <>
-              <div className="ai-list">{freeLib.map((x) => (
-                <button key={x.id} className="who-row" aria-pressed={adding.reuse === x.id} onClick={() => setAdding({ ...adding, reuse: x.id })}>
-                  <span className="who-txt"><b>{x.label}</b><span>{provName(x)} · ending {x.info.hint || '····'}</span></span><span className="who-badge">{x.users + x.invites} {x.users + x.invites === 1 ? 'person' : 'people'}</span>
-                </button>))}</div>
-              <p className="sub small">The same key, shared. Taking it away from {first} later doesn’t affect anyone else; replacing it in Keys you’ve added updates everyone.</p>
-            </> : <>
-              <KeyForm kind={k} value={adding.form} onChange={(form) => setAdding({ ...adding, form })} />
-              <p className="sub small">Kept encrypted. Nobody sees it again, you included. It is only ever sent to that service.</p>
-              {others.length > 0 && <details className="give"><summary>Also give it to{adding.give.length ? ` · ${adding.give.length}` : ''}</summary>
-                <div className="give-list">{others.map((o) => <label key={o.id} className="give-row"><input type="checkbox" checked={adding.give.includes(o.id)} onChange={(e) => setAdding({ ...adding, give: e.target.checked ? [...adding.give, o.id] : adding.give.filter((x) => x !== o.id) })} /><span>{o.label}</span></label>)}</div>
-                <p className="sub small">One paste, saved once. Each person gets it at the top of their list, straight away.</p></details>}
+        </header>
+        <div className="setup-body">
+          <nav className="setup-rail" aria-label="Engine parts">
+            {tabs.map(([t, name]) => { const n = t === 'caps' ? 0 : provCount(t); return (
+              <button key={t} className="tab" aria-pressed={tab === t} onClick={() => { setTab(t); setAdding(null); }}><span>{name}</span><b>{t === 'caps' ? 'monthly' : n ? `${n} ${n === 1 ? 'key' : 'keys'}` : ''}</b></button>); })}
+            <p className="sub rail-note">Services you turned off for {first} in AI options don’t appear here.</p>
+          </nav>
+          <div className="setup-main">
+            {k && <>
+              <div className="setup-sec-head"><span className="k">{tabName} · in the order Niko tries them</span>
+                <span className="sub">{k === 'map' ? 'OpenStreetMap is always last and can’t be removed.' : `Built-in services need no key. Remove any you don’t want ${first} to use.`}</span></div>
+              {rows.map((token, i) => {
+                const x = token === BUILTIN_TOKEN ? null : libOf(token);
+                const name = token === BUILTIN_TOKEN ? BUILT_ROW[k] : x ? serviceName(k, x.info) : 'Removed key';
+                const sub = token === BUILTIN_TOKEN ? 'Built in · Cloudflare · no key needed' : x ? `${x.label} ··· ${x.info.hint || '····'} · added by you · ${first} can’t see it` : 'No longer kept';
+                return <div key={token} className="svc">
+                  <span className="svc-n">{i + 1}</span>
+                  <span className="svc-txt"><span className="svc-name"><b>{name}</b><span className={'tag' + (token === BUILTIN_TOKEN ? '' : ' own')}>{token === BUILTIN_TOKEN ? 'Built in' : 'From you'}</span></span><span className="sub">{sub}</span></span>
+                  <span className="svc-mv"><button className="mv" onClick={() => move(i, -1)} disabled={i === 0} aria-label={`Move ${name} up`}>↑</button><button className="mv" onClick={() => move(i, 1)} disabled={i === rows.length - 1} aria-label={`Move ${name} down`}>↓</button></span>
+                  <span className="svc-rm"><button className="lnk" onClick={() => remove(token)}>Remove</button></span>
+                </div>;
+              })}
+              {fixedRows.map(([name, sub, tag], i) => <div key={name} className="svc">
+                <span className="svc-n">{rows.length + i + 1}</span>
+                <span className="svc-txt"><span className="svc-name"><b>{name}</b><span className="tag">{tag}</span></span><span className="sub">{sub}</span></span>
+                <span className="svc-mv"><button className="mv" disabled aria-label={`${name} stays last`}>↑</button><button className="mv" disabled aria-label={`${name} stays last`}>↓</button></span>
+                <span className="svc-rm" />
+              </div>)}
+              {k !== 'map' && !d.builtins[k] && <button className="lnk" style={{ alignSelf: 'flex-start', paddingLeft: 0 }} onClick={() => change({ builtins: { ...d.builtins, [k]: true } })}>Put {BUILT_ROW[k]} back</button>}
+              {k === 'brain' && brainEmpty && <p className="warn-line" role="alert">Nothing left to answer {first}. Add a service with your key, or put Workers AI back. You can’t save it like this.</p>}
+              {!adding && <button className="bt" style={{ alignSelf: 'flex-start', marginTop: 4 }} onClick={openAdd} disabled={!presets.length}>＋ Add a service with your key</button>}
+              {adding && <div className="addbox">
+                <div className="psec-row"><b className="addbox-title">Add a service for {first}</b><button className="lnk" onClick={() => { setAdding(null); setAddErr(''); }}>Cancel</button></div>
+                <div className="chips-wrap" role="group" aria-label="Service">{presets.map((p) => <button key={p.id} className="chipb" aria-pressed={adding.preset === p.id} onClick={() => pickPreset(p.id)}>{p.name}</button>)}</div>
+                {reusable.length ? reusable.map((x) => (
+                  <button key={x.id} {...sel(adding.how === 'reuse' && adding.reuse === x.id)} onClick={() => setAdding({ ...adding, how: 'reuse', reuse: x.id })}>
+                    <span className="dot" aria-hidden="true"><i /></span>
+                    <span className="opt-txt"><b>{reusable.length > 1 ? x.label : 'A key you’ve added before'}</b><span className="sub">{reusable.length > 1 ? '' : `${x.label} `}··· {x.info.hint || '····'} · used by {x.users + x.invites} {x.users + x.invites === 1 ? 'person' : 'people'} · nothing to paste</span></span>
+                  </button>))
+                  : <div className="opt off" aria-disabled="true"><span className="dot" aria-hidden="true" /><span className="opt-txt"><b>A key you’ve added before</b><span className="sub">None yet for {provName}</span></span></div>}
+                <div {...sel(adding.how === 'new')} role="button" tabIndex={0} onClick={() => setAdding({ ...adding, how: 'new' })} onKeyDown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) { e.preventDefault(); setAdding({ ...adding, how: 'new' }); } }}>
+                  <span className="dot" aria-hidden="true"><i /></span>
+                  <span className="opt-txt"><b>A new key</b><span className="sub">Kept encrypted. Nobody sees it again, you included; it is only ever sent to {provName}.</span>
+                    {adding.how === 'new' && <NewKeyFields kind={k} preset={adding.preset} value={adding.form} onChange={(form) => setAdding({ ...adding, form })} />}</span>
+                </div>
+                {adding.how === 'new' && others.length > 0 && <div className="give">
+                  <span className="k">Also give it to</span>
+                  {others.length > 8 && <input className="in give-find" type="search" aria-label="Find a person" placeholder="Find a person" value={find} onChange={(e) => setFind(e.target.value)} />}
+                  <div className="chips-wrap">{giveShown.map((o) => { const on = adding.give.includes(o.id); return <button key={o.id} className="chipb sm" aria-pressed={on} onClick={() => setAdding({ ...adding, give: on ? adding.give.filter((x) => x !== o.id) : [...adding.give, o.id] })}>{on ? '✓ ' : ''}{o.label}</button>; })}</div>
+                  {giveMore > 0 && <span className="sub small">{giveMore} more · search to find them</span>}
+                  <span className="sub small">One paste, saved once. Each person gets it at the top of their {tabName.toLowerCase()} list; you can take it away from one person without affecting the others.</span>
+                </div>}
+                {addErr && <p className="err" role="alert">{addErr}</p>}
+                <div className="add-go"><button className="pri" onClick={add} disabled={busy || (adding.how === 'reuse' && !adding.reuse)}>{adding.how === 'reuse' ? 'Add' : busy ? 'Testing…' : 'Test and add'}</button>
+                  <span className="sub small">{adding.how === 'reuse' ? `It goes to the top of ${first}’s list.` : `Niko checks the key with ${provName} first, then puts it at the top.`}</span></div>
+              </div>}
             </>}
-            {addErr && <p className="err" role="alert">{addErr}</p>}
-            <div className="dialog-acts"><button className="bt" onClick={() => { setAdding(null); setAddErr(''); }}>Cancel</button>
-              <button className="pri" style={{ height: 44, fontSize: 14 }} disabled={busy || (adding.how === 'reuse' && !adding.reuse)} onClick={add}>{adding.how === 'reuse' ? 'Add' : busy ? 'Testing…' : 'Test and add'}</button></div>
-          </div>}
-        </section>}
-        {tab === 'caps' && <section aria-label="Usage cap" className="svc">
-          <p className="sub small">How much {first} can use each month through your keys and Niko’s built-in services. Their own keys are never counted or capped. At the cap, Niko moves on to their own keys; with none, it tells them when it resets.</p>
-          {USAGE_KINDS.map((u) => {
-            const changed = caps[u] !== undefined && caps[u] !== defs[u];
-            return <div key={u} className="ai-row">
-              <span className="ai-txt"><span>{USAGE_NAMES[u]}</span><span className="sub">{changed ? `Default is ${stepText(u, defs[u]).toLowerCase()}` : 'Follows the default'}{data.usage ? ` · ${usedText(u, data.usage[u].included)} used this month` : ''}</span></span>
-              {changed && <><span className="chg">Changed</span><button className="lnk" onClick={() => { touch(); const c = { ...caps }; delete c[u]; setCaps(c); }}>Reset</button></>}
-              <label className="sr" htmlFor={`cap-${u}`}>{USAGE_NAMES[u]} each month</label>
-              <select id={`cap-${u}`} className="in gl-sel" value={capOf(u)} onChange={(e) => { touch(); const v = Number(e.target.value); const c = { ...caps }; if (v === defs[u]) delete c[u]; else c[u] = v; setCaps(c); }}>
-                {USAGE_STEPS[u].map((n) => <option key={n} value={n}>{stepText(u, n)}</option>)}
-              </select>
-            </div>;
-          })}
-          <p className="sub small">The month runs to the 1st (UTC). The same amounts are on the Limits page.</p>
-        </section>}
-        <section className="svc" aria-label={`What ${first} can change`}>
-          <p className="k">What {first} can change</p>
-          <div className="segs col">
-            <button className="seg opt" aria-pressed={order === 'free'} onClick={() => { touch(); setOrder('free'); }}><b>The order, and add their own keys</b><span>Recommended. Your keys stay; {first} can’t see or remove them.</span></button>
-            <button className="seg opt" aria-pressed={order === 'fixed'} onClick={() => { touch(); setOrder('fixed'); }}><b>Only add their own keys</b><span>Your services stay first, in your order; their keys come after.</span></button>
+            {tab === 'caps' && <>
+              <div className="setup-sec-head col"><span className="k">Usage cap · each month</span>
+                <span className="sub">{changedCaps.length ? `Some caps are changed for ${first}; the rest follow the default for everyone (set on Limits).` : `Follows the default for everyone (set on Limits). Pick a different amount to change it for ${first} only.`} How much {first} can use through your keys and Workers AI each month. Their own keys are never counted or capped. At the cap, Niko moves on to their own keys; with none, it tells them when the cap resets.</span></div>
+              {USAGE_KINDS.map((u) => {
+                const cap = capOf(u), used = usedOf(u), changed = changedCaps.includes(u);
+                const pct = cap ? Math.min(100, Math.round((used / cap) * 100)) : Math.min(100, used / 20);
+                return <div key={u} className="cap">
+                  <span className="cap-name"><b>{USAGE_NAMES[u]}</b><span className="sub">{u === 'map' ? 'searches and routes a month' : `${USAGE_UNITS[u][1]} a month`}</span><span className="sub">Default {capText(defs[u])}</span>
+                    {changed && <span className="cap-chg"><span className="chg">Changed</span><button className="lnk" style={{ padding: 0 }} onClick={() => { const l = { ...d.limits }; delete l[u]; change({ limits: l }); }}>Reset</button></span>}</span>
+                  <span className="cap-pick"><span className="chips-wrap" role="group" aria-label={`${USAGE_NAMES[u]} each month`}>{USAGE_STEPS[u].map((n) => <button key={n} className="chipb sm" aria-pressed={cap === n} onClick={() => { const l = { ...d.limits }; if (n === defs[u]) delete l[u]; else l[u] = n; change({ limits: l }); }}>{capText(n)}</button>)}</span>
+                    <span className="bar" aria-hidden="true"><i style={{ width: `${pct}%` }} className={cap && pct >= 90 ? 'hot' : ''} /></span></span>
+                  <span className="sub cap-used">{joined ? `${used.toLocaleString()} used · ${capText(cap)}` : `Counts from the day ${first} joins`}</span>
+                </div>;
+              })}
+              <span className="sub small">Caps reset on the 1st of each month. {first} sees the same numbers on their Engine screen. “No cap” means only your services’ own limits apply.</span>
+            </>}
           </div>
-        </section>
-        {err && <p className="err" role="alert">{err}</p>}
-        <div className="dialog-acts"><button className="bt" onClick={close}>Cancel</button><button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy || !dirty}>{busy && !adding ? 'Saving…' : `Save for ${first}`}</button></div>
-      </div>
+        </div>
+        <footer className="setup-foot">
+          <fieldset><legend className="k">What {first} can change</legend>
+            <div className="opts-row">
+              <button {...sel(d.order === 'free')} onClick={() => change({ order: 'free' })}><span className="dot" aria-hidden="true"><i /></span><span className="opt-txt"><b>The order, and add their own keys</b><span className="sub">Recommended. Your keys stay; {first} can’t see or remove them.</span></span></button>
+              <button {...sel(d.order === 'fixed')} onClick={() => change({ order: 'fixed' })}><span className="dot" aria-hidden="true"><i /></span><span className="opt-txt"><b>Only add their own keys</b><span className="sub">Your order stays as you set it; their keys come after yours.</span></span></button>
+            </div>
+          </fieldset>
+          <div className="setup-acts">
+            {err ? <span className="err" role="alert">{err}</span> : <span className={note ? 'ok' : 'sub'} role="status">{note || (joined ? `${first} gets this the next time Niko opens.` : `Waits with the invite; in place at ${first}’s first sign-in.`)}</span>}
+            <div className="acts"><button className="bt" onClick={close}>Cancel</button><button className="pri" onClick={save} disabled={busy}>{busy && !adding ? 'Saving…' : `Save for ${first}`}</button></div>
+          </div>
+        </footer>
+      </section>
     </div>
   );
 }
+
+/** The Engine card in a person's panel: what Niko uses for them, set up by you or not, and this month's use. */
+function EngineCard({ who, id, name, onSetup, onCopy, copyFrom }: {
+  who: 'user' | 'invite'; id: string; name: string; onSetup: (tab?: UsageKind | 'caps') => void; onCopy: (fromId: string, fromName: string, fromWho: 'user' | 'invite') => void;
+  copyFrom: { id: string; label: string; kind: 'user' | 'invite' }[];
+}) {
+  const [data, setData] = useState<(SetupReply & { off: string[] }) | null>(null);
+  const [lib, setLib] = useState<PKey[]>([]);
+  const [menu, setMenu] = useState(false);
+  const first = firstName(name);
+  useEffect(() => {
+    let live = true;
+    setData(null);
+    Promise.all([api<SetupReply & { off: string[] }>(`/admin/setup/${who}/${id}`), api<{ keys: PKey[] }>('/admin/setup/keys')])
+      .then(([r, l]) => { if (live) { setData(r); setLib(l.keys); } }).catch(() => undefined);
+    return () => { live = false; };
+  }, [who, id, name]);
+  if (!data) return <div className="psec"><span className="k">Engine</span><span className="sub small">Loading…</span></div>;
+  const provided = USAGE_KINDS.reduce((n, k) => n + providedIds(data.setup.keys[k]).length, 0);
+  const short = (k: UsageKind, token: string) => { if (token === BUILTIN_TOKEN) return BUILT_SHORT[k]; const x = lib.find((y) => y.id === token); return x ? `${serviceName(k, x.info).split(' · ')[0]} (your key)` : ''; };
+  const line = (k: UsageKind) => {
+    const l = listOf(data.setup.keys, data.builtins, k).map((t) => short(k, t)).filter(Boolean);
+    if (k === 'map') l.push('OpenStreetMap');
+    if (k === 'voice' || k === 'hear') l.push(k === 'voice' ? 'Device voice' : 'Device speech recognition');
+    return l.length ? l.slice(0, 2).join(', then ') : 'None';
+  };
+  const parts: [UsageKind, string][] = [['brain', 'Answers'], ['voice', 'Voice'], ['hear', 'Listening'], ['image', 'Pictures'], ['map', 'Maps']];
+  const tag = provided ? (who === 'user' ? 'Set up by you' : `Ready for when ${first} joins`) : 'Default';
+  return <>
+    <div className="psec eng-card">
+      <div className="psec-row"><span className="k" style={{ color: '#fff' }}>Engine</span><span className={'tag' + (provided ? ' own' : '')}>{tag}</span></div>
+      {parts.map(([k, label]) => <div key={k} className="eng-line"><span className="sub">{label}</span><span>{line(k)}</span></div>)}
+      <span className="sub small">{who === 'user' ? `${first} can still add their own keys. Their own keys are never capped.` : `Set up before ${first} joins: it is waiting at their first sign-in.`}</span>
+      <div className="acts copy-wrap">
+        <button className="bt fill" onClick={() => onSetup()}>Set up Niko for {first}</button>
+        <button className="bt" aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu(!menu)} disabled={!copyFrom.length} title={copyFrom.length ? undefined : 'No one else is set up yet'}>Copy from…</button>
+        {menu && <div className="menu copy-menu" role="menu">
+          {copyFrom.map((o) => <button key={o.id} role="menuitem" className="menu-item" onClick={() => { setMenu(false); onCopy(o.id, o.label, o.kind); }}><span className="mark" aria-hidden="true" /><span><b>{o.label}</b><span className="sub small">Their setup, ready to check and save</span></span></button>)}
+        </div>}
+      </div>
+    </div>
+    <div className="psec">
+      <div className="psec-row"><span className="k">Use this month</span><span className="sub small">{who === 'user' ? `Resets ${resetDay()}` : `Starts when ${first} joins`}</span></div>
+      {who === 'user' && data.usage ? <>
+        {parts.map(([k, label]) => {
+          const cap = data.limits[k] ?? data.limitDefaults[k], used = k === 'hear' ? Math.ceil(data.usage![k].included / 60) : data.usage![k].included;
+          const pct = cap ? Math.min(100, Math.round((used / cap) * 100)) : 0;
+          return <div key={k} className="use-row"><div className="psec-row"><span className="small">{label}</span><span className="sub small">{used.toLocaleString()} of {capText(cap)}</span></div><span className="bar" aria-hidden="true"><i style={{ width: `${pct}%` }} className={cap && pct >= 90 ? 'hot' : ''} /></span></div>;
+        })}
+        <button className="lnk" style={{ alignSelf: 'flex-start', paddingLeft: 0 }} onClick={() => onSetup('caps')}>Change the caps</button>
+      </> : <span className="sub small">Nothing yet. Caps are set and start counting when {first} joins.</span>}
+    </div>
+  </>;
+}
+const resetDay = () => { const n = new Date(); return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth() + 1, 1)).toLocaleDateString(undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' }); };
 
 /** The library: every key you've added, who has it, and replacing or removing it for everyone. */
 function KeysLibrary({ guard }: { guard: (e: unknown) => void }) {
@@ -1127,8 +1248,10 @@ function KeysLibrary({ guard }: { guard: (e: unknown) => void }) {
   </>;
 }
 
-function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemove, onRevoke, onNewCode, onAudit, onSetup }: {
-  item: Item; pay: PaymentSettings | null; onClose: () => void; onSetup: (t: { who: 'user' | 'invite'; id: string; name: string }) => void; onToggle: (u: UserRow) => void; onPrices: (u: UserRow) => void; onUnlock: (u: UserRow) => void;
+type SetupTarget = { who: 'user' | 'invite'; id: string; name: string };
+function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemove, onRevoke, onNewCode, onAudit, onSetup, onCopy, copyFrom }: {
+  item: Item; pay: PaymentSettings | null; onClose: () => void; onSetup: (t: SetupTarget, tab?: UsageKind | 'caps') => void;
+  onCopy: (t: SetupTarget, fromId: string, fromName: string, fromWho: 'user' | 'invite') => void; copyFrom: { id: string; label: string; kind: 'user' | 'invite' }[]; onToggle: (u: UserRow) => void; onPrices: (u: UserRow) => void; onUnlock: (u: UserRow) => void;
   onRemove: (u: UserRow) => void; onRevoke: (i: InviteRow) => void; onNewCode: (i: InviteRow) => void; onAudit: (id: string) => void;
 }) {
   const [recent, setRecent] = useState<AuditRow[] | null>(null);
@@ -1152,9 +1275,7 @@ function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemov
           <span className="person-id"><b>Invited</b><span className="sub ell">{item.email}</span><span className="sub small">{item.role === 'admin' ? 'Admin' : 'Member'} · invited {when(item.createdAt)} · expires {fmtDate(item.expiresAt)}</span></span>
           <button className="bt x" onClick={onClose} aria-label="Close">✕</button></div>
         <div className="psec"><span className="k">Invite</span><span className={'tone-' + (p.tone ?? 'plain')} style={{ fontSize: 15 }}>{p.text}</span></div>
-        <div className="psec"><div className="psec-row"><span className="k">Engine</span><span className={'tag' + (item.engineSetup?.keys ? ' own' : '')}>{item.engineSetup?.keys ? 'Set up' : 'Default'}</span></div>
-          <span style={{ fontSize: 15 }}>{engineLine(item.engineSetup)}</span><span className="sub small">Copied to their account when they join.</span>
-          <button className="bt" style={{ alignSelf: 'flex-start' }} onClick={() => onSetup({ who: 'invite', id: item.id, name: item.email })}>Set up Niko for them</button></div>
+        <EngineCard who="invite" id={item.id} name={item.email} onSetup={(tab) => onSetup({ who: 'invite', id: item.id, name: item.email }, tab)} onCopy={(fid, fname, fwho) => onCopy({ who: 'invite', id: item.id, name: item.email }, fid, fname, fwho)} copyFrom={copyFrom.filter((o) => o.id !== item.id)} />
         <div className="psec"><span className="k">Actions</span><div className="acts">
           {item.hasCode && item.codeTries >= 5 && <button className="bt" onClick={() => onNewCode(item)}>Send new code</button>}
           <button className="bt" onClick={() => onRevoke(item)}>{item.paidAt ? 'Revoke and refund' : 'Revoke invite'}</button>
@@ -1175,9 +1296,7 @@ function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemov
       <div className="psec"><span className="k">Payment</span><span className={'tone-' + (p.tone ?? 'plain')} style={{ fontSize: 15 }}>{p.text}</span><span className="sub small">Status: {statusText(item)}</span></div>
       {payer && pay && <div className="psec"><div className="psec-row"><span className="k">Plan prices</span><span className={'tag' + (item.keptPrices ? ' own' : '')}>{item.keptPrices ? (item.pricesFrom === 'admin' ? 'Own' : `Own · kept${item.pricesAt ? ' ' + fmtDate(item.pricesAt) : ''}`) : 'Default'}</span></div>
         <span style={{ fontSize: 15 }}>{offersLine(item.keptPrices ?? plansOffered(pay)) || 'No plans on'}</span><span className="sub small">What they pay when they next choose a plan.</span></div>}
-      <div className="psec"><div className="psec-row"><span className="k">Engine</span><span className={'tag' + (item.engineSetup?.keys ? ' own' : '')}>{item.engineSetup?.keys ? 'Set up' : 'Default'}</span></div>
-        <span style={{ fontSize: 15 }}>{engineLine(item.engineSetup)}</span>
-        <button className="bt" style={{ alignSelf: 'flex-start' }} onClick={() => onSetup({ who: 'user', id: item.id, name: item.name || item.email })}>Set up Niko for {firstName(item.name || item.email)}</button></div>
+      <EngineCard who="user" id={item.id} name={item.name || item.email} onSetup={(tab) => onSetup({ who: 'user', id: item.id, name: item.name || item.email }, tab)} onCopy={(fid, fname, fwho) => onCopy({ who: 'user', id: item.id, name: item.name || item.email }, fid, fname, fwho)} copyFrom={copyFrom.filter((o) => o.id !== item.id)} />
       {(payer || unpaid) && <div className="psec"><span className="k">Actions</span><div className="acts">
         {payer && pay && <button className="bt" onClick={() => onPrices(item)}>Change prices</button>}
         {payer && <button className="bt" onClick={() => onUnlock(item)}>Unlock</button>}
@@ -1209,7 +1328,18 @@ function PeopleTab({ onSignedOut, onOpenPayments, onAudit }: { onSignedOut: () =
   const [copied, setCopied] = useState(false);
   const [unlocking, setUnlocking] = useState<UserRow | null>(null);
   const [pricing, setPricing] = useState<UserRow | null>(null);
-  const [setting, setSetting] = useState<{ who: 'user' | 'invite'; id: string; name: string } | null>(null);
+  const [setting, setSetting] = useState<{ target: SetupTarget; tab?: UsageKind | 'caps'; copy?: { from: string; draft: SetupDraft } | null } | null>(null);
+  const [everyone, setEveryone] = useState<Item[]>([]);
+  // Everyone (not only this page), for "Also give it to" and "Copy from…".
+  useEffect(() => { api<ListReply>('/admin/users?per=100').then((r) => setEveryone(r.items)).catch(() => undefined); }, [data]);
+  const giveTo = everyone.map((i) => ({ id: i.id, kind: i.kind, label: i.kind === 'user' ? i.name || i.email : `${i.email} (invited)` }));
+  const copyFrom = everyone.filter((i) => i.engineSetup?.keys).map((i) => ({ id: i.id, kind: i.kind, label: i.kind === 'user' ? i.name || i.email : `${i.email} (invited)` }));
+  const copySetup = async (target: SetupTarget, fromId: string, fromName: string, fromWho: 'user' | 'invite') => {
+    try {
+      const r = await api<SetupReply>(`/admin/setup/${fromWho}/${fromId}`);
+      setSetting({ target, copy: { from: fromName, draft: { keys: r.setup.keys, order: r.setup.order, builtins: r.builtins, limits: r.limits } } });
+    } catch (e) { guard(e); }
+  };
   const said = (text: string, ok = true, code?: string) => { setNote({ ok, text, code }); setCopied(false); };
   const guard = useCallback((e: unknown) => { if (e instanceof ApiError && e.status === 401) onSignedOut(); else setNote({ ok: false, text: (e as Error).message }); }, [onSignedOut]);
   const load = useCallback(async () => {
@@ -1304,8 +1434,8 @@ function PeopleTab({ onSignedOut, onOpenPayments, onAudit }: { onSignedOut: () =
       {data && <Pager page={data.page} pages={data.pages} total={data.total} per={data.per} pers={[10, 25, 50, 100]} onPage={setPage} onPer={setPer} />}
     </section>
     <p className="sub" style={{ fontSize: 13 }}>Paid sign-ups stay off until you switch them on; their paid time starts then. Unpaid sign-ups are removed after 7 days. Prices are fixed when the invite is sent. Card details go to Stripe, never to Niko. Every change here is written to the audit log.</p>
-    {selItem && <PersonPanel item={selItem} pay={pay} onClose={close} onToggle={toggle} onPrices={setPricing} onUnlock={setUnlocking} onRemove={remove} onRevoke={revoke} onNewCode={newCode} onAudit={onAudit} onSetup={setSetting} />}
-    {setting && <SetupSheet target={setting} onClose={() => setSetting(null)} onSaved={async (text) => { setSetting(null); await after(text); }} />}
+    {selItem && <PersonPanel item={selItem} pay={pay} onClose={close} onToggle={toggle} onPrices={setPricing} onUnlock={setUnlocking} onRemove={remove} onRevoke={revoke} onNewCode={newCode} onAudit={onAudit} onSetup={(target, tab) => setSetting({ target, tab })} onCopy={copySetup} copyFrom={copyFrom} />}
+    {setting && <SetupSheet target={setting.target} startTab={setting.tab} copy={setting.copy} others={giveTo.filter((o) => o.id !== setting.target.id)} onClose={() => setSetting(null)} onSaved={async (text) => { setSetting(null); await after(text); }} />}
     {inviting && <InviteDialog pay={pay} stripeOn={data?.stripe ?? false} mode={data?.stripeMode ?? 'test'} onClose={() => setInviting(false)} onSent={async (text, ok, code) => { setInviting(false); said(text, ok, code); setShow('all'); setQ(''); await load(); }} />}
     {pricing && pay && <PricesDialog user={pricing} defaults={plansOffered(pay)} onClose={() => setPricing(null)} onDone={async (text) => { setPricing(null); await after(text); }} />}
     {unlocking && <UnlockDialog user={unlocking} onClose={() => setUnlocking(null)} onDone={async (text) => { setUnlocking(null); await after(text); }} />}

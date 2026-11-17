@@ -4,7 +4,7 @@
 // key store, so they can see it but never read, change or remove it.
 import { inArray } from 'drizzle-orm';
 import { providedKeys, type Db } from '@niko/db';
-import { arrangeOrder, brainOrder, cleanProvided, entryPrefix, hearOrder, imageOrder, mapOrder, PROVIDED_ID, USAGE_KINDS, voiceOrder, type EnginePrefs, type ProvidedSetup, type UsageKind } from '@niko/shared';
+import { arrangeOrder, brainOrder, BUILTIN_ENTRY, BUILTIN_TOKEN, cleanProvided, providedIds, entryPrefix, hearOrder, imageOrder, mapOrder, PROVIDED_ID, USAGE_KINDS, voiceOrder, type EnginePrefs, type ProvidedSetup, type UsageKind } from '@niko/shared';
 import type { Env } from './env';
 import { seal, unseal } from './lib/crypto';
 
@@ -13,13 +13,13 @@ type UserLike = { provided?: unknown };
 
 /** The entries ("key:px…", "vkey:px…") a person gets for a kind, in the admin's order. */
 export function providedEntries(user: UserLike, kind: UsageKind): string[] {
-  return (cleanProvided(user.provided).keys[kind] ?? []).map((id) => entryPrefix(kind) + id);
+  return (cleanProvided(user.provided).keys[kind] ?? []).map((id) => (id === BUILTIN_TOKEN ? BUILTIN_ENTRY[kind] : entryPrefix(kind) + id));
 }
 export const providedMode = (user: UserLike) => cleanProvided(user.provided).order;
 
 /** The provided keys of one kind for this person, in the shape of that kind's own keys. */
 export async function providedFor<T extends object>(env: Env, db: Db, user: UserLike, kind: UsageKind): Promise<Provided<T>[]> {
-  const ids = cleanProvided(user.provided).keys[kind] ?? [];
+  const ids = providedIds(cleanProvided(user.provided).keys[kind]);
   if (!ids.length) return [];
   const rows = await db.select().from(providedKeys).where(inArray(providedKeys.id, ids)).catch(() => []);
   const out: Provided<T>[] = [];
@@ -54,10 +54,12 @@ export const keyHint = (apiKey: string) => (apiKey.length >= 12 ? apiKey.slice(-
  * provided ones go first (in the admin's order), so they are used straight away. Everything else keeps its place. */
 export function engineWithProvided(engine: Partial<EnginePrefs>, setup: ProvidedSetup): Partial<EnginePrefs> {
   const e: Partial<EnginePrefs> = { ...engine };
-  const cut = (k: UsageKind, list: string[]) => list.filter((x) => !(x.startsWith(entryPrefix(k)) && PROVIDED_ID.test(x.slice(entryPrefix(k).length))));
-  const top = (k: UsageKind, list: string[]) => [...(setup.keys[k] ?? []).map((id) => entryPrefix(k) + id), ...cut(k, list)];
+  // The admin's list goes first, in their order: provided keys, and Niko's built-in where they placed it.
+  const mine = (k: UsageKind) => (setup.keys[k] ?? []).map((id) => (id === BUILTIN_TOKEN ? BUILTIN_ENTRY[k] : entryPrefix(k) + id));
+  const cut = (k: UsageKind, list: string[]) => list.filter((x) => !(x.startsWith(entryPrefix(k)) && PROVIDED_ID.test(x.slice(entryPrefix(k).length))) && !mine(k).includes(x));
+  const top = (k: UsageKind, list: string[]) => [...mine(k), ...cut(k, list)];
   for (const k of USAGE_KINDS) {
-    const has = !!setup.keys[k]?.length;
+    const has = !!providedIds(setup.keys[k]).length;
     if (k === 'brain') { const l = top(k, brainOrder(e)); e.brains = (l.length ? l : ['workers-ai']) as EnginePrefs['brains']; }
     if (k === 'voice') e.voices = top(k, voiceOrder(e)) as EnginePrefs['voices'];
     if (k === 'hear') e.hears = top(k, hearOrder(e)) as EnginePrefs['hears'];

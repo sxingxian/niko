@@ -1033,6 +1033,7 @@ await ok('included services: the admin’s key is kept sealed, given through an 
   // Set up before they join: their key first and fixed, Workers AI removed, 100 answers a month.
   await admin.post('/admin/invites', { email: 'ivy@example.com', access: 'life' });
   const inv = (await admin.get('/admin/users?show=invited&q=ivy')).data.items[0];
+  assert.equal((await admin.put(`/admin/setup/invite/${inv.id}`, { keys: { brain: [] }, builtins: { brain: false } })).status, 400, 'something must still answer');
   r = await admin.put(`/admin/setup/invite/${inv.id}`, { keys: { brain: [pid, 'pxnotakeyxxx'] }, order: 'fixed', builtins: { brain: false }, limits: { brain: 100 } });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   r = await admin.get(`/admin/setup/invite/${inv.id}`);
@@ -1108,8 +1109,13 @@ await ok('included services: the admin’s key is kept sealed, given through an 
   assert.equal((await admin.put(`/admin/setup/user/${u.id}`, { keys: { brain: [pid] }, order: 'free', builtins: { brain: false } })).status, 200);
   await ivy.patch('/me', { engine: { brains: [`key:${own}`, `key:${pid}`] } });
   assert.deepEqual((await user('ivy@example.com')).engine.brains, [`key:${own}`, `key:${pid}`]);
+  // Workers AI can sit anywhere in the admin's list: here first, then the included key.
+  assert.equal((await admin.put(`/admin/setup/user/${u.id}`, { keys: { brain: ['builtin', pid] }, order: 'fixed', builtins: { brain: true } })).status, 200);
+  assert.deepEqual((await user('ivy@example.com')).engine.brains.slice(0, 2), ['workers-ai', `key:${pid}`]);
+  assert.deepEqual((await user('ivy@example.com')).provided.keys.brain, ['builtin', pid]);
+  assert.equal((await admin.get('/admin/users?q=ivy')).data.items[0].engineSetup.keys, 1, 'the built-in is not counted as a key');
   assert.equal((await admin.del(`/admin/setup/keys/${pid}`)).status, 200);
-  assert.deepEqual((await user('ivy@example.com')).provided.keys, {});
+  assert.deepEqual((await user('ivy@example.com')).provided.keys, { brain: ['builtin'] }, 'the key is gone; Workers AI keeps its place');
   assert.ok(!(await user('ivy@example.com')).engine.brains.includes(`key:${pid}`));
   assert.ok(!(await ivy.get('/engine/keys')).data.keys.some((k) => k.id === pid));
   assert.equal((await q('select count(*)::int as n from provided_keys')).at(0).n, 0);

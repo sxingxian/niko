@@ -1,7 +1,7 @@
 import { and, desc, eq, gt, ilike, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { appSettings, auditLog, invites, recoveryCodes, sessions, signups, users, type Db } from '@niko/db';
-import { accessState, accountLimits, cleanProvided, USAGE_KINDS, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
+import { accessState, accountLimits, cleanProvided, providedIds, USAGE_KINDS, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
 import { connectInfo, connectStripe, dateLabel, forgetPayments, forgetStripeMode, inviteCodeHash, keysOf, makeInviteCode, paymentSettings, PAYMENTS_KEY, payNow, plansLine, secretsFor, STRIPE_MODE_KEY, stripeMode } from '../billing';
 import { isMode, keysFor, modeStatus, stripe, StripeError, stripeReady } from '../stripe';
 import { forgetGlanceDefaults, GLANCE_DEFAULT_KEY, glanceDefaults } from '../glance';
@@ -147,7 +147,7 @@ export function inShow(i: Listed, show: Show): boolean {
   return show === 'active' && i.status === 'active' && (!payer || has);
 }
 /** How many provided keys a person (or invite) has, and the order rule, for the Users list and panel. */
-const setupSummary = (v: unknown) => { const st = cleanProvided(v); return { keys: USAGE_KINDS.reduce((n, k) => n + (st.keys[k]?.length ?? 0), 0), order: st.order }; };
+const setupSummary = (v: unknown) => { const st = cleanProvided(v); return { keys: USAGE_KINDS.reduce((n, k) => n + providedIds(st.keys[k]).length, 0), order: st.order }; };
 admin.get('/users', requireAdmin, async (c) => {
   const db = c.get('db');
   const pay = await paymentSettings(db);
