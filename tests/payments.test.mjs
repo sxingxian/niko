@@ -856,6 +856,23 @@ await ok('a slow calendar never holds up an answer: Niko answers within the wait
   } finally { env.AI.run = run; slowCal.on = false; Date.now = realNow; }
 });
 
+await ok('opening Inbox, Calendar or Notes starts a new conversation: the AI forgets what was said', async () => {
+  const b = new Browser();
+  assert.equal((await b.post('/auth/sign-in', { email: 'jun@example.com', password: 'a brand new long passphrase 42' })).status, 200);
+  assert.equal((await b.post('/chat', { message: 'remember the word pineapple', tz: 0 })).status, 200);
+  const id = (await user('jun@example.com')).id;
+  assert.ok((await q('select count(*)::int as n from chat_turns where user_id = $1', [id]))[0].n >= 2);
+  const other = (await q('select count(*)::int as n from chat_turns where user_id <> $1', [id]))[0].n;
+  assert.equal((await b.del('/chat/history')).status, 200);
+  assert.equal((await q('select count(*)::int as n from chat_turns where user_id = $1', [id]))[0].n, 0);
+  assert.equal((await q('select count(*)::int as n from chat_turns where user_id <> $1', [id]))[0].n, other, 'only this account');
+  const seen = [], run = env.AI.run;
+  env.AI.run = async (...args) => { seen.push(JSON.stringify(args)); return { response: 'ok' }; };
+  try { await b.post('/chat', { message: 'what was the word', tz: 0 }); } finally { env.AI.run = run; }
+  assert.ok(!seen.at(-1).includes('pineapple'), 'not in the next question');
+  assert.equal((await new Browser().del('/chat/history')).status, 401);
+});
+
 await ok('screen lock: set with the password, kept by the server, new items only as who, five wrong codes sign out', async () => {
   const PWJ = 'a brand new long passphrase 42';
   const b = new Browser();

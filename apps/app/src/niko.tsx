@@ -214,6 +214,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   // Niko's last line and when it finished, so its own voice heard late through the mic is never taken as a question.
   const lastSaid = useRef<{ text: string; until: number }>({ text: '', until: 0 });
   const ECHO_MS = 6000;
+  /** Words that are part of what Niko just said ("…say try again…"): its own voice, never a request. */
+  const saidItself = (heard: string) => { const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim(); const h = norm(heard); return !!h && norm(lastSaid.current.text).includes(h); };
   /** The mic is switched off while Niko talks: whatever it was holding (Niko's own voice) is thrown away. */
   const muteMic = () => { try { rec.current?.abort(); } catch { /* not running */ } rec.current = null; };
   const unmuteMic = () => { if (wantRec.current && !rec.current) startRecRef.current(); };
@@ -228,6 +230,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const rates = useRef<Record<string, number>>({});
   // Each question to the AI gets a number; an answer arriving after Stop (or after a newer question) is kept, not spoken.
   const askId = useRef(0);
+  /** Failed answers in a row (a retry that fails too ends the listening, so nothing loops). */
+  const failStreak = useRef(0);
   const inFlight = useRef(0); // the number of the question still waiting for its answer, or 0
   const [voiceProblem, setVoiceProblem] = useState<string | null>(null);
   const [pendingOpen, setPendingOpen] = useState<NikoState['pendingOpen']>(null);
@@ -371,8 +375,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, [SR, idle]);
 
   /** Speaks with the first voice in the user's order that works, ending with the device voice. */
-  /** afterLabel: once said, the line stays on screen under this label while Niko listens for the reply to it. */
-  const say = useCallback((text: string, answerFrom = -1, afterLabel?: string) => {
+  /** after: once said, this label and line show (and Niko listens for the reply to them, unless listen is false). */
+  const say = useCallback((text: string, answerFrom = -1, after?: { label: string; line: string; listen?: boolean }) => {
     const engine = meRef.current?.engine as EnginePrefs | undefined;
     stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null;
     const id = speechId.current;
@@ -388,7 +392,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       if (pr && pr.base >= 0 && last.current?.answer) { last.current.from = last.current.answer.length; setResumable(null); }
       progress.current = null;
       lastSaid.current = { text, until: Date.now() + ECHO_MS };
-      window.setTimeout(() => { if (!live()) return; speaking.current = false; unmuteMic(); if (afterLabel) setLabel(afterLabel); listenForFollowUp(!!afterLabel); }, 450);
+      window.setTimeout(() => { if (!live()) return; speaking.current = false; unmuteMic();
+        if (after) { setLabel(after.label); setLine(after.line); if (after.listen === false) { endFollowUp(); active.current = false; setMode('idle'); return; } }
+        listenForFollowUp(!!after); }, 450);
     };
     speaking.current = true;
     lastSaid.current = { text, until: Number.POSITIVE_INFINITY };
@@ -444,13 +450,16 @@ export function NikoProvider({ children }: { children: ReactNode }) {
 
   const here = useRef(path);
   here.current = path;
+  /** When Niko itself last changed screen (by voice, or for an answer that opens one): its own words go on. */
+  const selfNav = useRef(0);
+  const goSelf = (to: string) => { selfNav.current = Date.now(); navigate(to); };
   /** Opens a screen asked for by voice or typing, says so on the status line, and keeps listening for the next request. */
   const goTo = useCallback((screen: string) => {
     if (screen === 'back') { window.history.back(); setMode('speaking'); setLabel('Heard'); setLine('Going back.'); }
     else {
       const name = screenName(screen);
       setMode('speaking'); setLabel('Heard');
-      if (here.current === screen) setLine(`You’re on ${name}.`); else { setLine(`Opening ${name}.`); navigate(screen); }
+      if (here.current === screen) setLine(`You’re on ${name}.`); else { setLine(`Opening ${name}.`); goSelf(screen); }
     }
     window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 1200);
   }, [navigate, idle, listenForFollowUp, SR]);
@@ -481,15 +490,22 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     if (/^(that'?s all|that is all|thanks?( you)?|thank you niko|stop|never ?mind|cancel that|bye)\b[.!]?$/.test(lower)) { active.current = false; stopSpeech(); idle(); return; }
     // After a stop: "continue" carries on the answer, "try again" asks the question again, "repeat" says it again.
     const intent = resumeIntent(text);
+    // Nothing to carry on (a new conversation, after opening Inbox, Calendar or Notes): said plainly, not sent to the AI.
+    if (intent && !last.current) {
+      setMode('speaking'); setLabel('Heard'); setLine('There’s nothing to carry on yet. Ask me something.');
+      window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 1800);
+      return;
+    }
     if (intent && last.current) {
       const l = last.current;
       if (intent === 'retry' || !l.answer) { setResumable(null); return askAI(l.question); }
+      failStreak.current = 0;
       setReply(l.answer); setResumable(null);
       if (intent === 'replay') { l.from = 0; return say(l.answer, 0); }
       if (l.from >= l.answer.length) { setMode('speaking'); setLabel('Heard'); setLine('That was the end of my answer. Say “repeat” to hear it again.'); window.setTimeout(() => (wantRec.current ? listenForFollowUp(true) : idle()), 1600); return; }
       return say(l.answer.slice(l.from), l.from);
     }
-    setReply(null);
+    setReply(null); failStreak.current = 0;
     // 1. Phrases a page has claimed (send it / cancel).
     if (glanceHandler.current?.(lower) || handler.current?.(lower)) return;
     // 2. Scrolling: "scroll down", "page up", "back to the top", "keep scrolling".
@@ -557,6 +573,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // Any tag the app didn't act on (a misspelt or unknown one) is never shown or spoken.
       const answer = stripTags(tagless);
       if (last.current?.question === text) last.current.answer = answer;
+      failStreak.current = 0;
       // Stopped while Niko was thinking (or a newer question came): keep the answer for "continue", don't speak it.
       if (mine !== askId.current) { if (last.current?.question === text) setResumable({ canContinue: true }); return; }
       setBrief(r.brief);
@@ -575,8 +592,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         return;
       }
       setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setReply(answer); say(answer, 0);
-      if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) navigate('/' + item.view); }
-      else if (asked) navigate(asked);
+      if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) goSelf('/' + item.view); }
+      else if (asked) goSelf(asked);
       else if (page && handler.current?.(page, true)) { /* the list on screen turned its page, quietly: Niko is speaking */ }
       else if (scroll || page) scrollScreen(scroll ?? (page === 'previous page' || page === 'first page' ? 'up' : 'down'));
     } catch (e: any) {
@@ -585,8 +602,12 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       setReply(e.message); setResumable({ canContinue: false });
       // Said aloud, and then Niko keeps listening for a few seconds (as after any answer), so "try again" works
       // without saying "Niko" first. Before, it only showed the problem and stopped listening.
-      if (wantRec.current) say('I couldn’t get an answer just now. Say “try again” to ask once more.', -1, 'Problem');
-      else { setMode('idle'); setLabel('Problem'); setLine(`${e.message} Say “try again” to ask once more.`); }
+      // Niko never says "try again" itself: the mic heard the end of that line and asked again, failing in a loop.
+      // The hint is on screen; after a retry that failed too, Niko stops listening rather than keep going.
+      const again = failStreak.current++ > 0;
+      const hint = again ? 'That didn’t work again. Check the Engine screen, or try in a moment.' : 'Say “try again” to ask once more, or ask something else.';
+      if (wantRec.current) say(again ? 'That didn’t work either.' : 'I couldn’t get an answer just now.', -1, { label: 'Problem', line: hint, listen: !again });
+      else { setMode('idle'); setLabel('Problem'); setLine(`${e.message} ${hint}`); }
     }
   };
   askRef.current = (t: string) => { void ask(t); };
@@ -745,7 +766,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         const alts: string[] = Array.from({ length: res.length }, (_, k) => String(res[k]?.transcript ?? '').trim());
         // Niko's own last line, heard late through the speaker: never a question.
         // (Except the words Niko asks for, such as “try again”, which are in its own line by design.)
-        if (res.isFinal && Date.now() < lastSaid.current.until && alts[0] && isEcho(alts[0], lastSaid.current.text) && !alts.some((a) => matchWake(a)?.command) && !resumeIntent(alts[0])) continue;
+        if (res.isFinal && Date.now() < lastSaid.current.until && alts[0] && isEcho(alts[0], lastSaid.current.text) && !alts.some((a) => matchWake(a)?.command) && !(resumeIntent(alts[0]) && !saidItself(alts[0]))) continue;
         const hit = alts.map(matchWake).find(Boolean);
         if (!res.isFinal) {
           if (lockedRef.current) continue;
@@ -812,6 +833,25 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       if (wantRec.current) window.setTimeout(() => listenForFollowUp(true), 400);
     } else idle();
   }, [idle, listenForFollowUp]);
+
+  // ---------------------------------------------------------------- a fresh start on Inbox, Calendar and Notes
+  // Each of them starts a new conversation: nothing said before carries on, is continued, or is remembered by the AI.
+  const lastPath = useRef(path);
+  useEffect(() => {
+    const was = lastPath.current;
+    lastPath.current = path;
+    const p = path.replace(/^\/app(?=\/|$)/, '') || '/';
+    if (was === path || !/^\/(inbox|calendar|notes)$/.test(p) || !meRef.current) return;
+    const mine = Date.now() - selfNav.current < 2000; // Niko opened it and may be saying so: that line finishes
+    askId.current++; inFlight.current = 0; failStreak.current = 0;
+    last.current = null; setResumable(null); setReply(null); setWeather(null);
+    mapCtl.current?.abort(); mapRef.current = null; setMap(null); setPictureId(null);
+    if (!mine) {
+      stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; active.current = false; unmuteMic();
+      if (!lockedRef.current) idle();
+    }
+    void api('/chat/history', { method: 'DELETE' }).catch(() => undefined);
+  }, [path]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------------------------------------------------------- screen lock
   const [locked, setLocked] = useState(false);
@@ -926,7 +966,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     dismissReply: () => setReply(null),
     setCommandHandler: (fn) => { handler.current = fn; },
     setGlanceHandler: (fn) => { glanceHandler.current = fn; },
-    openItem: (view, title) => { setReply(null); setPictureId(null); setPendingOpen({ view, title, at: Date.now() }); navigate('/' + view); },
+    openItem: (view, title) => { setReply(null); setPictureId(null); setPendingOpen({ view, title, at: Date.now() }); goSelf('/' + view); },
     say,
     setStatus: (l, t, m) => { setLabel(l); setLine(t); if (m) setMode(m); },
     rest: idle,

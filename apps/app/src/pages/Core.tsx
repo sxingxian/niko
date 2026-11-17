@@ -408,7 +408,7 @@ export function Workspace() {
     if (sel?.kind !== 'chat' || view !== 'inbox') return;
     const key = selKey;
     api<{ messages: typeof thread }>(`/threads/${sel.provider}/${encodeURIComponent(sel.chatId)}`)
-      .then((r) => { if (key === selKeyNow.current) setThread((t) => (t.length === r.messages.length && t.every((m, i) => m.id === r.messages[i]!.id) ? t : r.messages)); })
+      .then((r) => { const ms = Array.isArray(r?.messages) ? r.messages : []; if (key === selKeyNow.current) setThread((t) => (t.length === ms.length && t.every((m, i) => m.id === ms[i]!.id) ? t : ms)); })
       .catch(() => undefined);
   }, [selKey, view]); // eslint-disable-line react-hooks/exhaustive-deps
   const selKeyNow = useRef(selKey);

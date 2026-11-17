@@ -839,6 +839,11 @@ app.post('/engine/test', async (c) => {
   }
 });
 
+/** A new conversation (opening Inbox, Calendar or Notes): the AI forgets what was said before. */
+app.delete('/chat/history', async (c) => {
+  await c.get('db').delete(chatTurns).where(eq(chatTurns.userId, c.get('user').id));
+  return c.json({ ok: true });
+});
 app.post('/chat', async (c) => {
   const b = await c.req.json<{ message?: string; tz?: number; purpose?: string; where?: unknown }>();
   const text = String(b.message ?? '').trim().slice(0, b.purpose === 'draft' ? 5000 : 2000); // a draft being rewritten is sent along with the request
