@@ -21,7 +21,7 @@ interface InviteRow { id: string; email: string; role: string; expiresAt: string
 type Mode = 'test' | 'live';
 type ModeStatus = { ready: boolean; secret: boolean; webhook: boolean; problem: string | null; connectedAt: string | null; account: string | null };
 const testTag = (m: Mode | null | undefined) => (m === 'test' ? ' · test' : '');
-interface AuditRow { id: string; action: string; detail: Record<string, unknown>; createdAt: string }
+interface AuditRow { id: string; action: string; detail: Record<string, unknown>; createdAt: string; by?: string | null; byName?: string | null }
 
 
 function SignIn({ stage, setStage }: { stage: Stage; setStage: (s: Stage) => void }) {
@@ -752,83 +752,327 @@ function invitePay(i: InviteRow): { text: string; tone?: 'await' | 'warn' } {
 const PAID_LENGTHS = [1, 3, 6, 12, 24, 36];
 const FREE_LENGTHS = [1, 3, 6, 12];
 
-function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?: { name: string; email: string } | null }) {
-  const [tab, setTab] = useState<'users' | 'payments' | 'ai' | 'glance' | 'limits' | 'security' | 'audit'>('users');
-  const [me, setMe] = useState<{ name: string; email: string } | null>(initialMe ?? null);
-  const [users, setUsers] = useState<UserRow[]>([]);
-  const [invites, setInvites] = useState<InviteRow[]>([]);
-  const [reg, setReg] = useState<'invite' | 'open'>('invite');
-  const [pay, setPay] = useState<PaymentSettings | null>(null);
-  const [stripeOn, setStripeOn] = useState(true);
-  const [mode, setMode2] = useState<Mode>('test');
-  const [audit, setAudit] = useState<AuditRow[]>([]);
+// ---------------------------------------------------------------- people: search, filters, pages, and one person's panel
+type Show = 'all' | 'active' | 'waiting' | 'invited' | 'ended' | 'own' | 'off';
+const SHOWS: [Show, string][] = [['all', 'All'], ['active', 'Active'], ['waiting', 'Waiting for you'], ['invited', 'Invited'], ['ended', 'Needs a plan'], ['own', 'Own prices'], ['off', 'Switched off']];
+type Item = (UserRow & { kind: 'user'; createdAt: string }) | (InviteRow & { kind: 'invite'; createdAt: string });
+type ListReply = { items: Item[]; total: number; page: number; per: number; pages: number; counts: Record<Show, number>; registration: 'invite' | 'open'; payments: PaymentSettings; stripe: boolean; stripeMode: Mode };
+const AV = ['#9fdcf3', '#c9a8ff', '#7fe3a8', '#ffd38a', '#ff9fb4', '#a8c4ff'];
+const initials = (s: string) => s.split(/[\s@._-]+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase() || '?';
+const avColour = (id: string) => AV[[...id].reduce((n, ch) => n + ch.charCodeAt(0), 0) % AV.length];
+const when = (d: string | null | undefined) => {
+  if (!d) return 'never';
+  const days = Math.floor((Date.now() - Date.parse(d)) / 86400_000);
+  return days <= 0 ? 'today' : days === 1 ? 'yesterday' : days < 14 ? `${days} days ago` : fmtDate(d);
+};
+/** Waits until typing pauses before searching. */
+function useDebounced<T>(v: T, ms = 250): T {
+  const [d, setD] = useState(v);
+  useEffect(() => { const t = window.setTimeout(() => setD(v), ms); return () => window.clearTimeout(t); }, [v, ms]);
+  return d;
+}
+
+/** Page controls: "26–50 of 138", previous, page numbers, next, and how many per page. */
+function Pager({ page, pages, total, per, pers, onPage, onPer }: { page: number; pages: number; total: number; per: number; pers: number[]; onPage: (p: number) => void; onPer: (n: number) => void }) {
+  const nums: (number | '…')[] = [];
+  for (let p = 1; p <= pages; p++) if (p === 1 || p === pages || Math.abs(p - page) <= 1) nums.push(p); else if (nums[nums.length - 1] !== '…') nums.push('…');
+  return (
+    <footer className="pager">
+      <span className="sub">{total ? `${(page - 1) * per + 1}–${Math.min(page * per, total)} of ${total}` : 'None'}</span>
+      <nav aria-label="Pages" className="pager-nums">
+        <button className="pg" onClick={() => onPage(page - 1)} disabled={page <= 1} aria-label="Previous page">‹ <span className="pg-word">Prev</span></button>
+        {nums.map((n, i) => (n === '…' ? <span key={'d' + i} className="sub pg-dots">…</span>
+          : <button key={n} className="pg pg-n" aria-current={n === page ? 'page' : undefined} onClick={() => onPage(n)}>{n}</button>))}
+        <span className="sub pg-of">Page {page} of {pages}</span>
+        <button className="pg" onClick={() => onPage(page + 1)} disabled={page >= pages} aria-label="Next page"><span className="pg-word">Next</span> ›</button>
+      </nav>
+      <span className="pager-per"><span className="sub">Per page</span>
+        {pers.map((n) => <button key={n} className="pg" aria-pressed={n === per} onClick={() => onPer(n)}>{n}</button>)}
+      </span>
+    </footer>
+  );
+}
+
+/** The invite form, in a sheet. */
+function InviteDialog({ pay, stripeOn, mode, onClose, onSent }: { pay: PaymentSettings | null; stripeOn: boolean; mode: Mode; onClose: () => void; onSent: (text: string, ok: boolean, code: string) => void }) {
   const [email, setEmail] = useState('');
-  const [kind, setKind] = useState<'paid' | 'free' | 'life'>('paid');
+  const [kind, setKind] = useState<'paid' | 'free' | 'life'>(stripeOn ? 'paid' : 'free');
   const [amt, setAmt] = useState('');
   const [len, setLen] = useState<number | null>(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const box = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    box.current?.querySelector<HTMLElement>('input')?.focus();
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [onClose]);
+  const months = len ?? (kind === 'free' ? 3 : pay?.months ?? 12);
+  const lengths = kind === 'free' ? FREE_LENGTHS : [...new Set([...PAID_LENGTHS, pay?.months ?? 12])].sort((x, y) => x - y);
+  const later = pay ? offersLine(plansOffered(pay)) : '';
+  const send = async (e: FormEvent) => {
+    e.preventDefault(); setErr('');
+    const priceCents = kind === 'paid' ? (amt.trim() ? toCents(amt) : pay?.onceCents ?? null) : undefined;
+    if (kind === 'paid' && !priceCents) return setErr('Enter a price of at least SGD 0.50, or set a default in Payments.');
+    setBusy(true);
+    try {
+      const r = await api<{ emailed: boolean; code: string; priceCents: number | null; months: number | null }>('/admin/invites', { body: { email, access: kind, priceCents, months: kind === 'life' ? undefined : months } });
+      const what = kind === 'paid' ? `${money(r.priceCents)} once for ${lengthLabel(r.months ?? months)}` : kind === 'free' ? `free for ${lengthLabel(r.months ?? months)}` : 'lifetime, no payments';
+      onSent(r.emailed ? `Sent to ${email} · ${what}. Code (shown once):` : `Invite made for ${email} · ${what}, but the email couldn’t be sent (check the Resend setup). Pass on the code yourself:`, r.emailed, r.code);
+    } catch (x) { setErr((x as Error).message); setBusy(false); }
+  };
+  return (
+    <div className="scrim" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <form ref={box} className="dialog wide" role="dialog" aria-modal="true" aria-labelledby="invh" onSubmit={send}>
+        <h2 id="invh">Invite someone</h2>
+        <label className="field"><span className="sub">Email</span><input className="in" style={{ height: 44 }} type="email" placeholder="name@example.com" autoComplete="off" value={email} onChange={(e) => { setEmail(e.target.value); setErr(''); }} required /></label>
+        <div role="group" aria-label="How this person gets access" className="segs">
+          <button type="button" className="seg" aria-pressed={kind === 'paid'} disabled={!stripeOn} onClick={() => { setKind('paid'); setLen(null); }}>Pay once</button>
+          <button type="button" className="seg" aria-pressed={kind === 'free'} onClick={() => { setKind('free'); setLen(null); }}>Free for a while</button>
+          <button type="button" className="seg" aria-pressed={kind === 'life'} onClick={() => { setKind('life'); setLen(null); }}>Lifetime</button>
+        </div>
+        {kind !== 'life' && <div className="pay-line">
+          {kind === 'paid' && <label className="price"><span className="k">SGD</span><span className="sr">Pay-once price in Singapore dollars</span><input className="in" inputMode="decimal" placeholder={pay?.onceCents ? centsText(pay.onceCents) : 'Amount'} value={amt} onChange={(e) => setAmt(e.target.value)} /></label>}
+          <span className="sub" style={{ color: '#fff', fontSize: 15 }}>{kind === 'paid' ? 'for' : 'Free for'}</span>
+          <label><span className="sr">How long it lasts</span><select className="in sel" value={months} onChange={(e) => setLen(Number(e.target.value))}>{lengths.map((m) => <option key={m} value={m}>{lengthLabel(m)}</option>)}</select></label>
+        </div>}
+        <p className="sub small">{kind === 'life' ? 'No payments, ever. They just enter the code and create an account.' : `When this time ends, they choose ${later ? `a plan at the default prices (${later})` : 'the monthly or yearly plan from Payments'}.`} The link and a 6-character code go out in one email; links expire after 7 days unless paid.{!stripeOn ? ` Stripe ${mode} mode isn’t set up yet, so only free and lifetime invites can be sent.` : mode === 'test' ? ' Stripe is in test mode: no real money moves.' : ''}</p>
+        {err && <p className="err" role="alert">{err}</p>}
+        <div className="dialog-acts"><button type="button" className="bt" onClick={onClose}>Cancel</button><button className="pri" style={{ height: 44, fontSize: 14 }} disabled={busy}>{busy ? 'Sending…' : 'Send invite'}</button></div>
+      </form>
+    </div>
+  );
+}
+
+/** Everything about one person (or one invite), with what can be done. */
+function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemove, onRevoke, onNewCode, onAudit }: {
+  item: Item; pay: PaymentSettings | null; onClose: () => void; onToggle: (u: UserRow) => void; onPrices: (u: UserRow) => void; onUnlock: (u: UserRow) => void;
+  onRemove: (u: UserRow) => void; onRevoke: (i: InviteRow) => void; onNewCode: (i: InviteRow) => void; onAudit: (id: string) => void;
+}) {
+  const [recent, setRecent] = useState<AuditRow[] | null>(null);
+  const box = useRef<HTMLElement>(null);
+  useEffect(() => {
+    box.current?.querySelector<HTMLElement>('button')?.focus();
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [onClose, item.id]);
+  useEffect(() => {
+    setRecent(null);
+    if (item.kind === 'user') api<{ entries: AuditRow[] }>(`/admin/audit?user=${item.id}&per=10`).then((r) => setRecent(r.entries.slice(0, 5))).catch(() => setRecent([]));
+  }, [item.id, item.kind]);
+  const name = item.kind === 'user' ? item.name || item.email : item.email;
+  if (item.kind === 'invite') {
+    const p = invitePay(item);
+    return (
+      <aside ref={box} className="person" aria-label={`Invite for ${item.email}`}>
+        <div className="person-head"><span className="av big" style={{ background: avColour(item.id) }}>{initials(item.email)}</span>
+          <span className="person-id"><b>Invited</b><span className="sub ell">{item.email}</span><span className="sub small">{item.role === 'admin' ? 'Admin' : 'Member'} · invited {when(item.createdAt)} · expires {fmtDate(item.expiresAt)}</span></span>
+          <button className="bt x" onClick={onClose} aria-label="Close">✕</button></div>
+        <div className="psec"><span className="k">Invite</span><span className={'tone-' + (p.tone ?? 'plain')} style={{ fontSize: 15 }}>{p.text}</span></div>
+        <div className="psec"><span className="k">Actions</span><div className="acts">
+          {item.hasCode && item.codeTries >= 5 && <button className="bt" onClick={() => onNewCode(item)}>Send new code</button>}
+          <button className="bt" onClick={() => onRevoke(item)}>{item.paidAt ? 'Revoke and refund' : 'Revoke invite'}</button>
+        </div></div>
+      </aside>
+    );
+  }
+  const p = payText(item);
+  const unpaid = !!item.signup && item.signup.state !== 'waiting';
+  const payer = item.role !== 'admin' && !item.lifetime && !unpaid;
+  return (
+    <aside ref={box} className="person" aria-label={name}>
+      <div className="person-head"><span className="av big" style={{ background: avColour(item.id) }}>{initials(item.name || item.email)}</span>
+        <span className="person-id"><b>{item.name || '—'}</b><span className="sub ell">{item.email}</span><span className="sub small">{item.role === 'admin' ? 'Admin' : 'Member'} · joined {fmtDate(item.createdAt)} · last seen {when(item.lastActiveAt)}</span></span>
+        <button className="bt x" onClick={onClose} aria-label="Close">✕</button></div>
+      {!item.isOwner && !unpaid && <div className="psec"><span className="k">Account</span>
+        <div className="pay-line"><Switch on={item.status === 'active'} onChange={() => onToggle(item)} label={`Account enabled for ${item.email}`} /><span style={{ fontSize: 14 }}>{item.status === 'active' ? 'Switched on: they can sign in and use Niko.' : item.signup ? 'Waiting for you: switch on to let them in (they get a welcome email).' : 'Switched off: they can’t sign in.'}</span></div></div>}
+      <div className="psec"><span className="k">Payment</span><span className={'tone-' + (p.tone ?? 'plain')} style={{ fontSize: 15 }}>{p.text}</span><span className="sub small">Status: {statusText(item)}</span></div>
+      {payer && pay && <div className="psec"><div className="psec-row"><span className="k">Plan prices</span><span className={'tag' + (item.keptPrices ? ' own' : '')}>{item.keptPrices ? (item.pricesFrom === 'admin' ? 'Own' : `Own · kept${item.pricesAt ? ' ' + fmtDate(item.pricesAt) : ''}`) : 'Default'}</span></div>
+        <span style={{ fontSize: 15 }}>{offersLine(item.keptPrices ?? plansOffered(pay)) || 'No plans on'}</span><span className="sub small">What they pay when they next choose a plan.</span></div>}
+      {(payer || unpaid) && <div className="psec"><span className="k">Actions</span><div className="acts">
+        {payer && pay && <button className="bt" onClick={() => onPrices(item)}>Change prices</button>}
+        {payer && <button className="bt" onClick={() => onUnlock(item)}>Unlock</button>}
+        {unpaid && <button className="bt" onClick={() => onRemove(item)}>Remove sign-up</button>}
+      </div></div>}
+      <div className="psec"><span className="k">Recent activity</span>
+        {recent === null ? <span className="sub small">Loading…</span> : !recent.length ? <span className="sub small">Nothing yet.</span>
+          : <ul className="recent">{recent.map((a) => <li key={a.id}><span>{actionLabel(a.action)}</span><span className="sub small">{new Date(a.createdAt).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}{a.by && a.by !== item.email ? ` · by ${a.byName || a.by}` : ''}</span></li>)}</ul>}
+        <button className="lnk" style={{ alignSelf: 'flex-start', paddingLeft: 0 }} onClick={() => onAudit(item.id)}>See all in the audit log</button></div>
+    </aside>
+  );
+}
+/** "plan_prices.user" → "Plan prices user": readable enough without a table of every action. */
+const actionLabel = (a: string) => { const s = a.replace(/[._]/g, ' '); return s.charAt(0).toUpperCase() + s.slice(1); };
+
+function PeopleTab({ onSignedOut, onOpenPayments, onAudit }: { onSignedOut: () => void; onOpenPayments: () => void; onAudit: (id: string) => void }) {
+  const [q, setQ] = useState('');
+  const qd = useDebounced(q.trim());
+  const [show, setShow] = useState<Show>('all');
+  const [page, setPage] = useState(1);
+  const [per, setPer] = useState(25);
+  const [data, setData] = useState<ListReply | null>(null);
+  const [sel, setSel] = useState<string | null>(null);
+  const [selItem, setSelItem] = useState<Item | null>(null);
+  const [inviting, setInviting] = useState(false);
+  const [regMenu, setRegMenu] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string; code?: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [unlocking, setUnlocking] = useState<UserRow | null>(null);
   const [pricing, setPricing] = useState<UserRow | null>(null);
-  const [fresh, setFresh] = useState<string[] | null>(null);
-  const [confirmCodes, setConfirmCodes] = useState(false);
-
+  const said = (text: string, ok = true, code?: string) => { setNote({ ok, text, code }); setCopied(false); };
   const guard = useCallback((e: unknown) => { if (e instanceof ApiError && e.status === 401) onSignedOut(); else setNote({ ok: false, text: (e as Error).message }); }, [onSignedOut]);
   const load = useCallback(async () => {
     try {
-      const r = await api<{ users: UserRow[]; invites: InviteRow[]; registration: 'invite' | 'open'; payments: PaymentSettings; stripe: boolean; stripeMode: Mode }>('/admin/users');
-      setUsers(r.users); setInvites(r.invites); setReg(r.registration); setPay(r.payments); setStripeOn(r.stripe); setMode2(r.stripeMode);
+      const r = await api<ListReply>(`/admin/users?${new URLSearchParams({ q: qd, show, page: String(page), per: String(per) })}`);
+      setData(r);
+      if (r.page !== page) setPage(r.page);
     } catch (e) { guard(e); }
-  }, [guard]);
-  useEffect(() => { void load(); if (!initialMe) api('/admin/me').then(setMe).catch(() => undefined); }, [load]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (tab === 'audit') api<{ entries: AuditRow[] }>('/admin/audit').then((r) => setAudit(r.entries)).catch(guard); }, [tab, guard]);
-  useEffect(() => { if (tab === 'users') void load(); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const months = len ?? (kind === 'free' ? 3 : pay?.months ?? 12);
-  const lengths = kind === 'free' ? FREE_LENGTHS : [...new Set([...PAID_LENGTHS, pay?.months ?? 12])].sort((x, y) => x - y);
-  const said = (text: string, ok = true, code?: string) => { setNote({ ok, text, code }); setCopied(false); };
-  const invite = async (e: FormEvent) => {
-    e.preventDefault(); setNote(null);
-    const priceCents = kind === 'paid' ? (amt.trim() ? toCents(amt) : pay?.onceCents ?? null) : undefined;
-    if (kind === 'paid' && !priceCents) return said('Enter a price of at least SGD 0.50, or set a default in Payments.', false);
-    try {
-      const r = await api<{ emailed: boolean; code: string; priceCents: number | null; months: number | null }>('/admin/invites', { body: { email, access: kind, priceCents, months: kind === 'life' ? undefined : months } });
-      const what = kind === 'paid' ? `${money(r.priceCents)} once for ${lengthLabel(r.months ?? months)}` : kind === 'free' ? `free for ${lengthLabel(r.months ?? months)}` : 'lifetime, no payments';
-      said(r.emailed ? `Sent to ${email} · ${what}. Code (shown once):` : `Invite made for ${email} · ${what}, but the email couldn’t be sent (check the Resend setup). Pass on the link’s code yourself:`, r.emailed, r.code);
-      setEmail(''); setAmt(''); setLen(null);
-      await load();
-    } catch (x) { guard(x); }
-  };
-  const setMode = async (mode: 'invite' | 'open') => { try { await api('/admin/registration', { method: 'PUT', body: { mode } }); setReg(mode); } catch (e) { guard(e); } };
+  }, [qd, show, page, per, guard]);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { setPage(1); }, [qd, show, per]);
+  // The open panel follows the latest copy of its person (after a change), and stays open if they're on another page.
+  useEffect(() => { if (sel && data) { const f = data.items.find((i) => i.id === sel); if (f) setSelItem(f); } }, [data, sel]);
+  const open = (i: Item) => { setSel(i.id); setSelItem(i); };
+  const close = useCallback(() => { setSel(null); setSelItem(null); }, []);
+  const after = async (text?: string, ok = true) => { if (text) said(text, ok); await load(); };
+  const setReg = async (mode: 'invite' | 'open') => { setRegMenu(false); try { await api('/admin/registration', { method: 'PUT', body: { mode } }); await after(mode === 'open' ? 'Registration is open: anyone can sign up.' : 'Invite only: the sign-up page is hidden.'); } catch (e) { guard(e); } };
   const toggle = async (u: UserRow) => {
     try {
       await api(`/admin/users/${u.id}`, { method: 'PATCH', body: { status: u.status === 'active' ? 'off' : 'active' } });
-      if (u.status !== 'active' && u.signup) said(`${u.name || u.email} is switched on and gets a welcome email.`);
-      await load();
+      await after(u.status !== 'active' && u.signup ? `${u.name || u.email} is switched on and gets a welcome email.` : undefined);
     } catch (e) { guard(e); }
   };
   const revoke = async (i: InviteRow) => {
     if (i.paidAt && !window.confirm(`Revoke ${i.email}’s invite and refund ${money(i.priceCents)}?`)) return;
-    try { const r = await api<{ refunded: boolean }>(`/admin/invites/${i.id}`, { method: 'DELETE' }); said(r.refunded ? `Invite for ${i.email} revoked and refund started. Stripe returns it to their card, usually within 5–10 business days.` : `Invite for ${i.email} revoked. The link and code no longer work.`); await load(); } catch (e) { guard(e); }
+    try { const r = await api<{ refunded: boolean }>(`/admin/invites/${i.id}`, { method: 'DELETE' }); close(); await after(r.refunded ? `Invite for ${i.email} revoked and refund started. Stripe returns it to their card, usually within 5–10 business days.` : `Invite for ${i.email} revoked. The link and code no longer work.`); } catch (e) { guard(e); }
   };
   const newCode = async (i: InviteRow) => {
     try { const r = await api<{ emailed: boolean; code: string }>(`/admin/invites/${i.id}/code`, { method: 'POST' }); said(`New code and link emailed to ${i.email}. The old ones no longer work:`, true, r.code); await load(); } catch (e) { guard(e); }
   };
   const remove = async (u: UserRow) => {
     if (!window.confirm(`Remove ${u.email}’s unpaid sign-up?`)) return;
-    try { await api(`/admin/users/${u.id}`, { method: 'DELETE' }); said(`${u.name || u.email}’s unpaid sign-up was removed.`); await load(); } catch (e) { guard(e); }
+    try { await api(`/admin/users/${u.id}`, { method: 'DELETE' }); close(); await after(`${u.name || u.email}’s unpaid sign-up was removed.`); } catch (e) { guard(e); }
   };
+  const pay = data?.payments ?? null;
+  const counts = data?.counts;
+  return <>
+    {data?.stripeMode === 'test' && <TestBanner onOpen={onOpenPayments} />}
+    <header className="people-head">
+      <div><h1>Users</h1><p className="sub" style={{ fontSize: 15 }}>Everyone with an account or an invite. Select a person to see and change everything about them.</p></div>
+      <div className="people-acts">
+        <div className="reg">
+          <button className="chip big" aria-haspopup="menu" aria-expanded={regMenu} onClick={() => setRegMenu(!regMenu)}><span className="k">Registration</span>{data?.registration === 'open' ? 'Open registration' : 'Invite only'} ▾</button>
+          {regMenu && <div className="menu" role="menu">
+            {([['invite', 'Invite only', 'Only people you invite can create an account. The sign-up page is hidden.'], ['open', 'Open registration', pay?.openPay ? 'Anyone can sign up. They confirm their email and pay, then wait for you to switch them on.' : 'Anyone can sign up. They confirm their email, then wait for you to switch them on.']] as const).map(([k, label, sub]) => (
+              <button key={k} role="menuitemradio" aria-checked={data?.registration === k} className="menu-item" onClick={() => setReg(k)}><span className="mark" aria-hidden="true">{data?.registration === k ? '✓' : ''}</span><span><b>{label}</b><span className="sub small">{sub}</span></span></button>
+            ))}
+            <p className="menu-foot sub small"><i className={'dot' + (data?.stripe ? (data.stripeMode === 'live' ? ' on' : ' test') : '')} />{data?.stripe ? (data.stripeMode === 'live' ? 'Stripe live · real payments in SGD' : 'Stripe test mode · no real money moves') : `Stripe ${data?.stripeMode ?? ''} mode isn’t set up yet`}</p>
+          </div>}
+        </div>
+        <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={() => { setInviting(true); setRegMenu(false); }}>+ Invite</button>
+      </div>
+    </header>
+    <div className="people-bar">
+      <label className="search"><span className="sr">Search by name or email</span><input className="in" type="search" placeholder="Search name or email" value={q} onChange={(e) => setQ(e.target.value)} /></label>
+      <div role="group" aria-label="Show" className="chips">
+        {SHOWS.map(([k, label]) => <button key={k} className="chip" aria-pressed={show === k} onClick={() => setShow(k)}>{label} <b>{counts?.[k] ?? '·'}</b></button>)}
+      </div>
+    </div>
+    {note && <div className={note.ok ? 'ok banner' : 'err banner'} role="status"><span>{note.text}</span>
+      {note.code && <><span className="code" aria-label="Invite code">{showCode(note.code)}</span><button className="bt" onClick={() => { navigator.clipboard?.writeText(note.code!).catch(() => undefined); setCopied(true); }}>{copied ? 'Copied' : 'Copy code'}</button></>}
+      <button className="bt sm" onClick={() => setNote(null)} aria-label="Dismiss">✕</button>
+    </div>}
+    <section className="g card people" aria-label="Accounts">
+      <div className="urow head" aria-hidden="true"><span className="k">Person</span><span className="k">Role</span><span className="k">Status</span><span className="k">Payment · plan prices</span><span className="k">On</span><span /></div>
+      <div className="ulist">
+        {data && !data.items.length && <p className="sub empty">{qd ? `No one matches “${qd}”.` : 'No one here.'}</p>}
+        {data?.items.map((i) => {
+          const isUser = i.kind === 'user';
+          const name = isUser ? i.name || '—' : 'Invited';
+          const p = isUser ? payText(i) : invitePay(i);
+          const unpaid = isUser && !!i.signup && i.signup.state !== 'waiting';
+          const payer = isUser && i.role !== 'admin' && !i.lifetime && !unpaid;
+          const status = isUser ? statusText(i) : 'Invited';
+          return (
+            <div key={i.id} className={'urow' + (sel === i.id ? ' sel' : '')} onClick={() => open(i)}>
+              <button className="person-cell" onClick={(e) => { e.stopPropagation(); open(i); }} aria-label={`Open ${isUser ? i.name || i.email : i.email}`}>
+                <span className="av" style={{ background: avColour(i.id) }}>{initials(isUser ? i.name || i.email : i.email)}</span>
+                <span className="person-id"><b className="ell">{name}</b><span className="sub ell">{i.email}</span></span>
+              </button>
+              <span className="u-role">{i.role === 'admin' ? 'Admin' : 'Member'}</span>
+              <span><span className={'spill' + (status === 'Active' ? ' on' : status === 'Waiting for you' || status === 'Invited' ? ' wait' : status === 'Paused' ? ' ended' : '')}><i />{status}</span></span>
+              <span className="u-pay"><span className={'ell tone-' + (p.tone ?? 'plain')}>{p.text}</span>
+                {payer && pay && <span className="pricetag"><span className={'tag' + (i.keptPrices ? ' own' : '')}>{i.keptPrices ? (i.pricesFrom === 'admin' ? 'Own' : 'Own · kept') : 'Default'}</span><span className="sub small ell">{offersLine(i.keptPrices ?? plansOffered(pay)) || 'no plans'}</span></span>}</span>
+              {/* The switch works on its own: it never opens the panel. */}
+              <span className="u-on" onClick={(e) => e.stopPropagation()}>{isUser && i.isOwner ? <span className="k small">Owner</span> : isUser && !unpaid ? <Switch on={i.status === 'active'} onChange={() => toggle(i)} label={`Account enabled for ${i.email}`} /> : null}</span>
+              <span className="chev" aria-hidden="true">›</span>
+            </div>
+          );
+        })}
+      </div>
+      {data && <Pager page={data.page} pages={data.pages} total={data.total} per={data.per} pers={[10, 25, 50, 100]} onPage={setPage} onPer={setPer} />}
+    </section>
+    <p className="sub" style={{ fontSize: 13 }}>Paid sign-ups stay off until you switch them on; their paid time starts then. Unpaid sign-ups are removed after 7 days. Prices are fixed when the invite is sent. Card details go to Stripe, never to Niko. Every change here is written to the audit log.</p>
+    {selItem && <PersonPanel item={selItem} pay={pay} onClose={close} onToggle={toggle} onPrices={setPricing} onUnlock={setUnlocking} onRemove={remove} onRevoke={revoke} onNewCode={newCode} onAudit={onAudit} />}
+    {inviting && <InviteDialog pay={pay} stripeOn={data?.stripe ?? false} mode={data?.stripeMode ?? 'test'} onClose={() => setInviting(false)} onSent={async (text, ok, code) => { setInviting(false); said(text, ok, code); setShow('all'); setQ(''); await load(); }} />}
+    {pricing && pay && <PricesDialog user={pricing} defaults={plansOffered(pay)} onClose={() => setPricing(null)} onDone={async (text) => { setPricing(null); await after(text); }} />}
+    {unlocking && <UnlockDialog user={unlocking} onClose={() => setUnlocking(null)} onDone={async (text) => { setUnlocking(null); await after(text); }} />}
+  </>;
+}
+
+// ---------------------------------------------------------------- audit log, one page at a time
+function AuditTab({ guard, person, onPerson }: { guard: (e: unknown) => void; person: string | null; onPerson: (id: string | null) => void }) {
+  const [q, setQ] = useState('');
+  const qd = useDebounced(q.trim());
+  const [page, setPage] = useState(1);
+  const [per, setPer] = useState(50);
+  const [data, setData] = useState<{ entries: AuditRow[]; total: number; page: number; per: number; pages: number; person: { id: string; label: string } | null } | null>(null);
+  useEffect(() => { setPage(1); }, [qd, per, person]);
+  useEffect(() => {
+    api<NonNullable<typeof data>>(`/admin/audit?${new URLSearchParams({ q: qd, page: String(page), per: String(per), ...(person ? { user: person } : {}) })}`).then(setData).catch(guard);
+  }, [qd, page, per, person, guard]);
+  return <>
+    <header><h1>Audit log</h1><p className="sub" style={{ fontSize: 15 }}>Every sign-in, change and payment, newest first. File entries record name, size and time only, never contents.</p></header>
+    <div className="people-bar">
+      <label className="search"><span className="sr">Search the audit log</span><input className="in" type="search" placeholder="Search actions or details" value={q} onChange={(e) => setQ(e.target.value)} /></label>
+      {data?.person && <button className="chip" aria-pressed="true" onClick={() => onPerson(null)}>Only {data.person.label} <b>✕</b></button>}
+    </div>
+    <section className="g card people" aria-label="Audit entries">
+      <div className="arow head" aria-hidden="true"><span className="k">When</span><span className="k">What</span><span className="k">By</span><span className="k">Details</span></div>
+      <div className="ulist">
+        {data && !data.entries.length && <p className="sub empty">{qd ? `Nothing matches “${qd}”.` : 'Nothing yet.'}</p>}
+        {data?.entries.map((a) => (
+          <div key={a.id} className="arow">
+            <span className="sub">{new Date(a.createdAt).toLocaleString([], { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
+            <b className="mono-ish">{a.action}</b>
+            <span className="sub ell">{a.byName || a.by || '—'}</span>
+            <span className="sub a-detail">{Object.entries(a.detail).map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(' · ') || '—'}</span>
+          </div>
+        ))}
+      </div>
+      {data && <Pager page={data.page} pages={data.pages} total={data.total} per={data.per} pers={[25, 50, 100]} onPage={setPage} onPer={setPer} />}
+    </section>
+  </>;
+}
+
+function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?: { name: string; email: string } | null }) {
+  const [tab, setTab] = useState<'users' | 'payments' | 'ai' | 'glance' | 'limits' | 'security' | 'audit'>('users');
+  const [me, setMe] = useState<{ name: string; email: string } | null>(initialMe ?? null);
+  const [auditFor, setAuditFor] = useState<string | null>(null);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [fresh, setFresh] = useState<string[] | null>(null);
+  const [confirmCodes, setConfirmCodes] = useState(false);
+
+  const guard = useCallback((e: unknown) => { if (e instanceof ApiError && e.status === 401) onSignedOut(); else setNote({ ok: false, text: (e as Error).message }); }, [onSignedOut]);
+  useEffect(() => { if (!initialMe) api('/admin/me').then(setMe).catch(() => undefined); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const newCodes = async () => {
     if (!confirmCodes) return setConfirmCodes(true);
     setConfirmCodes(false);
     try { const r = await api<{ recoveryCodes: string[] }>('/admin/recovery-codes', { method: 'POST' }); setFresh(r.recoveryCodes); } catch (e) { guard(e); }
   };
   const signOut = async () => { await api('/admin/sign-out', { method: 'POST' }).catch(() => undefined); onSignedOut(); };
-  const active = users.filter((u) => u.status === 'active').length;
-  const waiting = users.filter((u) => u.signup?.state === 'waiting' && u.status !== 'active').length;
-  const ended = users.filter((u) => u.status === 'active' && u.role !== 'admin' && !u.access.has).length;
-  const later = pay ? [pay.monthly.on && pay.monthly.cents && `${money(pay.monthly.cents)} a month`, pay.yearly.on && pay.yearly.cents && `${money(pay.yearly.cents)} a year`].filter(Boolean).join(' or ') : '';
-
   return (
     <div className="shell">
       <aside>
@@ -840,85 +1084,13 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
           <button className="nv" aria-current={tab === 'glance' ? 'page' : undefined} onClick={() => setTab('glance')}>New items</button>
           <button className="nv" aria-current={tab === 'limits' ? 'page' : undefined} onClick={() => setTab('limits')}>Limits</button>
           <button className="nv" aria-current={tab === 'security' ? 'page' : undefined} onClick={() => setTab('security')}>Security</button>
-          <button className="nv" aria-current={tab === 'audit' ? 'page' : undefined} onClick={() => setTab('audit')}>Audit log</button>
+          <button className="nv" aria-current={tab === 'audit' ? 'page' : undefined} onClick={() => { setAuditFor(null); setTab('audit'); }}>Audit log</button>
         </nav>
         <div className="who"><span className="sub" style={{ fontSize: 13 }}>Signed in as {me?.name || me?.email || '…'}</span><button className="nv line" onClick={signOut}>Sign out</button></div>
       </aside>
       <main key={tab} className="hud-in">
-        {tab === 'users' ? <>
-          {mode === 'test' && <TestBanner onOpen={() => setTab('payments')} />}
-          <header><h1>Users</h1><p className="sub" style={{ fontSize: 15 }}>{active} active · {waiting} sign-up{waiting === 1 ? '' : 's'} waiting for you · {invites.length} invited · {ended} needing a plan · {reg === 'invite' ? 'invite only' : 'open registration'}</p></header>
-          <div className="two">
-            <section className="g card" aria-label="Registration">
-              <span className="k">Registration</span>
-              <div role="group" aria-label="Who can create an account" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button className="seg" aria-pressed={reg === 'invite'} onClick={() => setMode('invite')}>Invite only</button>
-                <button className="seg" aria-pressed={reg === 'open'} onClick={() => setMode('open')}>Open registration</button>
-              </div>
-              <p className="sub">{reg === 'invite' ? 'Only people you invite can create an account. The sign-up page is hidden.' : pay?.openPay ? 'Anyone can sign up. They confirm their email and pay, then wait for you to switch them on.' : 'Anyone can sign up. They confirm their email, then wait for you to switch them on.'}</p>
-              <div className="stripe-line"><i className={'dot' + (stripeOn ? (mode === 'live' ? ' on' : ' test') : '')} /><span className="sub">{stripeOn ? (mode === 'live' ? 'Stripe live · real payments in SGD' : 'Stripe test mode · no real money moves') : `Stripe ${mode} mode isn’t set up yet: only free and lifetime invites can be sent.`}</span></div>
-            </section>
-            <form className="g card" aria-label="Invite a user" onSubmit={invite}>
-              <span className="k">Invite a user</span>
-              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                <label style={{ flex: 1, minWidth: 200, display: 'flex' }}><span className="sr">Email address</span><input className="in" style={{ height: 44 }} type="email" placeholder="name@example.com" autoComplete="off" value={email} onChange={(e) => setEmail(e.target.value)} required /></label>
-                <button className="pri" style={{ height: 44, fontSize: 14 }}>Send invite</button>
-              </div>
-              <div className="pay-line">
-                <span className="sub" style={{ color: '#fff', fontSize: 15 }}>Access</span>
-                <div role="group" aria-label="How this person gets access" className="segs">
-                  <button type="button" className="seg" aria-pressed={kind === 'paid'} onClick={() => { setKind('paid'); setLen(null); }}>Pay once</button>
-                  <button type="button" className="seg" aria-pressed={kind === 'free'} onClick={() => { setKind('free'); setLen(null); }}>Free for a while</button>
-                  <button type="button" className="seg" aria-pressed={kind === 'life'} onClick={() => { setKind('life'); setLen(null); }}>Lifetime</button>
-                </div>
-              </div>
-              {kind !== 'life' && <div className="pay-line">
-                {kind === 'paid' && <label className="price"><span className="k">SGD</span><span className="sr">Pay-once price in Singapore dollars</span><input className="in" inputMode="decimal" placeholder={pay?.onceCents ? centsText(pay.onceCents) : 'Amount'} value={amt} onChange={(e) => setAmt(e.target.value)} /></label>}
-                <span className="sub" style={{ color: '#fff', fontSize: 15 }}>{kind === 'paid' ? 'for' : 'Free for'}</span>
-                <label><span className="sr">How long it lasts</span><select className="in sel" value={months} onChange={(e) => setLen(Number(e.target.value))}>{lengths.map((m) => <option key={m} value={m}>{lengthLabel(m)}</option>)}</select></label>
-              </div>}
-              <p className="sub" style={{ fontSize: 13 }}>{kind === 'life' ? 'No payments, ever. They just enter the code and create an account.' : `When this time ends, they choose ${later ? `a plan (${later})` : 'the monthly or yearly plan from Payments'}.`} The link and a 6-character code go out in one email; links expire after 7 days unless paid.</p>
-            </form>
-          </div>
-          {note && <div className={note.ok ? 'ok banner' : 'err banner'} role="status"><span>{note.text}</span>
-            {note.code && <><span className="code" aria-label="Invite code">{showCode(note.code)}</span><button className="bt" onClick={() => { navigator.clipboard?.writeText(note.code!).catch(() => undefined); setCopied(true); }}>{copied ? 'Copied' : 'Copy code'}</button></>}
-          </div>}
-          <section className="g card table" aria-label="Accounts">
-            <div className="tr pay head"><span className="k">Name</span><span className="k">Email</span><span className="k">Role</span><span className="k">Status</span><span className="k">Payment</span><span className="k">Access</span></div>
-            {users.map((u) => {
-              const p = payText(u);
-              const unpaid = !!u.signup && u.signup.state !== 'waiting';
-              const canUnlock = u.role !== 'admin' && !u.lifetime && !unpaid;
-              return (
-                <div key={u.id} className="tr pay">
-                  <b>{u.name || '—'}</b><span className="sub ell">{u.email}</span><span>{u.role === 'admin' ? 'Admin' : 'Member'}</span>
-                  <span className="st"><i className={u.status === 'active' ? 'on' : ''} />{statusText(u)}</span>
-                  <span className="paycell">
-                    <span className="paytxt"><span className={'tone-' + (p.tone ?? 'plain')}>{p.text}</span>
-                      {canUnlock && pay && <span className="pricetag"><span className={'tag' + (u.keptPrices ? ' own' : '')}>{u.keptPrices ? (u.pricesFrom === 'admin' ? 'Own' : `Own · kept${u.pricesAt ? ' ' + fmtDate(u.pricesAt) : ''}`) : 'Default'}</span><span className="sub small">{offersLine(u.keptPrices ?? plansOffered(pay)) || 'no plans'}</span></span>}</span>
-                    {canUnlock && pay && <button className="bt sm" onClick={() => setPricing(u)}>Prices</button>}
-                    {canUnlock && <button className="bt sm" onClick={() => setUnlocking(u)}>Unlock</button>}
-                  </span>
-                  <span>{u.isOwner ? <span className="k">Owner</span> : unpaid ? <button className="bt" onClick={() => remove(u)}>Remove</button> : <Switch on={u.status === 'active'} onChange={() => toggle(u)} label={`Account enabled for ${u.email}`} />}</span>
-                </div>
-              );
-            })}
-            {invites.map((i) => {
-              const p = invitePay(i);
-              return (
-                <div key={i.id} className="tr pay">
-                  <b>Invited</b><span className="sub ell">{i.email}</span><span>{i.role === 'admin' ? 'Admin' : 'Member'}</span>
-                  <span className="st"><i />Invited</span>
-                  <span className="paycell"><span className={'tone-' + (p.tone ?? 'plain')}>{p.text}</span>{i.hasCode && i.codeTries >= 5 && <button className="bt sm" onClick={() => newCode(i)}>Send new code</button>}</span>
-                  <span>{i.paidAt ? <button className="bt" onClick={() => revoke(i)}>Revoke and refund</button> : <button className="bt" onClick={() => revoke(i)}>Revoke</button>}</span>
-                </div>
-              );
-            })}
-          </section>
-          <p className="sub" style={{ fontSize: 13 }}>Paid sign-ups stay off until you switch them on; their paid time starts then. Unpaid sign-ups are removed after 7 days. Prices are fixed when the invite is sent. Card details go to Stripe, never to Niko. Every change here is written to the audit log.</p>
-          {pricing && pay && <PricesDialog user={pricing} defaults={plansOffered(pay)} onClose={() => setPricing(null)} onDone={async (text) => { setPricing(null); said(text); await load(); }} />}
-          {unlocking && <UnlockDialog user={unlocking} onClose={() => setUnlocking(null)} onDone={async (text) => { setUnlocking(null); said(text); await load(); }} />}
-        </> : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'security' ? <>
+        {tab === 'users' ? <PeopleTab onSignedOut={onSignedOut} onOpenPayments={() => setTab('payments')} onAudit={(id) => { setAuditFor(id); setTab('audit'); }} />
+ : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'security' ? <>
           <header><h1>Security</h1><p className="sub" style={{ fontSize: 15 }}>Your own admin sign-in: authenticator app and recovery codes.</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
           <div className="two">
@@ -941,14 +1113,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
               <div><button className="bt" onClick={() => setFresh(null)}>I’ve saved them</button></div>
             </section>
           )}
-        </> : <>
-          <header><h1>Audit log</h1><p className="sub" style={{ fontSize: 15 }}>The latest 200 events. File entries record name, size and time only, never contents.</p></header>
-          <section className="g card table" aria-label="Audit entries">
-            {audit.map((a) => (
-              <div key={a.id} className="tr audit"><span className="sub">{new Date(a.createdAt).toLocaleString()}</span><b>{a.action}</b><span className="sub ell">{Object.entries(a.detail).map(([k, v]) => `${k}: ${String(v)}`).join(' · ')}</span></div>
-            ))}
-          </section>
-        </>}
+        </> : <AuditTab guard={guard} person={auditFor} onPerson={setAuditFor} />}
       </main>
     </div>
   );

@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, isNotNull, isNull, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, ilike, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { appSettings, auditLog, invites, recoveryCodes, sessions, signups, users, type Db } from '@niko/db';
 import { accessState, accountLimits, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
@@ -124,11 +124,31 @@ admin.get('/me', requireAdmin, (c) => {
   return c.json({ name: u.name, email: u.email });
 });
 
+// Users and pending invites in one list, searched, filtered and paged on the server: the portal gets one page at a time,
+// with a count for each filter. Owner first, then newest first.
+const PER_PAGE = [10, 25, 50, 100];
+export const SHOW = ['all', 'active', 'waiting', 'invited', 'ended', 'own', 'off'] as const;
+type Show = (typeof SHOW)[number];
+type Listed = { kind: 'user' | 'invite'; role?: string | null; status?: string | null; lifetime?: boolean; access?: unknown; signup?: unknown; keptPrices?: unknown };
+export function inShow(i: Listed, show: Show): boolean {
+  if (show === 'all') return true;
+  if (i.kind === 'invite') return show === 'invited';
+  const pending = !!i.signup && i.status !== 'active';
+  if (show === 'waiting') return pending;
+  if (show === 'own') return !!i.keptPrices;
+  if (pending) return false;
+  if (show === 'off') return i.status !== 'active';
+  const payer = i.role !== 'admin' && !i.lifetime;
+  const has = !!(i.access as { has?: boolean } | undefined)?.has;
+  if (show === 'ended') return i.status === 'active' && payer && !has;
+  return show === 'active' && i.status === 'active' && (!payer || has);
+}
 admin.get('/users', requireAdmin, async (c) => {
   const db = c.get('db');
   const pay = await paymentSettings(db);
   const rows = await db.select({ u: users, su: signups }).from(users).leftJoin(signups, eq(signups.userId, users.id)).orderBy(users.createdAt);
   const list = rows.map(({ u, su }) => ({
+    kind: 'user' as const, createdAt: u.createdAt,
     id: u.id, name: u.name, email: u.email, role: u.role, status: u.status, isOwner: u.isOwner, lastActiveAt: u.lastActiveAt,
     access: accessState(u, pay.graceDays),
     lifetime: u.lifetime, accessUntil: u.accessUntil, accessKind: u.accessKind, accessPaidUntil: u.accessPaidUntil, accessStartMonths: u.accessStartMonths, paidMode: u.paidMode,
@@ -139,9 +159,20 @@ admin.get('/users', requireAdmin, async (c) => {
   const pending = await db.select({
     id: invites.id, email: invites.email, role: invites.role, expiresAt: invites.expiresAt, access: invites.access, priceCents: invites.priceCents, months: invites.months,
     paidAt: invites.paidAt, stripeMode: invites.stripeMode, codeTries: invites.codeTries, hasCode: sql<boolean>`${invites.codeHash} is not null`,
+    createdAt: invites.createdAt,
   }).from(invites).where(and(isNull(invites.usedAt), isNull(invites.revokedAt), gt(invites.expiresAt, new Date()))).orderBy(invites.createdAt);
+  const all = [...list, ...pending.map((i) => ({ ...i, kind: 'invite' as const }))]
+    .sort((a, b) => Number('isOwner' in b && b.isOwner) - Number('isOwner' in a && a.isOwner) || b.createdAt.getTime() - a.createdAt.getTime());
+  const q = (c.req.query('q') ?? '').trim().toLowerCase().slice(0, 100);
+  const show: Show = (SHOW as readonly string[]).includes(c.req.query('show') ?? '') ? (c.req.query('show') as Show) : 'all';
+  const per = PER_PAGE.includes(Number(c.req.query('per'))) ? Number(c.req.query('per')) : 25;
+  const found = q ? all.filter((i) => `${'name' in i ? i.name : ''} ${i.email}`.toLowerCase().includes(q)) : all;
+  const counts = Object.fromEntries(SHOW.map((s) => [s, found.filter((i) => inShow(i, s)).length]));
+  const match = found.filter((i) => inShow(i, show));
+  const pages = Math.max(1, Math.ceil(match.length / per));
+  const page = Math.min(pages, Math.max(1, Math.floor(Number(c.req.query('page')) || 1)));
   const now = await payNow(c.env, db);
-  return c.json({ users: list, invites: pending, registration: await registrationMode(c), payments: pay, stripe: now.ready, stripeMode: now.mode });
+  return c.json({ items: match.slice((page - 1) * per, page * per), total: match.length, page, per, pages, counts, registration: await registrationMode(c), payments: pay, stripe: now.ready, stripeMode: now.mode });
 });
 
 /** The invite email: the link, the code, and what they will pay (or that it is free). */
@@ -520,7 +551,23 @@ admin.put('/limits/users/:id', requireAdmin, async (c) => {
 
 const changedKeys = (a: Record<string, boolean>, b: Record<string, boolean>) => [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => (a[k] ?? true) !== (b[k] ?? true));
 
+// The audit log, newest first, one page at a time. Search matches the action or its details; a person narrows it to
+// what they did and what was done to their account.
 admin.get('/audit', requireAdmin, async (c) => {
-  const rows = await c.get('db').select().from(auditLog).orderBy(desc(auditLog.createdAt)).limit(200);
-  return c.json({ entries: rows });
+  const db = c.get('db');
+  const per = PER_PAGE.includes(Number(c.req.query('per'))) ? Number(c.req.query('per')) : 50;
+  const q = (c.req.query('q') ?? '').trim().slice(0, 100);
+  const like = `%${q.replace(/[\\%_]/g, (m) => '\\' + m)}%`;
+  const who = c.req.query('user') ?? '';
+  const person = /^[0-9a-f-]{36}$/i.test(who) ? (await db.select({ id: users.id, email: users.email, name: users.name }).from(users).where(eq(users.id, who)).limit(1))[0] : undefined;
+  const where = and(
+    q ? or(ilike(auditLog.action, like), sql`${auditLog.detail}::text ilike ${like}`) : undefined,
+    person ? or(eq(auditLog.userId, person.id), sql`${auditLog.detail}->>'target' = ${person.email}`, sql`${auditLog.detail}->>'email' = ${person.email}`) : undefined,
+  );
+  const total = Number((await db.select({ n: sql<number>`count(*)` }).from(auditLog).where(where))[0]?.n ?? 0);
+  const pages = Math.max(1, Math.ceil(total / per));
+  const page = Math.min(pages, Math.max(1, Math.floor(Number(c.req.query('page')) || 1)));
+  const rows = await db.select({ id: auditLog.id, action: auditLog.action, detail: auditLog.detail, createdAt: auditLog.createdAt, by: users.email, byName: users.name })
+    .from(auditLog).leftJoin(users, eq(users.id, auditLog.userId)).where(where).orderBy(desc(auditLog.createdAt)).limit(per).offset((page - 1) * per);
+  return c.json({ entries: rows, total, page, per, pages, person: person ? { id: person.id, label: person.name || person.email } : null });
 });

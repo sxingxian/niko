@@ -293,8 +293,8 @@ await ok('five wrong codes lock the invite, even for the right code', async () =
   assert.equal(x.status, 423); assert.equal(x.data.locked, true);
   x = await jun.post(`/auth/invite/${jToken}/code`, { code: jCode }); assert.equal(x.status, 423);
   assert.equal((await jun.get(`/auth/invite/${jToken}`)).data.locked, true);
-  const list = await admin.get('/admin/users');
-  assert.equal(list.data.invites.find((i) => i.email === 'jun@example.com').codeTries, 5);
+  const list = await admin.get('/admin/users?per=100');
+  assert.equal(list.data.items.filter((i) => i.kind === 'invite').find((i) => i.email === 'jun@example.com').codeTries, 5);
 });
 await ok('the admin sends a new code: the old link stops, the new code works, free time starts', async () => {
   const r = await admin.post(`/admin/invites/${jId}/code`);
@@ -369,7 +369,7 @@ await ok('a sign-up pays, then waits for the admin; sign-in is refused until the
   assert.ok(emails.slice(before).some((e) => e.to === 'alex@example.com' && /paid sign-up is waiting/.test(e.subject)));
   const signin = await new Browser().post('/auth/sign-in', { email: 'lee@example.com', password: PW });
   assert.equal(signin.status, 403);
-  const row = (await admin.get('/admin/users')).data.users.find((x) => x.email === 'lee@example.com');
+  const row = (await admin.get('/admin/users?per=100')).data.items.filter((i) => i.kind === 'user').find((x) => x.email === 'lee@example.com');
   assert.equal(row.signup.state, 'waiting'); assert.equal(row.signup.paid, true);
 });
 await ok('switching a paid sign-up on starts their 12 months and emails them', async () => {
@@ -620,15 +620,15 @@ await ok('after switching, a test payment is refunded and a test plan changed wi
   r = await jb.post('/billing/portal');
   assert.equal(r.status, 200); assert.equal(stripeCalls.at(-1).auth, 'Bearer sk_test_niko'); assert.equal(stripeCalls.at(-1).p.customer, 'cus_jun_test');
   assert.equal(stripeCalls.at(-1).p.configuration, 'bpc_test', 'the billing page settings Niko made');
-  const list = (await admin.get('/admin/users')).data;
+  const list = (await admin.get('/admin/users?per=100')).data;
   assert.equal(list.stripeMode, 'live');
-  assert.equal(list.users.find((x) => x.email === 'jun@example.com').sub.mode, 'test');
-  assert.equal(list.users.find((x) => x.email === 'liv@example.com').paidMode, 'live');
+  assert.equal(list.items.filter((i) => i.kind === 'user').find((x) => x.email === 'jun@example.com').sub.mode, 'test');
+  assert.equal(list.items.filter((i) => i.kind === 'user').find((x) => x.email === 'liv@example.com').paidMode, 'live');
 });
 
 await ok('the admin list shows each account’s payment state', async () => {
-  const r = await admin.get('/admin/users');
-  const by = Object.fromEntries(r.data.users.map((x) => [x.email, x]));
+  const r = await admin.get('/admin/users?per=100');
+  const by = Object.fromEntries(r.data.items.filter((i) => i.kind === 'user').map((x) => [x.email, x]));
   assert.equal(by['lee@example.com'].lifetime, true);
   assert.equal(by['priya@example.com'].accessKind, 'unlocked'); assert.ok(by['priya@example.com'].accessPaidUntil);
   assert.equal(by['nur@example.com'].access.kind, 'life');
@@ -677,9 +677,9 @@ await ok('changing plan prices: the admin chooses whether existing accounts keep
   assert.equal(await plansOf(kim), 'monthly:900,yearly:9000', 'an existing account keeps its plan prices');
   r = await kim.post('/billing/checkout', { plan: 'monthly' });
   assert.equal(r.status, 200); assert.equal(stripeCalls.at(-1).p['line_items[0][price_data][unit_amount]'], '900', 'and is charged them');
-  const row = (await admin.get('/admin/users')).data.users.find((x) => x.email === 'kim@example.com');
+  const row = (await admin.get('/admin/users?per=100')).data.items.filter((i) => i.kind === 'user').find((x) => x.email === 'kim@example.com');
   assert.deepEqual(row.keptPrices, [{ plan: 'monthly', cents: 900 }, { plan: 'yearly', cents: 9000 }], 'the admin sees the kept prices');
-  assert.equal((await admin.get('/admin/users')).data.users.find((x) => x.email === 'alex@example.com').keptPrices, null, 'admins keep nothing');
+  assert.equal((await admin.get('/admin/users?per=100')).data.items.filter((i) => i.kind === 'user').find((x) => x.email === 'alex@example.com').keptPrices, null, 'admins keep nothing');
   // A second change for new people only: Kim still keeps the first prices.
   r = await admin.put('/admin/payments', { settings: { ...cur, monthly: { on: true, cents: 1500 }, yearly: { on: false, cents: 12000 } }, pricesFor: 'new' });
   assert.equal(r.status, 200);
@@ -712,7 +712,7 @@ await ok('the admin gives one person their own plan prices, or puts them back on
   assert.equal(await plansOf(), 'monthly:650', 'only the plans given are offered, at their price');
   r = await kim.post('/billing/checkout', { plan: 'monthly' });
   assert.equal(stripeCalls.at(-1).p['line_items[0][price_data][unit_amount]'], '650', 'and charged');
-  const row = (await admin.get('/admin/users')).data.users.find((x) => x.email === 'kim@example.com');
+  const row = (await admin.get('/admin/users?per=100')).data.items.filter((i) => i.kind === 'user').find((x) => x.email === 'kim@example.com');
   assert.equal(row.pricesFrom, 'admin');
   assert.equal((await admin.put(`/admin/users/${k.id}/plan-prices`, { mode: 'own', monthly: null, yearly: null })).status, 400, 'at least one plan');
   assert.equal((await admin.put(`/admin/users/${k.id}/plan-prices`, { mode: 'own', monthly: 10, yearly: null })).status, 400, 'at least SGD 0.50');
@@ -743,6 +743,48 @@ await ok('the admin gives one person their own plan prices, or puts them back on
   const audits = await q("select detail from audit_log where action = 'plan_prices.user' order by created_at");
   assert.ok(audits.some((a) => a.detail.runningPlanFromNextRenewal === 'SGD 7.50') && audits.at(-1).detail.prices === 'default');
   await q("update users set sub_id = null, sub_status = null, sub_plan = null where id = $1", [k.id]);
+});
+
+await ok('the Users list is searched, filtered and paged on the server', async () => {
+  for (let i = 0; i < 30; i++) await q("insert into users (email, name, password_hash, status, role) values ($1, $2, 'x', $3, 'member')", [`page${String(i).padStart(2, '0')}@example.com`, `Pager ${i}`, i % 3 ? 'active' : 'off']);
+  let r = await admin.get('/admin/users?per=10');
+  assert.equal(r.status, 200); assert.equal(r.data.items.length, 10); assert.equal(r.data.page, 1); assert.ok(r.data.total > 30 && r.data.pages >= 4);
+  assert.equal(r.data.items[0].isOwner, true, 'the owner comes first');
+  const p2 = await admin.get('/admin/users?per=10&page=2');
+  assert.equal(new Set([...r.data.items, ...p2.data.items].map((i) => i.id)).size, 20, 'pages don’t overlap');
+  assert.equal((await admin.get('/admin/users?per=10&page=999')).data.page, r.data.pages, 'a page past the end shows the last page');
+  assert.equal((await admin.get('/admin/users?per=7')).data.per, 25, 'only the offered page sizes');
+  r = await admin.get('/admin/users?q=PAGER%201&per=100');
+  assert.ok(r.data.items.length >= 11 && r.data.items.every((i) => /pager 1/i.test(i.name)), 'search matches name or email, any case');
+  assert.equal((await admin.get('/admin/users?q=page05@example')).data.total, 1);
+  r = await admin.get('/admin/users?q=pager&show=off&per=100');
+  assert.equal(r.data.total, 10); assert.ok(r.data.items.every((i) => i.status === 'off'));
+  assert.equal(r.data.counts.all, 30, 'counts follow the search'); assert.equal(r.data.counts.off, 10); assert.equal(r.data.counts.active, 0, 'members with no paid time are not Active');
+  assert.equal(r.data.counts.ended, 20, 'they need a plan');
+  r = await admin.get('/admin/users?show=invited&per=100');
+  assert.ok(r.data.items.every((i) => i.kind === 'invite'));
+  r = await admin.get('/admin/users?show=own&per=100');
+  assert.ok(r.data.items.every((i) => i.keptPrices));
+  assert.notEqual((await new Browser().get('/admin/users')).status, 200, 'signed out: refused');
+  await q("delete from users where email like 'page%@example.com'");
+});
+
+await ok('the audit log is paged, searched, and narrowed to one person', async () => {
+  let r = await admin.get('/admin/audit?per=25');
+  assert.equal(r.status, 200); assert.equal(r.data.entries.length, Math.min(25, r.data.total)); assert.ok(r.data.total > 25, 'enough entries to page');
+  const p2 = await admin.get('/admin/audit?per=25&page=2');
+  assert.ok(Date.parse(p2.data.entries[0].createdAt) <= Date.parse(r.data.entries.at(-1).createdAt), 'newest first, page after page');
+  assert.equal((await admin.get('/admin/audit?per=3')).data.per, 50, 'only the offered page sizes');
+  r = await admin.get('/admin/audit?q=PLAN_PRICES&per=100');
+  assert.ok(r.data.total >= 1 && r.data.entries.every((e) => /plan_prices/.test(e.action) || /plan_prices/i.test(JSON.stringify(e.detail))));
+  r = await admin.get('/admin/audit?q=' + encodeURIComponent('%_') + '&per=100');
+  assert.equal(r.status, 200, 'wildcards in the search are taken literally');
+  const k = await user('kim@example.com');
+  r = await admin.get(`/admin/audit?user=${k.id}&per=100`);
+  assert.equal(r.data.person.label, 'Kim');
+  assert.ok(r.data.entries.length >= 1 && r.data.entries.every((e) => e.detail?.target === 'kim@example.com' || e.detail?.email === 'kim@example.com' || e.by === 'kim@example.com'), 'only what Kim did or was done to Kim');
+  assert.ok(r.data.entries.some((e) => e.action === 'plan_prices.user' && e.by === 'alex@example.com'), 'with who did it');
+  assert.equal((await admin.get('/admin/audit?user=not-an-id')).data.person, null);
 });
 
 await sqlc.end();
