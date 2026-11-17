@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { currentHue, spots, startCore, startRing, type CoreHandle, type CoreMode } from './core';
 import { runDesign } from './designs';
+export { sampleDesign } from './designs';
 
 export * from './core';
 

@@ -56,6 +56,7 @@ const reduced = () => typeof window !== 'undefined' && window.matchMedia('(prefe
 
 function Screens() {
   const loc = useLocation();
+  const { me } = useNiko();
   // The screen on display can lag the address for a moment: between Home and the workspace the old screen
   // fades out while the particles start to flow, then the new one is mounted and builds itself in.
   const [shown, setShown] = useState(loc);
@@ -119,7 +120,7 @@ function Screens() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       </div>
-      {flow && <FlowLayer key={flow.at} dir={flow.dir} loose={flow.loose} startedAt={flow.at} onDone={() => { setFlow(null); setSettled(groupNow.current); }} />}
+      {flow && <FlowLayer key={flow.at} dir={flow.dir} loose={flow.loose} startedAt={flow.at} design={me?.design} onDone={() => { setFlow(null); setSettled(groupNow.current); }} />}
       <HudSweep screen={group} skip={flowing} />
     </>
   );
