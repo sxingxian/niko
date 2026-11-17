@@ -185,7 +185,6 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
         <p className="sub" style={{ fontSize: 12, lineHeight: 1.5 }}>Turning a service off hides it from that person’s screens and the server refuses it, so a key they already saved stops being used. Their keys are kept, not deleted, and work again when you turn the service back on. Every change is written to the audit log.</p>
       </section>
     </div>
-    <KeysLibrary guard={guard} />
   </>;
 }
 
@@ -1096,7 +1095,6 @@ function KeysLibrary({ guard }: { guard: (e: unknown) => void }) {
   const load = useCallback(async () => { try { setLib((await api<{ keys: PKey[] }>('/admin/setup/keys')).keys); } catch (e) { guard(e); } }, [guard]);
   useEffect(() => { void load(); }, [load]);
   if (!lib) return null;
-  const names = Object.fromEntries(SETUP_TABS) as Record<UsageKind, string>;
   const replace = async () => {
     if (!replacing) return;
     try { await api(`/admin/setup/keys/${replacing.id}`, { method: 'PATCH', body: { apiKey: replacing.apiKey } }); setReplacing(null); setNote({ ok: true, text: 'Replaced. Everyone with it uses the new key now.' }); await load(); }
@@ -1106,20 +1104,27 @@ function KeysLibrary({ guard }: { guard: (e: unknown) => void }) {
     if (!window.confirm(`Remove “${x.label}”? It’s taken away from ${x.users + x.invites} ${x.users + x.invites === 1 ? 'person' : 'people'} straight away.`)) return;
     try { await api(`/admin/setup/keys/${x.id}`, { method: 'DELETE' }); setNote({ ok: true, text: `“${x.label}” was removed from everyone.` }); await load(); } catch (e) { guard(e); }
   };
-  return <section className="g card" aria-label="Keys you’ve added" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-    <h2 style={{ fontSize: 21, fontWeight: 500 }}>Keys you’ve added</h2>
-    <p className="sub" style={{ fontSize: 13 }}>Give them to people from Users → a person → Set up Niko. Keys are kept encrypted and never shown again.</p>
+  const byKind = SETUP_TABS.map(([k, label]) => [k, label, lib.filter((x) => x.kind === k)] as const).filter(([, , l]) => l.length);
+  return <>
+    <header><h1>Included keys</h1><p className="sub" style={{ fontSize: 15, maxWidth: 860 }}>Keys you’ve added to include services in people’s plans. Give them to people from Users → a person → Set up Niko. Each key is kept encrypted, never shown again, and only ever sent to its own service.</p></header>
     {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
-    {!lib.length && <p className="sub small">None yet.</p>}
-    {lib.map((x) => <div key={x.id} className="ai-row" style={{ flexWrap: 'wrap' }}>
-      <span className="ai-txt"><span>{x.label}</span><span className="sub">{names[x.kind]} · {serviceName(x.kind, x.info)} · ending {x.info.hint || '····'} · {x.users} {x.users === 1 ? 'person' : 'people'}{x.invites ? `, ${x.invites} invited` : ''}</span></span>
-      {replacing?.id === x.id ? <>
-        <label className="sr" htmlFor={`rk-${x.id}`}>New key for {x.label}</label>
-        <input id={`rk-${x.id}`} className="in" style={{ width: 240, height: 44 }} type="password" autoComplete="new-password" placeholder="Paste the new key" value={replacing.apiKey} onChange={(e) => setReplacing({ ...replacing, apiKey: e.target.value })} />
-        <button className="bt sm" onClick={() => setReplacing(null)}>Cancel</button><button className="bt sm fill" disabled={!replacing.apiKey.trim()} onClick={replace}>Test and replace</button>
-      </> : <><button className="lnk" onClick={() => setReplacing({ id: x.id, apiKey: '' })}>Replace key</button><button className="lnk" onClick={() => remove(x)}>Remove</button></>}
-    </div>)}
-  </section>;
+    <section className="g card keys-card" aria-label="Included keys">
+      {!lib.length && <div className="keys-empty"><b>No keys yet</b><span className="sub">Add one while setting up Niko for someone: Users → a person → Set up Niko → Add a service with your key.</span></div>}
+      {byKind.map(([k, label, list]) => <div key={k} className="keys-group">
+        <span className="k">{label}</span>
+        {list.map((x) => <div key={x.id} className="keys-row">
+          <span className="ai-txt"><span>{x.label}</span><span className="sub">{serviceName(x.kind, x.info)} · key ending {x.info.hint || '····'}</span></span>
+          <span className="keys-who sub">{x.users} {x.users === 1 ? 'person' : 'people'}{x.invites ? ` · ${x.invites} invited` : ''}</span>
+          {replacing?.id === x.id ? <span className="keys-acts">
+            <label className="sr" htmlFor={`rk-${x.id}`}>New key for {x.label}</label>
+            <input id={`rk-${x.id}`} className="in keys-in" type="password" autoComplete="new-password" placeholder="Paste the new key" value={replacing.apiKey} onChange={(e) => setReplacing({ ...replacing, apiKey: e.target.value })} />
+            <button className="bt sm" onClick={() => setReplacing(null)}>Cancel</button><button className="bt sm fill" disabled={!replacing.apiKey.trim()} onClick={replace}>Test and replace</button>
+          </span> : <span className="keys-acts"><button className="bt sm" onClick={() => setReplacing({ id: x.id, apiKey: '' })}>Replace key</button><button className="bt sm" onClick={() => remove(x)}>Remove</button></span>}
+        </div>)}
+      </div>)}
+    </section>
+    <p className="sub" style={{ fontSize: 13 }}>Replacing a key updates everyone who has it. Removing one takes it from everyone straight away; their own keys are untouched. Every change is written to the audit log.</p>
+  </>;
 }
 
 function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemove, onRevoke, onNewCode, onAudit, onSetup }: {
@@ -1343,7 +1348,7 @@ function AuditTab({ guard, person, onPerson }: { guard: (e: unknown) => void; pe
 }
 
 function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?: { name: string; email: string } | null }) {
-  const [tab, setTab] = useState<'users' | 'payments' | 'ai' | 'glance' | 'limits' | 'security' | 'audit'>('users');
+  const [tab, setTab] = useState<'users' | 'payments' | 'ai' | 'keys' | 'glance' | 'limits' | 'security' | 'audit'>('users');
   const [me, setMe] = useState<{ name: string; email: string } | null>(initialMe ?? null);
   const [auditFor, setAuditFor] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -1366,6 +1371,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
           <button className="nv" aria-current={tab === 'users' ? 'page' : undefined} onClick={() => setTab('users')}>Users</button>
           <button className="nv" aria-current={tab === 'payments' ? 'page' : undefined} onClick={() => setTab('payments')}>Payments</button>
           <button className="nv" aria-current={tab === 'ai' ? 'page' : undefined} onClick={() => setTab('ai')}>AI options</button>
+          <button className="nv" aria-current={tab === 'keys' ? 'page' : undefined} onClick={() => setTab('keys')}>Included keys</button>
           <button className="nv" aria-current={tab === 'glance' ? 'page' : undefined} onClick={() => setTab('glance')}>New items</button>
           <button className="nv" aria-current={tab === 'limits' ? 'page' : undefined} onClick={() => setTab('limits')}>Limits</button>
           <button className="nv" aria-current={tab === 'security' ? 'page' : undefined} onClick={() => setTab('security')}>Security</button>
@@ -1375,7 +1381,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
       </aside>
       <main key={tab} className="hud-in">
         {tab === 'users' ? <PeopleTab onSignedOut={onSignedOut} onOpenPayments={() => setTab('payments')} onAudit={(id) => { setAuditFor(id); setTab('audit'); }} />
- : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'security' ? <>
+ : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'keys' ? <KeysLibrary guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'security' ? <>
           <header><h1>Security</h1><p className="sub" style={{ fontSize: 15 }}>Your own admin sign-in: authenticator app and recovery codes.</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
           <div className="two">

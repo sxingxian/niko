@@ -297,3 +297,21 @@ body { background: #07090d; }
   .sheet .ai-row .gl-sel { flex: 1; max-width: none; }
   .dialog.sheet { padding: 22px 18px; }
 }
+
+/* Included keys */
+.keys-card { display: flex; flex-direction: column; gap: 18px; }
+.keys-group { display: flex; flex-direction: column; }
+.keys-group > .k { padding-bottom: 6px; }
+.keys-row { display: flex; align-items: center; gap: 14px; min-height: 64px; padding: 10px 0; border-top: 1px solid rgba(255,255,255,.1); }
+.keys-who { flex: none; font-size: 13px; min-width: 120px; text-align: right; }
+.keys-acts { display: flex; align-items: center; gap: 8px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+.keys-in { width: 240px; height: 40px; font-size: 14px; }
+.keys-empty { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; }
+.keys-empty b { font-weight: 500; font-size: 16px; }
+@media (max-width: 760px) {
+  .keys-row { flex-wrap: wrap; }
+  .keys-row .ai-txt { flex-basis: 100%; }
+  .keys-who { text-align: left; min-width: 0; flex: 1; }
+  .keys-acts:has(.keys-in) { flex: 1 1 100%; justify-content: flex-end; }
+  .keys-in { width: 100%; flex: 1 1 100%; }
+}
