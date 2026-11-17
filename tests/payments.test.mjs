@@ -53,11 +53,17 @@ const unflat = (params) => {
   }
   return out;
 };
+const mapCalls = [];
 globalThis.fetch = async (input, init = {}) => {
   // Like Cloudflare Workers: redirect must be 'follow' or 'manual'.
   if (init.redirect && !['follow', 'manual'].includes(init.redirect)) throw new TypeError(`Invalid redirect value, must be one of "follow" or "manual"`);
   const u = new URL(String(input));
   if (u.hostname === 'api.resend.com') { const b = JSON.parse(init.body); emails.push({ to: b.to[0], subject: b.subject, html: b.html }); return Response.json({ id: 'em_' + emails.length }); }
+  if (u.hostname === 'api.mapbox.com') {
+    mapCalls.push(String(input));
+    if (u.pathname.startsWith('/search/geocode/v6/')) return Response.json({ features: [{ properties: { name: 'Marina Bay Sands' }, geometry: { coordinates: [103.8607, 1.2834] } }] });
+    return Response.json({ code: 'Ok', routes: [{ duration: 900, distance: 7000, geometry: { coordinates: [[103.82, 1.35], [103.8607, 1.2834]] }, legs: [{ steps: [{ maneuver: { instruction: 'Head south' }, distance: 7000 }] }] }] });
+  }
   if (u.hostname !== 'api.stripe.com') throw new Error('unexpected fetch ' + u);
   const method = init.method ?? 'GET';
   const params = new URLSearchParams(method === 'GET' ? u.search.slice(1) : init.body ?? '');
@@ -785,6 +791,39 @@ await ok('the audit log is paged, searched, and narrowed to one person', async (
   assert.ok(r.data.entries.length >= 1 && r.data.entries.every((e) => e.detail?.target === 'kim@example.com' || e.detail?.email === 'kim@example.com' || e.by === 'kim@example.com'), 'only what Kim did or was done to Kim');
   assert.ok(r.data.entries.some((e) => e.action === 'plan_prices.user' && e.by === 'alex@example.com'), 'with who did it');
   assert.equal((await admin.get('/admin/audit?user=not-an-id')).data.person, null);
+});
+
+await ok('maps: a key is saved encrypted and never shown again; routes come back without it; lists only name saved services', async () => {
+  const b = new Browser();
+  assert.equal((await b.post('/auth/sign-in', { email: 'jun@example.com', password: 'a brand new long passphrase 42' })).status, 200);
+  let r = await b.post('/map/keys', { provider: 'mapbox', apiKey: 'pk.MAPBOX-SECRET-123' });
+  assert.equal(r.status, 200); assert.equal(r.data.key.label, 'Mapbox'); assert.ok(!JSON.stringify(r.data).includes('MAPBOX-SECRET'));
+  const id = r.data.key.id;
+  const row = (await q("select secret_enc from connections where provider = 'map-keys'"))[0];
+  assert.ok(row && !String(row.secret_enc).includes('MAPBOX-SECRET'), 'stored encrypted');
+  let me = await b.get('/me');
+  assert.deepEqual(me.data.engine.maps, [`mkey:${id}`, 'osm'], 'a new service goes into the Everywhere list');
+  r = await b.get('/map/keys');
+  assert.ok(!JSON.stringify(r.data).includes('MAPBOX-SECRET'));
+  // Lists may only name saved services and the built-in map.
+  r = await b.patch('/me', { engine: { maps: ['mkey:nothere', `mkey:${id}`, 'osm'], mapCountries: { SG: [`mkey:${id}`, 'mkey:zz'], sg: ['osm'], XYZ: ['osm'] } } });
+  me = await b.get('/me');
+  assert.deepEqual(me.data.engine.maps, [`mkey:${id}`, 'osm']); assert.deepEqual(me.data.engine.mapCountries, { SG: [`mkey:${id}`] });
+  // A saved key is only reused for the same service.
+  r = await b.post('/map/keys', { id, provider: 'google' });
+  assert.equal(r.status, 400, 'changing the service needs the key again');
+  r = await b.post('/maps/route', { to: 'Marina Bay Sands', mode: 'drive', here: { lat: 1.35, lng: 103.82 }, country: 'auto' });
+  assert.equal(r.status, 200); assert.equal(r.data.route.seconds, 900); assert.equal(r.data.country.code, 'SG');
+  assert.ok(!JSON.stringify(r.data).includes('MAPBOX-SECRET'));
+  assert.ok(mapCalls.every((c) => c.includes('access_token=pk.MAPBOX-SECRET-123')), 'the key went only to Mapbox');
+  const log = await q("select detail from audit_log where action like 'map-key.%'");
+  assert.ok(log.length >= 1 && !JSON.stringify(log).includes('MAPBOX-SECRET'), 'audited without the key');
+  assert.ok(!JSON.stringify(await q('select detail from audit_log')).includes('103.82'), 'the location is not logged');
+  assert.equal((await b.post('/maps/route', { to: 'x' })).status, 400);
+  assert.equal((await new Browser().post('/maps/route', { to: 'Marina Bay' })).status, 401, 'signed out: refused');
+  r = await b.del(`/map/keys/${id}`);
+  me = await b.get('/me');
+  assert.deepEqual(me.data.engine.maps, ['osm']); assert.deepEqual(me.data.engine.mapCountries, { SG: [] });
 });
 
 await sqlc.end();

@@ -9,6 +9,7 @@ import { useNiko } from '../niko';
 import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
 import { isStacked } from '../flow';
 import { PictureCard } from './Picture';
+import { MapCard } from './Map';
 import { GlanceStack } from './Glance';
 import { toggleFullscreen, useFullscreen } from '../fullscreen';
 import type { Brief, BriefPart, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
@@ -126,7 +127,8 @@ export function Home() {
   const [typing, setTyping] = useState(false);
   const [text, setText] = useState('');
   const pic = n.picture;
-  const open = !!n.reply || !!pic;
+  const mapv = n.map;
+  const open = !!n.reply || !!pic || !!mapv;
   // Keep the last answer on screen while its cards close.
   const [shown, setShown] = useState<{ reply: string; chat: Brief['chats'][number] | null; id: number } | null>(null);
   const [closing, setClosing] = useState(false);
@@ -148,9 +150,10 @@ export function Home() {
   const submit = (e: FormEvent) => { e.preventDefault(); const t = text; setText(''); setTyping(false); void n.ask(t); };
   const cards = shown ? (shown.chat ? 2 : 1) : 0;
   // The caption moves aside for a picture too.
-  useEffect(() => { if (wide && pic && !n.reply) setCaption('aside'); else if (wide && !pic && !n.reply && !shown) setCaption((c) => (c === 'aside' ? 'back' : c)); }, [!!pic]); // eslint-disable-line react-hooks/exhaustive-deps
+  const card = !!pic || !!mapv;
+  useEffect(() => { if (wide && card && !n.reply) setCaption('aside'); else if (wide && !card && !n.reply && !shown) setCaption((c) => (c === 'aside' ? 'back' : c)); }, [card]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
-    <div className={'home' + (open ? ' open' : '') + (closing && !pic ? ' closing' : '') + (pic ? ' picture' : '')}>
+    <div className={'home' + (open ? ' open' : '') + (closing && !card ? ' closing' : '') + (pic ? ' picture' : '') + (mapv ? ' mapping' : '')}>
       <div className="bg" />
       <div className="stage">
         <ParticleCore size="var(--s)" mode={n.mode} pad={wide ? 220 : 0} shift={wide && open ? -200 : 0} spot="home" />
@@ -173,8 +176,15 @@ export function Home() {
       </div>
       <Dock className={'dock' + (nav ? ' show' : '')} />
       <GlanceStack wide={wide} />
-      {wide && !pic && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}
-      {pic ? (
+      {wide && !card && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}
+      {mapv ? (
+        <aside className="panels mapp" aria-label="Map" key="map">
+          <div className="card-build" style={{ ['--d' as string]: '0s' }}>
+            <MapCard v={mapv} tabbable />
+            <Outline />
+          </div>
+        </aside>
+      ) : pic ? (
         <aside className="panels pic" aria-label="Niko’s picture" key="picture">
           <div className="card-build" style={{ ['--d' as string]: '0s' }}>
             <PictureCard pic={pic} tabbable />

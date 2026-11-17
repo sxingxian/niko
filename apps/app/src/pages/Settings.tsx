@@ -14,6 +14,7 @@ import { HEAR_PROVIDERS, hearOrder, hearPresetOf, MAX_HEAR_KEYS, type HearKeyInf
 import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, PAGE_SIZES, VOICE_NAMES, VOICE_PROVIDERS, VOICE_SOURCES, voiceName, voiceOrder, voicePresetOf, WORKERS_VOICES, type VoiceKeyInfo, type VoiceProvider, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
 import { api, Field, Icon, PasswordField, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
+import { MapSettings, type MapLists } from './MapSettings';
 import { captureSupported, captureUtterance, transcribe, type Capture } from '../listen';
 
 function useMedia(q: string) {
@@ -601,7 +602,7 @@ function moveShown<T>(order: T[], shown: T[], v: T, by: -1 | 1): T[] {
   return next;
 }
 /** Whether the admin has turned anything off in this group, for the small note under its list. */
-const managedIn = (off: readonly string[], group: 'brain' | 'images' | 'voices' | 'hears') => { const g = AI_OPTION_GROUPS.find((x) => x.id === group)!; return g.items.some((i) => off.includes(i.key)); };
+const managedIn = (off: readonly string[], group: 'brain' | 'images' | 'maps' | 'voices' | 'hears') => { const g = AI_OPTION_GROUPS.find((x) => x.id === group)!; return g.items.some((i) => off.includes(i.key)); };
 const MANAGED = 'Some options are managed by your administrator.';
 
 type ImageDraft = ImageKeyInfo & { apiKey: string; saved: boolean };
@@ -633,6 +634,7 @@ export function Engine() {
   const [iOpen, setIOpen] = useState<ImageSource | null>(null);
   const [sample, setSample] = useState<{ entry: ImageSource; url: string } | null>(null);
   const [iSelf, setISelf] = useState({ baseUrl: '', model: '', apiKey: '' });
+  const mapLists = useRef<MapLists | null>(null);
   const loadKeys = useCallback(async () => {
     const r = await api<{ keys: AiKeyInfo[] }>('/engine/keys');
     setKeys((cur) => [...(r.keys ?? []).map((k) => ({ ...k, apiKey: '', saved: true })), ...cur.filter((k) => isNew(k.id))]);
@@ -725,7 +727,9 @@ export function Engine() {
       setDirty((d) => Object.fromEntries(Object.entries(d).filter(([k]) => !iSaved.has(k))));
       if (dirty.iself && iSelf.baseUrl.trim()) await api('/connections/self-hosted-image', { body: iSelf });
       if (iNext.includes('self-hosted') && okImage('self-hosted') && !linked['self-hosted-image'] && !iSelf.baseUrl.trim()) throw new Error('Add your image server’s address, or switch it off.');
-      await api('/me', { method: 'PATCH', body: { engine: { brains: next, model: e.model, images: iNext } } });
+      const ml = mapLists.current;
+      await api('/me', { method: 'PATCH', body: { engine: { brains: next, model: e.model, images: iNext, ...(ml?.dirty ? { maps: ml.maps, mapCountries: ml.mapCountries } : {}) } } });
+      ml?.saved();
       setISelf((v) => ({ ...v, apiKey: '' }));
       setDirty({});
       setOpen((o) => (o && isNew(o.slice(4)) ? null : o));
@@ -979,6 +983,7 @@ export function Engine() {
         </>}
         {managedIn(off, 'images') && <p className="hint managed">{MANAGED}</p>}
       </section> : null}
+      <MapSettings bind={(l) => { mapLists.current = l; }} />
       <p className="g eng-keys"><Icon name="shield" size={20} />Keys are encrypted on the server, never stored in this browser, and never shown again after saving. Several keys from the same provider and account share one usage limit, so a second key helps most when it is from another account or provider. The voice is set under Voice.</p>
     </SettingsPage>
   );

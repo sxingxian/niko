@@ -11,6 +11,7 @@
   "dependencies": {
     "@niko/db": "*",
     "@niko/shared": "*",
+    "@rapideditor/country-coder": "6.0.0",
     "@simplewebauthn/server": "^13.0.0",
     "drizzle-orm": "^0.45.4",
     "hono": "^4.6.0",

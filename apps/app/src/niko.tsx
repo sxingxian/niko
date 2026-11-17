@@ -1,8 +1,8 @@
 // Shared Niko state: who is signed in, and the voice loop (wake word, commands, speech).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { aiAllowed, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, type Brief, type EnginePrefs, type Me, type VoiceSource } from '@niko/shared';
-import { isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMoveTags, takeScreenTag } from './speech';
+import { aiAllowed, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource } from '@niko/shared';
+import { countryCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
@@ -16,6 +16,40 @@ export interface PictureItem {
   url?: string; type?: string; label?: string; ms?: number; error?: string;
 }
 const MAX_PICTURES = 8;
+
+/** The map on Home. The location used for it stays in this page's memory for a few minutes and is never stored. */
+export interface MapView {
+  id: number; to: string; from?: string; mode: MapMode | 'place';
+  /** explain: Niko says why it asks for the location, before the browser asks. */
+  status: 'explain' | 'loading' | 'done' | 'failed';
+  result?: MapResult; error?: string;
+  /** Times found so far for each way of travelling, for the tabs. */
+  times: Partial<Record<MapMode, number>>;
+  /** Whether the location was used: yes, no (refused or unavailable). */
+  located: boolean;
+}
+/** Which country's map services: from the location ('auto'), the Worldwide list ('ww'), or one the person said. */
+export type MapCountry = 'auto' | 'ww' | string;
+const MODE_KEY = 'niko.mapMode';
+const lastMode = (): MapMode => { try { const m = localStorage.getItem(MODE_KEY) as MapMode | null; return m && MAP_MODES.includes(m) ? m : 'drive'; } catch { return 'drive'; } };
+const keepMode = (m: MapMode) => { try { localStorage.setItem(MODE_KEY, m); } catch { /* private mode */ } };
+/** This device's location for a route's start (to about 10 m), if the browser has it or the user allows it now. */
+function whereExactly(): Promise<{ lat: number; lng: number } | undefined> {
+  if (!('geolocation' in navigator)) return Promise.resolve(undefined);
+  return new Promise((done) => {
+    const r4 = (v: number) => Math.round(v * 10000) / 10000;
+    const stop = window.setTimeout(() => done(undefined), 12000);
+    navigator.geolocation.getCurrentPosition(
+      (p) => { window.clearTimeout(stop); done({ lat: r4(p.coords.latitude), lng: r4(p.coords.longitude) }); },
+      () => { window.clearTimeout(stop); done(undefined); },
+      { enableHighAccuracy: false, maximumAge: 60_000, timeout: 11000 },
+    );
+  });
+}
+async function locationPermission(): Promise<PermissionState | 'unknown'> {
+  try { return (await navigator.permissions.query({ name: 'geolocation' as PermissionName })).state; } catch { return 'unknown'; }
+}
+const MODE_WORDS: Record<MapMode, string> = { drive: 'by car', transit: 'by public transport', walk: 'on foot', cycle: 'by bike' };
 
 interface NikoState {
   me: Me | null | undefined; // undefined while loading
@@ -60,6 +94,15 @@ interface NikoState {
   paintPicture: (prompt: string, shape: PictureItem['shape'], more?: boolean) => void;
   showPicture: (id: number) => void;
   closePicture: () => void;
+  /** The map on Home, and what can be changed on it. */
+  map: MapView | null;
+  mapCountry: MapCountry;
+  showMap: (to: string, from?: string, how?: MapMode | 'place' | 'any') => void;
+  setMapMode: (m: MapMode) => void;
+  setMapCountry: (c: MapCountry) => void;
+  /** The answer to Niko's question about the location: allow (the browser then asks) or use Worldwide. */
+  answerLocation: (allow: boolean) => void;
+  closeMap: () => void;
 }
 
 const Ctx = createContext<NikoState>(null as never);
@@ -162,6 +205,16 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [voiceProblem, setVoiceProblem] = useState<string | null>(null);
   const [pendingOpen, setPendingOpen] = useState<NikoState['pendingOpen']>(null);
   const [pictures, setPictures] = useState<PictureItem[]>([]);
+  const [map, setMap] = useState<MapView | null>(null);
+  const mapRef = useRef<MapView | null>(null);
+  const [mapCountry, setMapCountryState] = useState<MapCountry>('auto');
+  const mapCountryRef = useRef<MapCountry>('auto');
+  /** The location for maps, for a few minutes; refused: the person said no in this visit, so Niko doesn't ask again. */
+  const mapHere = useRef<{ lat: number; lng: number; at: number } | null>(null);
+  const mapRefused = useRef(false);
+  const mapCtl = useRef<AbortController | null>(null);
+  const mapSeq = useRef(0);
+  const locationWait = useRef<((allow: boolean) => void) | null>(null);
   const [pictureId, setPictureId] = useState<number | null>(null);
   const picturesRef = useRef<PictureItem[]>([]);
   const picSeq = useRef(0);
@@ -374,10 +427,21 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 900);
       return;
     }
-    // 3. Changing screen by voice: "switch to calendar", "can you open my notes", "back to home", "go back".
+    // 3. Which country's maps: "I'm in Korea", "use worldwide". Lasts for this visit.
+    const cc = countryCommand(text);
+    if (cc) {
+      setMapCountryFn(cc);
+      const listed = cc !== 'ww' && !!meRef.current?.engine.mapCountries?.[cc]?.length;
+      const name = cc === 'ww' ? '' : (() => { try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(cc) ?? cc; } catch { return cc; } })();
+      setMode('speaking'); setLabel('Heard');
+      setLine(cc === 'ww' ? 'Using the Worldwide map services.' : listed ? `Using the map services for ${name}.` : `${name} has no list of its own, so I’ll use the Worldwide map services.`);
+      window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 1400);
+      return;
+    }
+    // 4. Changing screen by voice: "switch to calendar", "can you open my notes", "back to home", "go back".
     const screen = screenFor(text);
     if (screen) { goTo(screen); return; }
-    // 4. Everything else goes to the brain.
+    // 5. Everything else goes to the brain.
     return askAI(text);
   }, [navigate, idle, say, goTo, listenForFollowUp, SR]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -398,12 +462,22 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // …or to scroll ([[scroll:down]]) or turn the list's page ([[page:next]]), which this screen then does.
       const { text: noMove, scroll, page } = takeMoveTags(noItem);
       // …or a picture ([[image:<prompt>]]), which is painted on Home while Niko says what it is making.
-      const { text: answer, image } = takeImageTag(noMove);
+      const { text: noImage, image } = takeImageTag(noMove);
+      // …or a map ([[map:transit|Changi Airport]]), which shows on Home.
+      const { text: answer, map: wantMap } = takeMapTag(noImage);
       if (last.current?.question === text) last.current.answer = answer;
       // Stopped while Niko was thinking (or a newer question came): keep the answer for "continue", don't speak it.
       if (mine !== askId.current) { if (last.current?.question === text) setResumable({ canContinue: true }); return; }
       setBrief(r.brief);
+      if (wantMap) {
+        if (wantMap.to.toLowerCase() === 'same' && mapRef.current) { say(answer || 'Changing the route.', 0); if (wantMap.how !== 'any' && wantMap.how !== 'place') setMapModeFn(wantMap.how); return; }
+        say(answer || 'Here’s the map.', 0);
+        if (here.current !== '/') navigate('/');
+        showMapFn(wantMap.to, wantMap.from, wantMap.how);
+        return;
+      }
       if (image) {
+        mapCtl.current?.abort(); mapRef.current = null; setMap(null);
         say(answer || 'Painting that now.', 0);
         if (here.current !== '/') navigate('/');
         paintPicture(image.prompt, image.shape);
@@ -423,6 +497,100 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   };
   askRef.current = (t: string) => { void ask(t); };
 
+  /** Finds the place and the route (the server goes down the Engine screen's map lists), and shows them on Home. */
+  const loadMap = (v: MapView) => {
+    mapCtl.current?.abort();
+    const ctl = new AbortController();
+    mapCtl.current = ctl;
+    const asked = askId.current;
+    const set = (fn: (m: MapView) => MapView) => { if (mapRef.current?.id !== v.id) return; const next = fn(mapRef.current); mapRef.current = next; setMap(next); };
+    const tell = (text: string) => {
+      const until = Date.now() + 10_000;
+      const go = () => {
+        if (askId.current !== asked || mapRef.current?.id !== v.id) return;
+        // Never cuts Niko off: if it is still talking after a while, the card says it instead.
+        if (speaking.current) { if (Date.now() < until) window.setTimeout(go, 300); return; }
+        say(text);
+      };
+      go();
+    };
+    void (async () => {
+      try {
+        // The location: asked for once per visit (after Niko says why); never kept beyond a few minutes in memory.
+        let here: { lat: number; lng: number } | undefined;
+        const fresh = mapHere.current && Date.now() - mapHere.current.at < 5 * 60_000 ? mapHere.current : null;
+        if (fresh) here = { lat: fresh.lat, lng: fresh.lng };
+        else if (!mapRefused.current) {
+          const state = await locationPermission();
+          if (state === 'denied') mapRefused.current = true;
+          else {
+            if (state !== 'granted') {
+              set((m) => ({ ...m, status: 'explain' }));
+              tell('To use the right maps for the country you’re in, I’ll ask your browser for your location. It’s used for this request only.');
+              const allow = await new Promise<boolean>((done) => {
+                locationWait.current = done;
+                // If they say nothing, the browser asks once Niko has explained.
+                const t0 = Date.now();
+                const tick = () => {
+                  if (locationWait.current !== done) return;
+                  const t = Date.now() - t0;
+                  if (t < 3500 || (speaking.current && t < 12_000)) { window.setTimeout(tick, 300); return; }
+                  locationWait.current = null; done(true);
+                };
+                window.setTimeout(tick, 300);
+              });
+              if (ctl.signal.aborted) return;
+              if (!allow) mapRefused.current = true;
+              set((m) => ({ ...m, status: 'loading' }));
+            }
+            if (!mapRefused.current) {
+              here = await whereExactly();
+              if (here) mapHere.current = { ...here, at: Date.now() };
+              else if ((await locationPermission()) === 'denied') mapRefused.current = true;
+            }
+          }
+        }
+        if (ctl.signal.aborted) return;
+        const r = await fetch('/api/maps/route', { method: 'POST', credentials: 'same-origin', signal: ctl.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: v.to, from: v.from, mode: v.mode, here, country: mapCountryRef.current }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error ?? 'The map couldn’t be shown just now.');
+        const res = j as MapResult;
+        set((m) => ({ ...m, status: 'done', result: res, error: undefined, located: !!here, times: res.route ? { ...m.times, [res.route.mode]: res.route.seconds } : m.times }));
+        if (res.route) tell(`About ${minutesText(res.route.seconds).replace(' h', ' hours').replace(' min', ' minutes')} ${MODE_WORDS[res.route.mode]}.`);
+        else if (res.noRoute && v.mode !== 'place') tell(here || v.from ? 'I found it, but no route this way. You can open it in a maps app.' : 'Here it is. Allow your location to see the way there.');
+      } catch (e: any) {
+        if (ctl.signal.aborted) return;
+        set((m) => ({ ...m, status: 'failed', error: String(e?.message ?? 'The map couldn’t be shown just now.') }));
+        tell('I couldn’t find that on the map.');
+      } finally {
+        if (mapCtl.current === ctl) mapCtl.current = null;
+      }
+    })();
+  };
+  const showMapFn = (to: string, from?: string, how: MapMode | 'place' | 'any' = 'any') => {
+    picCtl.current?.abort(); setPictureId(null); setReply(null);
+    const v: MapView = { id: ++mapSeq.current, to, from, mode: how === 'any' ? lastMode() : how, status: 'loading', times: {}, located: false };
+    mapRef.current = v; setMap(v);
+    loadMap(v);
+  };
+  const setMapModeFn = (mode: MapMode) => {
+    keepMode(mode);
+    const cur = mapRef.current;
+    if (!cur) return;
+    const v: MapView = { ...cur, id: ++mapSeq.current, mode, status: 'loading' };
+    mapRef.current = v; setMap(v);
+    loadMap(v);
+  };
+  const setMapCountryFn = (c: MapCountry) => {
+    mapCountryRef.current = c; setMapCountryState(c);
+    const cur = mapRef.current;
+    if (!cur) return;
+    const v: MapView = { ...cur, id: ++mapSeq.current, status: 'loading', times: {} };
+    mapRef.current = v; setMap(v);
+    loadMap(v);
+  };
+  const closeMapFn = () => { mapCtl.current?.abort(); mapCtl.current = null; locationWait.current?.(false); locationWait.current = null; mapRef.current = null; setMap(null); };
+
   /** Paints a picture with the first image service that will (the server goes down the Engine screen's order). */
   const paintPicture = (prompt: string, shape: PictureItem['shape'], more = false) => {
     picCtl.current?.abort();
@@ -431,6 +599,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     const id = ++picSeq.current;
     updatePictures((p) => [...p, { id, prompt, shape, status: 'painting', started: Date.now() }]);
     setPictureId(id); setReply(null);
+    mapCtl.current?.abort(); mapRef.current = null; setMap(null);
     const asked = askId.current;
     if (more) { setMode('thinking'); setLabel('Painting'); setLine('Another one like this…'); }
     const timer = window.setTimeout(() => ctl.abort(), 150_000);
@@ -533,6 +702,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     askId.current++; // an answer still on its way is kept for "continue", not spoken
     stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; active.current = false; unmuteMic();
     if (picCtl.current) { const c = picCtl.current; picCtl.current = null; c.abort(); }
+    if (locationWait.current) { const w = locationWait.current; locationWait.current = null; w(false); }
     const l = last.current;
     if (l && (thinking || (l.answer && l.from < l.answer.length))) {
       if (thinking) setResumable({ canContinue: true });
@@ -558,12 +728,18 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     pictures,
     picture: pictures.find((x) => x.id === pictureId) ?? null,
     paintPicture,
-    showPicture: (id: number) => { setReply(null); setPictureId(id); },
+    showPicture: (id: number) => { setReply(null); mapCtl.current?.abort(); mapRef.current = null; setMap(null); setPictureId(id); },
     closePicture: () => setPictureId(null),
+    map, mapCountry,
+    showMap: showMapFn,
+    setMapMode: setMapModeFn,
+    setMapCountry: setMapCountryFn,
+    answerLocation: (allow: boolean) => { const w = locationWait.current; locationWait.current = null; w?.(allow); },
+    closeMap: closeMapFn,
     resumable,
     resume: () => { void ask('continue'); },
     retry: () => { void ask('try again'); },
-  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

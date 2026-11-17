@@ -1,6 +1,8 @@
 // Shared constants and types for the Niko API and front ends.
 import type { AccessInfo } from './billing';
 export * from './billing';
+export * from './maps';
+import { MAP_PROVIDERS, mapPreset, type MapProvider, type MapSource } from './maps';
 
 export type ProviderGroup = 'mail' | 'calendar' | 'notes' | 'automation' | 'messaging' | 'weather' | 'ai';
 export type ConnectKind = 'oauth' | 'credentials' | 'token' | 'webhook' | 'builtin' | 'planned';
@@ -318,6 +320,11 @@ export interface EnginePrefs {
   /** Image services to try, in order. Empty: pictures are switched off. */
   images?: ImageSource[];
   imageRest?: Record<string, BrainRest>;
+  /** Map services to try, in order, everywhere ("osm" is the built-in OpenStreetMap map). */
+  maps?: MapSource[];
+  /** Countries with their own map service lists (ISO 3166 two-letter codes), tried before the Everywhere list there. */
+  mapCountries?: Record<string, MapSource[]>;
+  mapRest?: Record<string, BrainRest>;
   workersVoice?: string;
   kokoroVoice?: string;
   wake: boolean; onlyMyVoice: boolean; fallback: boolean; listen: 'device';
@@ -353,7 +360,7 @@ export interface Permissions { draft: boolean; chatReply: boolean; files: boolea
 // default) and can change that for any one account. Options that are off are hidden from that account's screens and
 // refused by the server; keys already saved for them are kept and skipped. Admins always have every option.
 // The device's own voice and speech recognition are never listed: they are the last resort and always on.
-export interface AiOptionGroup { id: 'brain' | 'images' | 'voices' | 'hears'; name: string; where: string; section?: string; items: { key: string; name: string; sub: string }[] }
+export interface AiOptionGroup { id: 'brain' | 'images' | 'maps' | 'voices' | 'hears'; name: string; where: string; section?: string; items: { key: string; name: string; sub: string }[] }
 const BUILTIN = 'Built in · free daily allowance', THEIRS = 'Their API key', SERVER = 'A server they run';
 export const AI_OPTION_GROUPS: AiOptionGroup[] = [
   { id: 'brain', name: 'Brain', where: 'Engine screen', items: [
@@ -362,6 +369,9 @@ export const AI_OPTION_GROUPS: AiOptionGroup[] = [
   { id: 'images', name: 'Pictures', where: 'Engine screen', section: 'sec:images', items: [
     { key: 'img:workers', name: 'Cloudflare FLUX', sub: BUILTIN }, { key: 'img:self-hosted', name: 'Their own image server', sub: SERVER },
     ...IMAGE_PROVIDERS.map((p) => ({ key: `img:${p.id}`, name: p.name, sub: p.id === 'other' ? 'Any address they enter' : THEIRS })) ] },
+  { id: 'maps', name: 'Maps', where: 'Engine screen', section: 'sec:maps', items: [
+    { key: 'map:osm', name: 'OpenStreetMap', sub: 'Built in · no key' },
+    ...MAP_PROVIDERS.map((p) => ({ key: `map:${p.id}`, name: p.name, sub: p.id === 'self-hosted' ? SERVER : THEIRS })) ] },
   { id: 'voices', name: 'Speech out', where: 'Voice screen', section: 'sec:voices', items: [
     { key: 'v:workers', name: 'Cloudflare voice', sub: BUILTIN }, { key: 'v:kokoro', name: 'On-device voice', sub: 'Runs on their device' }, { key: 'v:self-hosted', name: 'Their own voice server', sub: SERVER },
     ...VOICE_PROVIDERS.map((p) => ({ key: `v:${p.id}`, name: p.name, sub: p.id === 'other' ? 'Any address they enter' : THEIRS })) ] },
@@ -392,6 +402,7 @@ export const aiHasBrain = (off: readonly string[]) => AI_OPTION_GROUPS[0]!.items
 /** Which option a brain, image, voice or speech-in entry belongs to; keys go by the service they were saved for. */
 export const brainOption = (entry: string, baseUrl?: string) => (entry === 'workers-ai' || entry === 'self-hosted-ai' ? entry : `ai:${presetOf(baseUrl ?? '')}`);
 export const imageOption = (entry: string, k?: { provider: ImageProvider; baseUrl: string }) => (entry === 'workers' || entry === 'self-hosted' ? `img:${entry}` : `img:${k ? imagePresetOf(k) : 'other'}`);
+export const mapOption = (entry: string, k?: { provider: MapProvider }) => (entry === 'osm' ? 'map:osm' : `map:${k && mapPreset(k.provider) ? k.provider : 'self-hosted'}`);
 export const voiceOption = (entry: string, k?: { provider: VoiceProvider; baseUrl: string }) => (entry === 'workers' || entry === 'kokoro' || entry === 'self-hosted' ? `v:${entry}` : `v:${k ? voicePresetOf(k) : 'other'}`);
 export const hearOption = (entry: string, k?: { provider: HearProvider; baseUrl: string }) => (entry === 'workers' || entry === 'self-hosted' ? `h:${entry}` : `h:${k ? hearPresetOf(k) : 'other'}`);
 

@@ -236,3 +236,65 @@ export function pictureCommand(raw: string): 'save' | 'share' | 'more' | 'close'
   if (new RegExp(`^(?:close|hide|dismiss|put away)(?: ${it})?$`).test(t)) return 'close';
   return null;
 }
+
+// ---- Maps
+type MapHow = 'drive' | 'transit' | 'walk' | 'cycle' | 'place';
+/** The AI asks for a map by ending its reply with [[map:<how>|<destination>]] or [[map:<how>|<destination>|<start>]];
+ * [[map:<how>|same]] changes how to travel on the map already showing. */
+export function takeMapTag(reply: string): { text: string; map: { how: MapHow | 'any'; to: string; from?: string } | null } {
+  const m = /\[\[\s*map\s*:\s*([a-z]+)\s*\|\s*([^|\]]{1,200}?)\s*(?:\|\s*([^\]]{1,200}?)\s*)?\]\]/i.exec(reply);
+  const text = reply.replace(/\s*\[\[\s*map\s*:[^\]]*\]\]\s*/gi, ' ').replace(/\s+/g, ' ').trim();
+  if (!m) return { text, map: null };
+  const h = m[1]!.toLowerCase();
+  const how: MapHow | 'any' = h === 'car' || h === 'driving' ? 'drive' : h === 'train' || h === 'bus' || h === 'public' ? 'transit' : h === 'walking' || h === 'foot' ? 'walk' : h === 'bike' || h === 'cycling' ? 'cycle'
+    : (['drive', 'transit', 'walk', 'cycle', 'place'] as string[]).includes(h) ? h as MapHow : 'any';
+  const to = m[2]!.replace(/\s+/g, ' ').trim(), from = m[3]?.replace(/\s+/g, ' ').trim();
+  return to.length >= 2 ? { text, map: { how, to, ...(from && from.length >= 2 ? { from } : {}) } } : { text, map: null };
+}
+
+const MODE_WORDS: [Exclude<MapHow, 'place'>, string][] = [
+  ['transit', 'trains?|mrt|lrt|subway|metro|buse?s?|public transport|public transit|transit|tube|underground|trams?'],
+  ['walk', 'walking|walk|on foot|foot'],
+  ['drive', 'driving|drive me|drive|car|taxi|cab|grab'],
+  ['cycle', 'bikes?|bicycle|cycling|cycle|biking'],
+];
+/** On a map: "by train", "walking instead", "drive me there", "by bike", "close the map". */
+export function mapCommand(raw: string): { mode: Exclude<MapHow, 'place'> } | { close: true } | null {
+  const t = cleanCommand(raw);
+  if (/^(?:close|hide|dismiss|put away)(?: (?:it|this|that|the map|the route|the directions|map))?$/.test(t)) return { close: true };
+  for (const [mode, words] of MODE_WORDS) {
+    const re = new RegExp(`^(?:(?:show me|switch to|change to|change it to|go|use|try|what about|how about|and|let's go|i'll go|i'll take|take|get there|make it|instead)\\s+)*(?:(?:by|on|with|via|using|in)\\s+)?(?:the |a )?(?:${words})(?:\\s+(?:instead|there|route|directions|it|then|way|mode))*$`);
+    if (re.test(t)) return { mode };
+  }
+  return null;
+}
+
+/** Common names people say for countries, besides the names the browser knows. */
+const COUNTRY_ALIASES: Record<string, string> = {
+  korea: 'KR', 'south korea': 'KR', 'republic of korea': 'KR', usa: 'US', us: 'US', america: 'US', 'the us': 'US', 'the usa': 'US', 'the states': 'US', 'united states': 'US',
+  uk: 'GB', 'the uk': 'GB', britain: 'GB', 'great britain': 'GB', england: 'GB', scotland: 'GB', wales: 'GB', china: 'CN', 'mainland china': 'CN', 'hong kong': 'HK', macau: 'MO', macao: 'MO',
+  taiwan: 'TW', uae: 'AE', 'the uae': 'AE', dubai: 'AE', holland: 'NL', 'the netherlands': 'NL', turkey: 'TR', 'türkiye': 'TR', russia: 'RU', vietnam: 'VN', 'czech republic': 'CZ',
+  'the philippines': 'PH', 'new zealand': 'NZ', singapore: 'SG', japan: 'JP',
+};
+let countryNames: Map<string, string> | null = null;
+/** A country's two-letter code from what someone said ("Korea", "Japan", "the UK"), or null. */
+export function countryFromName(raw: string): string | null {
+  const t = raw.toLowerCase().replace(/[.,!?]/g, '').replace(/\s+/g, ' ').trim();
+  if (COUNTRY_ALIASES[t]) return COUNTRY_ALIASES[t]!;
+  if (!countryNames) {
+    countryNames = new Map();
+    try {
+      const dn = new Intl.DisplayNames(['en'], { type: 'region' }), A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      for (const a of A) for (const b of A) { const code = a + b, name = dn.of(code); if (name && name !== code && !/unknown/i.test(name) && !countryNames.has(name.toLowerCase())) countryNames.set(name.toLowerCase(), code); }
+    } catch { /* names then come from the short list above only */ }
+  }
+  return countryNames.get(t) ?? countryNames.get(t.replace(/^the /, '')) ?? null;
+}
+/** "I'm in Korea", "switch to Japan's maps", "use worldwide": which country's map services to use. */
+export function countryCommand(raw: string): 'ww' | string | null {
+  const t = cleanCommand(raw);
+  if (/^(?:(?:use|switch to|change to|go to|set it to|show)\s+)?(?:the\s+)?(?:worldwide|world wide|everywhere|global)(?:\s+(?:list|maps?|services|map services))?$/.test(t)) return 'ww';
+  const m = /^(?:(?:i'm|i am|we're|we are)\s+(?:now\s+|currently\s+)?in|(?:i'm|i am)\s+(?:travelling|traveling)\s+in|(?:use|switch to|change to)\s+(?:the\s+)?(?:maps? (?:for|of|in))|(?:switch|change|set)\s+(?:the\s+)?(?:country|map country|region)\s+to)\s+(.{2,40})$/.exec(t);
+  if (!m) return null;
+  return countryFromName(m[1]!.replace(/\s+(?:now|today|right now|at the moment)$/, '').replace(/'s$/, ''));
+}

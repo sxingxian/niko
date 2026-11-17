@@ -55,6 +55,13 @@ const PATHS: Record<string, string> = {
   expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
   collapse: 'M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5',
   image: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM3 16l5-5 4 4 3-3 6 6M15.5 9.5a1.5 1.5 0 1 0 0-.01',
+  pin: 'M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21zM12 12.2a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z',
+  globe: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z',
+  car: 'M5 16h14v-4l-2-5H7l-2 5v4zM5 16v2.5M19 16v2.5M5 12h14M8 14h.01M16 14h.01',
+  train: 'M7 3h10a2 2 0 0 1 2 2v9a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V5a2 2 0 0 1 2-2zM5 10h14M9 14h.01M15 14h.01M8 17l-2 4M16 17l2 4',
+  walk: 'M13 5.5a1.5 1.5 0 1 0 0-.01M10 21l2-6 3 3v3M9 12l2-4 4 2 2 3M12 15l-1-4M9 12l-2 1',
+  bike: 'M6 17.5a3.5 3.5 0 1 0 0-.01M18 17.5a3.5 3.5 0 1 0 0-.01M6 17.5L9.5 9h5l3.5 8.5M12 17.5L9.5 9M14 6h2.5',
+  nav: 'M12 3l7 18-7-4-7 4 7-18z',
 };
 export function Icon({ name, size = 22 }: { name: keyof typeof PATHS | string; size?: number }) {
   return <svg className="ic" viewBox="0 0 24 24" aria-hidden="true" style={{ width: size, height: size }}><path d={PATHS[name] ?? ''} /></svg>;

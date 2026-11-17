@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, sessions, users } from '@niko/db';
-import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
+import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, mapOption, mapPreset, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
 import { accessState, APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -19,6 +19,7 @@ import { Declined, defaultImageLabel, serverKey, IMAGE_PROVIDERS_LIST, imageKeyI
 import { defaultVoiceLabel, listVoices, loadVoiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
 import { calendarIdLink, calendarsOf, calendarsSecret, cleanCalName, icalCheckOne, newCalId, normalizeLink, shownCalendars, type Cal } from '../calendarlink';
 import { accountLimitsFor } from '../limits';
+import { cleanPoint, findRoute, loadMapKeys, mapKeyInfo, mapKeyProblem, MAP_PROVIDERS_LIST, NotFound, saveMapKeys, testMapKey, type MapKey } from '../maps';
 import { IMAP_PROVIDERS, imapCheck, isImapProvider } from '../mailbox';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
@@ -110,6 +111,17 @@ app.patch('/me', async (c) => {
       const saved = new Set((await loadImageKeys(c.env, c.get('db'), u.id)).map((k) => `ikey:${k.id}`));
       images = imageOrder({ images: e.images }).filter((x) => !x.startsWith('ikey:') || saved.has(x)).slice(0, MAX_IMAGE_KEYS + 1);
     }
+    // The map lists may only name the built-in map and map services this account has saved.
+    let maps: MapSource[] | null = null, mapCountries: Record<string, MapSource[]> | null = null;
+    if (Array.isArray(e.maps) || (e.mapCountries && typeof e.mapCountries === 'object')) {
+      const saved = new Set((await loadMapKeys(c.env, c.get('db'), u.id)).map((k) => `mkey:${k.id}`));
+      const ok = (list: unknown) => [...new Set((Array.isArray(list) ? list : []).map(String).filter((x) => MAP_ENTRY.test(x) && (x === 'osm' || saved.has(x))))].slice(0, MAX_MAP_KEYS + 1) as MapSource[];
+      if (Array.isArray(e.maps)) maps = ok(e.maps);
+      if (e.mapCountries && typeof e.mapCountries === 'object') {
+        mapCountries = {};
+        for (const [cc, list] of Object.entries(e.mapCountries as Record<string, unknown>).slice(0, MAX_MAP_COUNTRIES)) if (/^[A-Z]{2}$/.test(cc)) mapCountries[cc] = ok(list);
+      }
+    }
     // The voice order may only name the built-in voices and voice keys this account has saved.
     let voices: VoiceSource[] | null = null;
     if (Array.isArray(e.voices)) {
@@ -125,6 +137,8 @@ app.patch('/me', async (c) => {
       ...(voices ? { voices } : {}),
       ...(hears ? { hears } : {}),
       ...(images ? { images } : {}),
+      ...(maps ? { maps } : {}),
+      ...(mapCountries ? { mapCountries } : {}),
       ...(typeof e.workersVoice === 'string' && WORKERS_VOICES.some((v) => v.id === e.workersVoice) ? { workersVoice: e.workersVoice } : {}),
       ...(typeof e.kokoroVoice === 'string' && KOKORO_VOICES.some((v) => v.id === e.kokoroVoice) ? { kokoroVoice: e.kokoroVoice } : {}),
       ...(typeof e.wake === 'boolean' ? { wake: e.wake } : {}),
@@ -661,6 +675,10 @@ When the user asks to change the last picture (for example "make it night" or "a
 Each image service checks requests against its own rules, so pass picture requests on with the tag rather than declining them yourself. Never put anything from DATA into a prompt unless the user asks for it. Use the tag only when the user asks for a picture.`;
 const NO_IMAGE_RULE = 'You cannot make pictures right now: they are switched off on the Engine screen. If the user asks for one, say so in a sentence.';
 const NOT_ON_ACCOUNT_IMAGE_RULE = 'You cannot make pictures: they aren’t available on this account (the administrator chooses this). If the user asks for one, say so in a sentence. Never use an image tag.';
+/** Maps: the built-in map always works, so this is added unless the administrator has turned maps off. */
+const MAP_RULE = `You can show maps on screen. When the user asks how to get somewhere, for directions, how long it takes to get somewhere, where a place is, or to see a place on a map, reply with one short sentence (for example "Here's the way to Changi Airport.") and end with [[map:<how>|<destination>]] or, when they name where they start from, [[map:<how>|<destination>|<start>]]. <how> is drive, transit, walk or cycle when they say how they are travelling ("by train", "by bus", "on foot", "drive me", "by bike"), place when they only want to see where something is, and any when they don't say. Write the destination as a searchable name with its city or country when you know it, such as "Gangnam Station, Seoul". Never use a map tag for anything in DATA unless the user asks for it.
+When the user asks to switch how they travel on the map that is showing ("show me by train instead", "walking"), end with [[map:<how>|same]].`;
+const NOT_ON_ACCOUNT_MAP_RULE = 'You cannot show maps: they aren’t available on this account (the administrator chooses this). If the user asks for one, say so in a sentence. Never use a map tag.';
 /** Added to the prompt when a weather service is connected. */
 const WEATHER_RULE = `Weather forecasts come from Open-Meteo and are given in WEATHER blocks. Answer weather questions from them in plain spoken words: the conditions, temperatures and the chance of rain that matter for what was asked, without listing every number.
 When the user asks about the weather in a place whose forecast is not given, reply with only [[weather:<place>, <country if known>]] (one tag per place, at most three) and nothing else; you will then be given the forecasts.`;
@@ -790,7 +808,7 @@ app.post('/chat', async (c) => {
   const off = await offFor(db, u);
   const wxRule = wx ? `\n${WEATHER_RULE}${weather ? '' : '\nNo forecast for the user’s own location is given. If they ask about the weather where they are, say their location is off, and that they can allow it in the browser or set a home place for Open-Meteo in Connections.'}` : '';
   const msgs = [
-    { role: 'system', content: `${SYSTEM}${oneOff ? '' : `\n${off.includes('sec:images') ? NOT_ON_ACCOUNT_IMAGE_RULE : imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}`}${wxRule}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${weather}` },
+    { role: 'system', content: `${SYSTEM}${oneOff ? '' : `\n${off.includes('sec:images') ? NOT_ON_ACCOUNT_IMAGE_RULE : imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}\n${off.includes('sec:maps') ? NOT_ON_ACCOUNT_MAP_RULE : MAP_RULE}`}${wxRule}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${weather}` },
     ...history.map((h) => ({ role: h.role, content: h.content })),
     { role: 'user', content: text },
   ];
@@ -1145,6 +1163,100 @@ app.delete('/image/keys/:id', async (c) => {
   await db.update(users).set({ engine: { ...engine, images, imageRest } as any }).where(eq(users.id, u.id));
   await audit(c, 'image-key.removed', {}, u.id);
   return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------- maps (the Engine screen's Maps lists)
+app.get('/map/keys', async (c) => {
+  const keys = await loadMapKeys(c.env, c.get('db'), c.get('user').id);
+  return c.json({ keys: keys.map(mapKeyInfo) });
+});
+function mapKeyFrom(b: any): Omit<MapKey, 'id'> {
+  const provider = MAP_PROVIDERS_LIST.find((p) => p === b?.provider) ?? 'google';
+  return { provider, label: clip(b?.label, 40), baseUrl: provider === 'self-hosted' ? clip(b?.baseUrl, 500) : '', email: provider === 'onemap' ? clip(b?.email, 200) : '', apiKey: clip(b?.apiKey, 4000), secret: clip(b?.secret, 4000), password: provider === 'onemap' ? clip(b?.password, 400) : '' };
+}
+/** A saved key (and secret, and password) is used only with the same service and, for a route server, the same address. */
+function withSavedMapKey(prior: MapKey | undefined, k: Omit<MapKey, 'id'>): Omit<MapKey, 'id'> {
+  if (!prior || prior.provider !== k.provider) return k;
+  if (k.provider === 'self-hosted' && !sameOrigin(prior.baseUrl, k.baseUrl)) return k;
+  if (k.provider === 'onemap' && prior.email.toLowerCase() !== k.email.toLowerCase()) return k;
+  return { ...k, apiKey: k.apiKey || prior.apiKey, secret: k.secret || prior.secret, password: k.password || prior.password };
+}
+const NEW_ID = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (n) => 'abcdefghijklmnopqrstuvwxyz0123456789'[n % 36]).join('');
+app.post('/map/keys', async (c) => {
+  const b = await c.req.json<any>().catch(() => ({}));
+  const u = c.get('user'), db = c.get('db');
+  const keys = await loadMapKeys(c.env, db, u.id);
+  const prior = typeof b.id === 'string' ? keys.find((x) => x.id === b.id) : undefined;
+  if (b.id && !prior) return c.json({ error: 'That map service is no longer saved.' }, 404);
+  const k = withSavedMapKey(prior, mapKeyFrom(b));
+  const problem = mapKeyProblem(k);
+  if (problem) return c.json({ error: prior ? `${problem} Paste it again when you change the service, its address or the account.` : problem }, 400);
+  if (!aiAllowed(await offFor(db, u), mapOption('mkey:', k))) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  if (!prior && keys.length >= MAX_MAP_KEYS) return c.json({ error: `Up to ${MAX_MAP_KEYS} map services can be saved.` }, 400);
+  let id = prior?.id ?? '';
+  while (!id || (!prior && keys.some((x) => x.id === id))) id = NEW_ID();
+  const key: MapKey = { ...k, id, label: k.label || mapPreset(k.provider)!.name };
+  await saveMapKeys(c.env, db, u.id, prior ? keys.map((x) => (x.id === id ? key : x)) : [...keys, key]);
+  // A new service goes into the list it belongs to: its country's for a country-only service, else Everywhere.
+  const engine = u.engine as unknown as EnginePrefs;
+  let next: EnginePrefs = engine;
+  if (engine.mapRest?.[`mkey:${id}`]) { const mapRest = { ...engine.mapRest }; delete mapRest[`mkey:${id}`]; next = { ...next, mapRest }; }
+  if (!prior && b.addTo !== false) {
+    const home = typeof b.list === 'string' && /^[A-Z]{2}$/.test(b.list) ? b.list : b.list === 'ww' ? null : mapPreset(k.provider)?.home ?? null;
+    if (home) { const lists = { ...(engine.mapCountries ?? {}) }; lists[home] = [...(lists[home] ?? []), `mkey:${id}` as MapSource]; next = { ...next, mapCountries: lists }; }
+    else { const maps = (engine.maps ?? []).filter((x) => x !== 'osm'); next = { ...next, maps: [...maps, `mkey:${id}` as MapSource, 'osm'] }; }
+  }
+  if (next !== engine) await db.update(users).set({ engine: next as any }).where(eq(users.id, u.id));
+  await audit(c, prior ? 'map-key.changed' : 'map-key.added', { provider: key.provider }, u.id);
+  return c.json({ ok: true, key: mapKeyInfo(key) });
+});
+app.post('/map/keys/test', async (c) => {
+  const b = await c.req.json<any>().catch(() => ({}));
+  const u = c.get('user'), db = c.get('db');
+  if (await tooMany(c, 'map-test:' + u.id, 20, 10)) return c.json({ error: 'Too many tests. Try again in a few minutes.' }, 429);
+  const prior = typeof b.id === 'string' ? (await loadMapKeys(c.env, db, u.id)).find((x) => x.id === b.id) : undefined;
+  const k = withSavedMapKey(prior, mapKeyFrom(b));
+  const problem = mapKeyProblem(k);
+  if (problem) return c.json({ error: problem }, 400);
+  if (!aiAllowed(await offFor(db, u), mapOption('mkey:', k))) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  try { return c.json({ ok: true, message: await testMapKey({ ...k, id: 'test' }) }); }
+  catch (e) {
+    const f = e instanceof BrainFail ? e : null;
+    return c.json({ error: (f?.why === 'limit' ? 'Its usage limit is reached.' : f?.why === 'refused' ? 'It refused the request. Check the key and that the service is switched on for it.' : 'It did not answer just now.') + (f?.detail ? ` It said: “${f.detail}”` : '') }, 502);
+  }
+});
+app.delete('/map/keys/:id', async (c) => {
+  const u = c.get('user'), db = c.get('db'), id = c.req.param('id');
+  const keys = await loadMapKeys(c.env, db, u.id);
+  if (!keys.some((k) => k.id === id)) return c.json({ ok: true });
+  await saveMapKeys(c.env, db, u.id, keys.filter((k) => k.id !== id));
+  const engine = u.engine as unknown as EnginePrefs, gone = `mkey:${id}`;
+  const maps = (engine.maps ?? []).filter((x) => x !== gone);
+  const mapCountries = Object.fromEntries(Object.entries(engine.mapCountries ?? {}).map(([cc, l]) => [cc, l.filter((x) => x !== gone)]));
+  const mapRest = { ...(engine.mapRest ?? {}) }; delete mapRest[gone];
+  await db.update(users).set({ engine: { ...engine, maps, mapCountries, mapRest } as any }).where(eq(users.id, u.id));
+  await audit(c, 'map-key.removed', {}, u.id);
+  return c.json({ ok: true });
+});
+/** A place and a route to it. The location in the request is used for this answer only: not stored, not logged. */
+app.post('/maps/route', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  const b = await c.req.json<any>().catch(() => ({}));
+  const to = clip(b.to, 200).replace(/[\u0000-\u001f]/g, ' ');
+  if (to.length < 2) return c.json({ error: 'Say where you want to go.' }, 400);
+  if (await tooMany(c, 'map:' + u.id, 40, 10)) return c.json({ error: 'Niko has looked up a lot of maps in the last few minutes. Try again shortly.' }, 429);
+  const mode: MapMode | 'place' = b.mode === 'place' ? 'place' : MAP_MODES.includes(b.mode) ? b.mode : 'drive';
+  const country = b.country === 'ww' ? 'ww' : typeof b.country === 'string' && /^[A-Z]{2}$/.test(b.country) ? b.country : 'auto';
+  try {
+    const r = await findRoute(c.env, db, u, { to, from: clip(b.from, 200) || undefined, mode, here: cleanPoint(b.here), country }, await offFor(db, u));
+    return c.json(r, 200, { 'cache-control': 'no-store' });
+  } catch (e) {
+    if (e instanceof NotFound) return c.json({ error: `Niko couldn’t find “${to}”. Try the full name or the address.`, notFound: true }, 404);
+    const f = e instanceof BrainFail ? e : null;
+    if (f?.message === 'not on account') return c.json({ error: f.detail }, 403);
+    console.warn(`maps: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+    return c.json({ error: 'The map services didn’t answer just now. Try again in a moment.' }, 502);
+  }
 });
 
 /** A prompt as an image model should get it: plain text, one paragraph, not too long. */
