@@ -12,6 +12,20 @@ export const isFullscreen = () => !!(doc().fullscreenElement || doc().webkitFull
 /** Opened from the Home Screen as an app that already fills the screen. */
 export const installedFull = () => typeof window !== 'undefined' && (window.matchMedia('(display-mode: fullscreen)').matches || (navigator as Navigator & { standalone?: boolean }).standalone === true);
 
+/** Full screen on. Browsers allow it only right after a tap or a key, so by voice this can be refused: then false. */
+export async function enterFullscreen(): Promise<boolean> {
+  if (isFullscreen()) return true;
+  try {
+    const el = document.documentElement as El;
+    await (el.requestFullscreen ? el.requestFullscreen({ navigationUI: 'hide' }) : el.webkitRequestFullscreen?.());
+  } catch { return false; }
+  return isFullscreen();
+}
+/** Full screen off (no tap needed). */
+export async function exitFullscreen(): Promise<void> {
+  try { if (isFullscreen()) await (doc().exitFullscreen ? doc().exitFullscreen() : doc().webkitExitFullscreen?.()); } catch { /* already off */ }
+}
+
 export async function toggleFullscreen(): Promise<void> {
   try {
     if (isFullscreen()) { await (doc().exitFullscreen ? doc().exitFullscreen() : doc().webkitExitFullscreen?.()); return; }

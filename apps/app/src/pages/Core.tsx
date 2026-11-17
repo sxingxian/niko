@@ -185,6 +185,13 @@ export function Home() {
       <Dock className={'dock' + (nav ? ' show' : '')} />
       <GlanceStack wide={wide} />
       {wide && !card && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}
+      {n.fullscreenAsk && (
+        <div className="fs-ask g" role="dialog" aria-label="Full screen">
+          <span>Browsers need a tap for full screen.</span>
+          <button className="pri" onClick={() => n.answerFullscreen(true)} autoFocus><Icon name="expand" size={16} />Go full screen</button>
+          <button className="sec" onClick={() => n.answerFullscreen(false)}>Not now</button>
+        </div>
+      )}
       {mapv ? (
         <aside className="panels mapp" aria-label="Map" key="map">
           <div className="card-build" style={{ ['--d' as string]: '0s' }}>

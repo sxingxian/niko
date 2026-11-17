@@ -8,6 +8,7 @@ import { useNiko, type MapView } from '../niko';
 import { mapCommand } from '../speech';
 
 const MODE_ICON: Record<MapMode, string> = { drive: 'car', transit: 'train', walk: 'walk', cycle: 'bike' };
+const NAME = (m: MapMode | 'fly' | 'place') => (m === 'fly' ? 'Flight' : m === 'place' ? 'Place' : MAP_MODE_NAMES[m]);
 const STYLE = 'https://tiles.openfreemap.org/styles/positron';
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const regionName = (cc: string) => { try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(cc) ?? cc; } catch { return cc; } };
@@ -84,6 +85,8 @@ function MapCanvas({ result }: { result: MapResult | undefined }) {
     const map = mapRef.current;
     if (!map || !ready || !result) return;
     const line = result.route?.coords ?? [];
+    // A flight is drawn dashed, so it reads as a path in the air rather than a road.
+    try { map.setPaintProperty('niko-line', 'line-dasharray', result.route?.mode === 'fly' ? [2, 1.6] : [1, 0]); } catch { /* older style */ }
     (map.getSource('niko-route') as import('maplibre-gl').GeoJSONSource | undefined)?.setData({ type: 'FeatureCollection', features: line.length > 1 ? [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: line } }] : [] });
     const pts = [...(result.from ? [{ k: 'from', p: result.from }] : []), { k: 'to', p: result.to }];
     (map.getSource('niko-pts') as import('maplibre-gl').GeoJSONSource | undefined)?.setData({ type: 'FeatureCollection', features: pts.map(({ k, p }) => ({ type: 'Feature', properties: { k }, geometry: { type: 'Point', coordinates: [p.lng, p.lat] } })) });
@@ -138,7 +141,7 @@ export function MapCard({ v, tabbable }: { v: MapView; tabbable?: boolean }) {
         return true;
       }
       n.setMapMode(c.mode);
-      n.setStatus('Heard', `${MAP_MODE_NAMES[c.mode]}: finding the way.`, 'speaking');
+      n.setStatus('Heard', c.mode === 'fly' ? 'Flight: drawing the flight path.' : `${MAP_MODE_NAMES[c.mode]}: finding the way.`, 'speaking');
       window.setTimeout(n.carryOn, 1200);
       return true;
     });
@@ -148,8 +151,9 @@ export function MapCard({ v, tabbable }: { v: MapView; tabbable?: boolean }) {
   const listed = !!(r?.country.code && r.country.listed);
   const pillName = listed ? r!.country.name : 'Worldwide';
   const pillSub = n.mapCountry === 'ww' ? 'chosen' : r?.country.how === 'gps' ? (listed ? 'from your location' : `you’re in ${r.country.name}`) : r?.country.how === 'said' ? (listed ? 'you said' : `no list for ${r.country.name}`) : r && !v.located ? 'location off' : '';
-  const head = v.status === 'explain' ? 'Your location' : v.status === 'loading' ? (v.mode === 'place' ? 'Finding it' : 'Finding the way') : v.status === 'failed' ? 'Not found'
-    : r?.route ? `${minutesText(r.route.seconds)} · ${MAP_MODE_NAMES[r.route.mode]} · ${distanceText(r.route.meters)}` : v.mode === 'place' ? 'Place' : `${MAP_MODE_NAMES[v.mode]} · no route`;
+  const fly = v.mode === 'fly';
+  const head = v.status === 'explain' ? 'Your location' : v.status === 'loading' ? (v.mode === 'place' ? 'Finding it' : fly ? 'Drawing the flight path' : 'Finding the way') : v.status === 'failed' ? 'Not found'
+    : r?.route ? (r.route.mode === 'fly' ? `About ${minutesText(r.route.seconds)} · Flight · ${distanceText(r.route.meters)}` : `${minutesText(r.route.seconds)} · ${NAME(r.route.mode)} · ${distanceText(r.route.meters)}`) : v.mode === 'place' ? 'Place' : `${NAME(v.mode)} · no route`;
   const credit = [r?.source.id !== 'osm' && r ? `© ${r.source.label}` : '', 'OpenFreeMap', '© OpenStreetMap contributors'].filter(Boolean).join(' · ');
 
   return (
@@ -191,6 +195,13 @@ export function MapCard({ v, tabbable }: { v: MapView; tabbable?: boolean }) {
           {v.status === 'failed' && <div className="map-failed"><p>{v.error}</p><button className="sec" onClick={() => n.showMap(v.to, v.from, v.mode)} tabIndex={tab}>Try again</button></div>}
           <span className="map-credit">{credit}</span>
         </div>
+        {fly ? (
+          <div className="map-flight">
+            <Icon name="plane" size={18} />
+            <span><b>{r?.from?.name === 'You' ? 'Your location' : r?.from?.name ?? v.from ?? 'Your location'}</b> → <b>{r?.to.name ?? v.to}</b></span>
+            <span className="map-small">The line is the shortest path over the globe and the time an estimate: airlines, winds and air traffic decide the real ones.</span>
+          </div>
+        ) : (
         <div className="map-tabs" role="group" aria-label="How to get there">
           {MAP_MODES.map((m) => (
             <button key={m} className="map-tab" aria-pressed={v.mode === m} onClick={() => n.setMapMode(m)} tabIndex={tab}>
@@ -198,6 +209,7 @@ export function MapCard({ v, tabbable }: { v: MapView; tabbable?: boolean }) {
             </button>
           ))}
         </div>
+        )}
         {r && (
           <div className="map-service">
             <span className="map-svc"><span className="k">Map service</span><b>{r.source.label}</b></span>
@@ -207,7 +219,7 @@ export function MapCard({ v, tabbable }: { v: MapView; tabbable?: boolean }) {
         )}
         {r && r.handoff.length > 0 && (
           <div className="map-apps">
-            {r.handoff.map((h, i) => <a key={h.app} className={i ? 'sec' : 'pri'} href={h.url} target="_blank" rel="noopener noreferrer" tabIndex={tab}><Icon name="nav" size={16} />{r.mode === 'place' ? `Open in ${h.app}` : `Start in ${h.app}`}</a>)}
+            {r.handoff.map((h, i) => <a key={h.app} className={i ? 'sec' : 'pri'} href={h.url} target="_blank" rel="noopener noreferrer" tabIndex={tab}><Icon name="nav" size={16} />{r.mode === 'fly' ? (h.app === 'Google Flights' ? 'Find flights' : `Open in ${h.app}`) : r.mode === 'place' ? `Open in ${h.app}` : `Start in ${h.app}`}</a>)}
           </div>
         )}
         {r?.route && r.route.steps.length > 0 && (

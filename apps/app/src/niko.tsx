@@ -1,8 +1,9 @@
 // Shared Niko state: who is signed in, and the voice loop (wake word, commands, speech).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
-import { countryCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag } from './speech';
+import { aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type MapAskMode, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
+import { enterFullscreen, exitFullscreen, fullscreenSupported } from './fullscreen';
+import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
@@ -21,7 +22,7 @@ const MAX_PICTURES = 8;
 
 /** The map on Home. The location used for it stays in this page's memory for a few minutes and is never stored. */
 export interface MapView {
-  id: number; to: string; from?: string; mode: MapMode | 'place';
+  id: number; to: string; from?: string; mode: MapAskMode;
   /** explain: Niko says why it asks for the location, before the browser asks. */
   status: 'explain' | 'loading' | 'done' | 'failed';
   result?: MapResult; error?: string;
@@ -51,7 +52,7 @@ function whereExactly(): Promise<{ lat: number; lng: number } | undefined> {
 async function locationPermission(): Promise<PermissionState | 'unknown'> {
   try { return (await navigator.permissions.query({ name: 'geolocation' as PermissionName })).state; } catch { return 'unknown'; }
 }
-const MODE_WORDS: Record<MapMode, string> = { drive: 'by car', transit: 'by public transport', walk: 'on foot', cycle: 'by bike' };
+const MODE_WORDS: Record<MapMode | 'fly', string> = { drive: 'by car', transit: 'by public transport', walk: 'on foot', cycle: 'by bike', fly: 'of flying, roughly' };
 
 interface NikoState {
   me: Me | null | undefined; // undefined while loading
@@ -101,12 +102,15 @@ interface NikoState {
   /** The map on Home, and what can be changed on it. */
   map: MapView | null;
   mapCountry: MapCountry;
-  showMap: (to: string, from?: string, how?: MapMode | 'place' | 'any') => void;
-  setMapMode: (m: MapMode) => void;
+  showMap: (to: string, from?: string, how?: MapAskMode | 'any') => void;
+  setMapMode: (m: MapMode | 'fly') => void;
   setMapCountry: (c: MapCountry) => void;
   /** The answer to Niko's question about the location: allow (the browser then asks) or use Worldwide. */
   answerLocation: (allow: boolean) => void;
   closeMap: () => void;
+  /** Asked for full screen by voice, which browsers allow only after a tap: Niko shows a button to tap. */
+  fullscreenAsk: boolean;
+  answerFullscreen: (go: boolean) => void;
 }
 
 const Ctx = createContext<NikoState>(null as never);
@@ -211,6 +215,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [pendingOpen, setPendingOpen] = useState<NikoState['pendingOpen']>(null);
   const [pictures, setPictures] = useState<PictureItem[]>([]);
   const [map, setMap] = useState<MapView | null>(null);
+  const [fullscreenAsk, setFullscreenAsk] = useState(false);
+  const fsTimer = useRef<number | undefined>(undefined);
   const mapRef = useRef<MapView | null>(null);
   const [mapCountry, setMapCountryState] = useState<MapCountry>('auto');
   const mapCountryRef = useRef<MapCountry>('auto');
@@ -446,7 +452,21 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 900);
       return;
     }
-    // 3. Which country's maps: "I'm in Korea", "use worldwide". Lasts for this visit.
+    // 3. Full screen: "go full screen", "exit full screen".
+    const fs = fullscreenCommand(text);
+    if (fs) {
+      const done = (l: string) => { setMode('speaking'); setLabel('Heard'); setLine(l); window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 1600); };
+      if (fs === 'exit') { setFullscreenAsk(false); void exitFullscreen(); done('Leaving full screen.'); return; }
+      if (!fullscreenSupported()) { done('This browser can’t go full screen. Add Niko to your Home Screen to open it without the browser’s bars.'); return; }
+      if (await enterFullscreen()) { done('Full screen.'); return; }
+      // Browsers only allow full screen right after a tap, so Niko puts a button up to tap, for a few seconds.
+      setFullscreenAsk(true);
+      window.clearTimeout(fsTimer.current);
+      fsTimer.current = window.setTimeout(() => setFullscreenAsk(false), 15_000);
+      done('Tap “Go full screen”. Browsers need a tap for this.');
+      return;
+    }
+    // 3b. Which country's maps: "I'm in Korea", "use worldwide". Lasts for this visit.
     const cc = mapsOn(meRef.current?.aiOff ?? []) ? countryCommand(text) : null;
     if (cc) {
       setMapCountryFn(cc);
@@ -577,8 +597,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(j.error ?? 'The map couldn’t be shown just now.');
         const res = j as MapResult;
-        set((m) => ({ ...m, status: 'done', result: res, error: undefined, located: !!here, times: res.route ? { ...m.times, [res.route.mode]: res.route.seconds } : m.times }));
+        set((m) => ({ ...m, status: 'done', result: res, error: undefined, located: !!here, times: res.route && res.route.mode !== 'fly' ? { ...m.times, [res.route.mode]: res.route.seconds } : m.times }));
         if (res.route) tell(`About ${minutesText(res.route.seconds).replace(' h', ' hours').replace(' min', ' minutes')} ${MODE_WORDS[res.route.mode]}.`);
+        else if (res.noRoute && v.mode === 'fly') tell(res.noRoute);
         else if (res.noRoute && v.mode !== 'place') tell(here || v.from ? 'I found it, but no route this way. You can open it in a maps app.' : 'Here it is. Allow your location to see the way there.');
       } catch (e: any) {
         if (ctl.signal.aborted) return;
@@ -589,14 +610,14 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       }
     })();
   };
-  const showMapFn = (to: string, from?: string, how: MapMode | 'place' | 'any' = 'any') => {
+  const showMapFn = (to: string, from?: string, how: MapAskMode | 'any' = 'any') => {
     picCtl.current?.abort(); setPictureId(null); setReply(null);
     const v: MapView = { id: ++mapSeq.current, to, from, mode: how === 'any' ? lastMode() : how, status: 'loading', times: {}, located: false };
     mapRef.current = v; setMap(v);
     loadMap(v);
   };
-  const setMapModeFn = (mode: MapMode) => {
-    keepMode(mode);
+  const setMapModeFn = (mode: MapMode | 'fly') => {
+    if (mode !== 'fly') keepMode(mode);
     const cur = mapRef.current;
     if (!cur) return;
     const v: MapView = { ...cur, id: ++mapSeq.current, mode, status: 'loading' };
@@ -761,10 +782,12 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     setMapCountry: setMapCountryFn,
     answerLocation: (allow: boolean) => { const w = locationWait.current; locationWait.current = null; w?.(allow); },
     closeMap: closeMapFn,
+    fullscreenAsk,
+    answerFullscreen: (go: boolean) => { setFullscreenAsk(false); window.clearTimeout(fsTimer.current); if (go) void enterFullscreen(); },
     resumable,
     resume: () => { void ask('continue'); },
     retry: () => { void ask('try again'); },
-  }), [me, refreshMe, mode, label, line, reply, weather, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [me, refreshMe, mode, label, line, reply, weather, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

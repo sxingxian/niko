@@ -158,6 +158,9 @@
 .map-tab span { color: var(--muted); font-variant-numeric: tabular-nums; }
 .map-tab[aria-pressed="true"] { background: hsl(var(--h) 90% 82%); color: #05060a; border-color: transparent; }
 .map-tab[aria-pressed="true"] span { color: rgba(5,6,10,.7); }
+.map-flight { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; align-items: center; padding: 10px 14px; border-radius: 16px; background: rgba(0,0,0,.22); border: 1px solid rgba(255,255,255,.14); font-size: 14px; }
+.map-flight b { font-weight: 500; }
+.map-flight .map-small { grid-column: 1 / -1; }
 .map-service { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; border-radius: 16px; background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.12); }
 .map-svc { display: flex; align-items: center; gap: 8px; }
 .map-svc b { font-weight: 500; font-size: 14px; }
@@ -784,3 +787,10 @@ button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; 
   .mtabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
   .mtab { flex: none; }
 }
+
+/* Full screen asked for by voice: one tap to go (browsers need a tap). */
+.fs-ask { position: fixed; left: 50%; top: calc(18px + env(safe-area-inset-top)); transform: translateX(-50%); z-index: 40; display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 18px; border-radius: 999px; font: 400 14px system-ui, sans-serif; color: #e6eaf1; animation: fsIn .3s cubic-bezier(.2,.8,.2,1); max-width: calc(100vw - 24px); }
+.fs-ask .pri, .fs-ask .sec { height: 40px; padding: 0 16px; font-size: 14px; gap: 8px; white-space: nowrap; }
+@keyframes fsIn { from { opacity: 0; transform: translate(-50%, -8px); } }
+@media (max-width: 760px) { .fs-ask { flex-wrap: wrap; justify-content: center; border-radius: 22px; padding: 12px; } .fs-ask span { width: 100%; text-align: center; } }
+@media (prefers-reduced-motion: reduce) { .fs-ask { animation: none; } }

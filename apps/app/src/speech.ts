@@ -238,7 +238,7 @@ export function pictureCommand(raw: string): 'save' | 'share' | 'more' | 'close'
 }
 
 // ---- Maps
-type MapHow = 'drive' | 'transit' | 'walk' | 'cycle' | 'place';
+type MapHow = 'drive' | 'transit' | 'walk' | 'cycle' | 'place' | 'fly';
 /** The AI asks for a map by ending its reply with [[map:<how>|<destination>]] or [[map:<how>|<destination>|<start>]];
  * [[map:<how>|same]] changes how to travel on the map already showing. */
 export function takeMapTag(reply: string): { text: string; map: { how: MapHow | 'any'; to: string; from?: string } | null } {
@@ -246,8 +246,8 @@ export function takeMapTag(reply: string): { text: string; map: { how: MapHow | 
   const text = reply.replace(/\s*\[\[\s*map\s*:[^\]]*\]\]\s*/gi, ' ').replace(/\s+/g, ' ').trim();
   if (!m) return { text, map: null };
   const h = m[1]!.toLowerCase();
-  const how: MapHow | 'any' = h === 'car' || h === 'driving' ? 'drive' : h === 'train' || h === 'bus' || h === 'public' ? 'transit' : h === 'walking' || h === 'foot' ? 'walk' : h === 'bike' || h === 'cycling' ? 'cycle'
-    : (['drive', 'transit', 'walk', 'cycle', 'place'] as string[]).includes(h) ? h as MapHow : 'any';
+  const how: MapHow | 'any' = h === 'car' || h === 'driving' ? 'drive' : h === 'train' || h === 'bus' || h === 'public' ? 'transit' : h === 'walking' || h === 'foot' ? 'walk' : h === 'bike' || h === 'cycling' ? 'cycle' : h === 'flight' || h === 'plane' || h === 'flying' ? 'fly'
+    : (['drive', 'transit', 'walk', 'cycle', 'place', 'fly'] as string[]).includes(h) ? h as MapHow : 'any';
   const to = m[2]!.replace(/\s+/g, ' ').trim(), from = m[3]?.replace(/\s+/g, ' ').trim();
   return to.length >= 2 ? { text, map: { how, to, ...(from && from.length >= 2 ? { from } : {}) } } : { text, map: null };
 }
@@ -257,6 +257,7 @@ const MODE_WORDS: [Exclude<MapHow, 'place'>, string][] = [
   ['walk', 'walking|walk|on foot|foot'],
   ['drive', 'driving|drive me|drive|car|taxi|cab|grab'],
   ['cycle', 'bikes?|bicycle|cycling|cycle|biking'],
+  ['fly', 'planes?|flight|flights|fly|flying|air|the flight path|flight path|airplane|aeroplane'],
 ];
 /** On a map: "by train", "walking instead", "drive me there", "by bike", "close the map". */
 export function mapCommand(raw: string): { mode: Exclude<MapHow, 'place'> } | { close: true } | { steps: boolean } | null {
@@ -300,4 +301,12 @@ export function countryCommand(raw: string): 'ww' | string | null {
   const m = /^(?:(?:i'm|i am|we're|we are)\s+(?:now\s+|currently\s+)?in|(?:i'm|i am)\s+(?:travelling|traveling)\s+in|(?:use|switch to|change to)\s+(?:the\s+)?(?:maps? (?:for|of|in))|(?:switch|change|set)\s+(?:the\s+)?(?:country|map country|region)\s+to)\s+(.{2,40})$/.exec(t);
   if (!m) return null;
   return countryFromName(m[1]!.replace(/\s+(?:now|today|right now|at the moment)$/, '').replace(/'s$/, ''));
+}
+
+/** "Full screen", "go full screen", "exit full screen", "back to normal". */
+export function fullscreenCommand(raw: string): 'enter' | 'exit' | null {
+  const t = cleanCommand(raw).replace(/full-screen|fullscreen/g, 'full screen');
+  if (/^(?:exit|leave|close|turn off|stop|end|quit|get out of|come out of|switch off) (?:the )?full screen(?: mode)?$|^(?:go )?(?:back )?(?:to )?(?:normal|small|smaller|windowed)(?: screen| view| mode| size)?$/.test(t)) return 'exit';
+  if (/^(?:(?:go|make it|make niko|switch to|turn on|enter|open|use|show|put it in|go into|can you go|can you make it|could you go)\s+)?(?:the )?full screen(?: mode)?$/.test(t)) return 'enter';
+  return null;
 }

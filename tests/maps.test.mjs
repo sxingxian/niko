@@ -5,6 +5,8 @@
 import assert from 'node:assert/strict';
 import { countryOf, decodeFlexible, decodePolyline, findRoute, findWith, mapKeyProblem, routeWith } from '../apps/api/src/maps.ts';
 import { mapsOn } from '../packages/shared/src/index.ts';
+import { greatCircle, greatCircleMeters, flightSeconds } from '../packages/shared/src/maps.ts';
+import { fullscreenCommand } from '../apps/app/src/speech.ts';
 import { bdToGcj, gcjToBd, gcjToWgs, mapChain, mapHandoff, mapSkipped, wgsToGcj } from '../packages/shared/src/maps.ts';
 import { countryCommand, countryFromName, mapCommand, takeMapTag } from '../apps/app/src/speech.ts';
 import { store, fakeDb } from './brains-stubs.mjs';
@@ -199,4 +201,29 @@ await ok('the brain’s map tag, and what can be said on a map', () => {
   assert.equal(countryCommand("I'm in Korea"), 'KR'); assert.equal(countryCommand('I am in Japan now'), 'JP'); assert.equal(countryCommand('use worldwide'), 'ww');
   assert.equal(countryCommand('switch the country to the UK'), 'GB'); assert.equal(countryCommand("I'm in a meeting"), null); assert.equal(countryCommand("I'm in Paris"), null);
   assert.equal(countryFromName('South Korea'), 'KR'); assert.equal(countryFromName('France'), 'FR');
+});
+
+await ok('flights: a great-circle line that never jumps the 180° meridian, its length, a rough time, and Google Flights', async () => {
+  const sin = { lat: 1.3644, lng: 103.9915 }, lax = { lat: 33.9416, lng: -118.4085 };
+  const m = greatCircleMeters(sin, lax); assert.ok(m > 14_000_000 && m < 14_200_000, String(m));
+  const line = greatCircle(sin, lax);
+  assert.equal(line.length, 129);
+  for (let i = 1; i < line.length; i++) assert.ok(Math.abs(line[i][0] - line[i - 1][0]) < 20, 'no jump');
+  assert.ok(line.at(-1)[0] > 180, 'continues east past 180°');
+  const mid = line[64]; assert.ok(mid[1] > 30, 'arcs north of the straight line on a flat map');
+  assert.ok(Math.abs(flightSeconds(m) / 3600 - 17.5) < 0.6);
+  store.creds['map-keys'] = null;
+  reply = (url) => url.startsWith('https://photon') ? Response.json({ features: [{ properties: { name: url.includes('Haneda') ? 'Haneda Airport' : 'Changi Airport' }, geometry: { coordinates: url.includes('Haneda') ? [139.7798, 35.5494] : [103.9915, 1.3644] } }] }) : new Response('no', { status: 500 });
+  const r = await findRoute(env, fakeDb, user({}), { to: 'Haneda Airport, Tokyo', from: 'Changi Airport', mode: 'fly', here: null, country: 'auto' });
+  assert.equal(r.route.mode, 'fly'); assert.equal(r.from.name, 'Changi Airport'); assert.ok(r.route.meters > 5_200_000 && r.route.meters < 5_500_000);
+  assert.equal(r.handoff[0].app, 'Google Flights'); assert.ok(r.handoff[0].url.includes('Flights%20from%20Changi%20Airport%20to%20Haneda%20Airport'));
+  const none = await findRoute(env, fakeDb, user({}), { to: 'Haneda Airport', mode: 'fly', here: null, country: 'auto' });
+  assert.match(none.noRoute, /where the flight is from/);
+  assert.equal(takeMapTag('Here it is. [[map:fly|Haneda Airport, Tokyo|Changi Airport]]').map.how, 'fly');
+  assert.deepEqual(mapCommand('by plane'), { mode: 'fly' }); assert.deepEqual(mapCommand('show me the flight path'), { mode: 'fly' });
+});
+await ok('full screen by voice', () => {
+  assert.equal(fullscreenCommand('Niko, go full screen'), 'enter'); assert.equal(fullscreenCommand('fullscreen please'), 'enter');
+  assert.equal(fullscreenCommand('exit full screen'), 'exit'); assert.equal(fullscreenCommand('back to normal'), 'exit');
+  assert.equal(fullscreenCommand('what is a full screen monitor'), null);
 });

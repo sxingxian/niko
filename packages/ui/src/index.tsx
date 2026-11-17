@@ -62,6 +62,7 @@ const PATHS: Record<string, string> = {
   walk: 'M13 5.5a1.5 1.5 0 1 0 0-.01M10 21l2-6 3 3v3M9 12l2-4 4 2 2 3M12 15l-1-4M9 12l-2 1',
   bike: 'M6 17.5a3.5 3.5 0 1 0 0-.01M18 17.5a3.5 3.5 0 1 0 0-.01M6 17.5L9.5 9h5l3.5 8.5M12 17.5L9.5 9M14 6h2.5',
   nav: 'M12 3l7 18-7-4-7 4 7-18z',
+  plane: 'M10.5 21l1.5-1v-5.5l8 2.5v-2l-8-5V4.5a1.5 1.5 0 0 0-3 0V10l-8 5v2l8-2.5V20l1.5 1z',
 };
 export function Icon({ name, size = 22 }: { name: keyof typeof PATHS | string; size?: number }) {
   return <svg className="ic" viewBox="0 0 24 24" aria-hidden="true" style={{ width: size, height: size }}><path d={PATHS[name] ?? ''} /></svg>;

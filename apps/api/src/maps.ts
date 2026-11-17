@@ -7,7 +7,7 @@
 import { and, eq } from 'drizzle-orm';
 import { connections, users, type Db } from '@niko/db';
 import {
-  aiAllowed, mapsOn, bdToGcj, gcjToBd, gcjToWgs, mapChain, mapCountryLists, mapHandoff, mapOption, mapPreset, mapSkipped, MAX_MAP_KEYS, wgsToGcj,
+  aiAllowed, mapsOn, bdToGcj, flightSeconds, greatCircle, greatCircleMeters, type MapAskMode, gcjToBd, gcjToWgs, mapChain, mapCountryLists, mapHandoff, mapOption, mapPreset, mapSkipped, MAX_MAP_KEYS, wgsToGcj,
   type BrainRest, type EnginePrefs, type MapKeyInfo, type MapMode, type MapPlace, type MapProvider, type MapResult, type MapRoute, type MapSource, type MapStep,
 } from '@niko/shared';
 import type { Env } from './env';
@@ -422,7 +422,7 @@ async function amapRoute(k: MapKey, from: MapPlace, to: MapPlace, mode: MapMode)
 }
 
 // ---------------------------------------------------------------- in order, with rests
-export interface MapAsk { to: string; from?: string; mode: MapMode | 'place'; here: Near; country: 'auto' | 'ww' | string }
+export interface MapAsk { to: string; from?: string; mode: MapAskMode; here: Near; country: 'auto' | 'ww' | string }
 type Entry = { entry: MapSource; provider: MapProvider | 'osm'; label: string; key?: MapKey };
 
 export async function findRoute(env: Env, db: Db, user: { id: string; engine: unknown }, ask: MapAsk, off: readonly string[] = []): Promise<MapResult> {
@@ -484,7 +484,16 @@ export async function findRoute(env: Env, db: Db, user: { id: string; engine: un
     const toCc = await countryOf(to.lng, to.lat), fromCc = from ? await countryOf(from.lng, from.lat) : null;
     const tripCc = from && fromCc !== toCc ? null : toCc ?? country;
     let r: MapRoute | undefined, noRoute: string | undefined;
-    if (ask.mode !== 'place') {
+    if (ask.mode === 'fly') {
+      // A flight: the great-circle line between the two places, its length, and a rough flying time. No map service is
+      // asked for this; the airline and the weather decide the real path and time.
+      if (!from) noRoute = 'Say where the flight is from, or allow your location, to see the flight path.';
+      else {
+        const meters = greatCircleMeters(from, to);
+        if (meters < 50_000) noRoute = 'Those places are too close together for a flight.';
+        else r = { mode: 'fly', coords: greatCircle(from, to), seconds: flightSeconds(meters), meters: Math.round(meters), steps: [] };
+      }
+    } else if (ask.mode !== 'place') {
       if (!from) noRoute = 'Allow your location, or say where you are starting from, to see a route.';
       else {
         const mode = ask.mode;
@@ -508,7 +517,7 @@ export async function findRoute(env: Env, db: Db, user: { id: string; engine: un
       to, ...(from ? { from } : {}), mode: ask.mode, ...(r ? { route: r } : {}), ...(noRoute ? { noRoute } : {}),
       source: { id: source.entry, label: source.label, ms: Date.now() - t0 },
       country: { code: country, name: countryName(country), how, listed },
-      chain: [...new Set(chain)], skipped: [...skipped].slice(0, 6), handoff: mapHandoff(handoffCc, to, ask.mode), credit,
+      chain: [...new Set(chain)], skipped: [...skipped].slice(0, 6), handoff: mapHandoff(handoffCc, to, ask.mode, from), credit,
     };
   } finally {
     if (changed) await db.update(users).set({ engine: { ...engine, mapRest: rest } as any }).where(eq(users.id, user.id)).catch(() => undefined);

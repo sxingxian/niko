@@ -10,6 +10,8 @@
 export type MapMode = 'drive' | 'transit' | 'walk' | 'cycle';
 export const MAP_MODES: MapMode[] = ['drive', 'transit', 'walk', 'cycle'];
 export const MAP_MODE_NAMES: Record<MapMode, string> = { drive: 'Drive', transit: 'Transit', walk: 'Walk', cycle: 'Cycle' };
+/** What a map can be asked for: a way of travelling, just the place, or a flight (a great-circle line between two places). */
+export type MapAskMode = MapMode | 'place' | 'fly';
 
 export type MapProvider = 'google' | 'mapbox' | 'onemap' | 'openrouteservice' | 'naver' | 'kakao' | 'amap' | 'baidu' | 'here' | 'tomtom' | 'geoapify' | 'maptiler' | 'self-hosted';
 export interface MapField { key: 'apiKey' | 'secret' | 'email' | 'password' | 'baseUrl'; label: string; secret?: boolean; optional?: boolean; placeholder?: string }
@@ -72,7 +74,7 @@ export function mapCountryLists(e: { mapCountries?: unknown } | undefined): Reco
  * their own coordinates (GCJ-02), so only Chinese services are used for places and routes; Korean, Chinese and
  * Singapore-only services don't cover other countries.
  */
-export function mapSkipped(provider: MapProvider | 'osm', country: string | null, mode: MapMode | 'place'): string | null {
+export function mapSkipped(provider: MapProvider | 'osm', country: string | null, mode: MapAskMode): string | null {
   const p = provider === 'osm' ? null : mapPreset(provider);
   if (p?.only && (!country || !p.only.includes(country))) return `${p.name} only covers ${p.only.join(', ')}`;
   // OpenStreetMap data (the built-in search, and a route server the person runs) lines up with the map as it is.
@@ -117,9 +119,9 @@ export function gcjToBd(lng: number, lat: number): [number, number] { const z = 
 // ---------------------------------------------------------------- what the map card shows
 export interface MapPlace { name: string; address?: string; lat: number; lng: number }
 export interface MapStep { text: string; meters?: number }
-export interface MapRoute { mode: MapMode; coords: [number, number][]; seconds: number; meters: number; steps: MapStep[] }
+export interface MapRoute { mode: MapMode | 'fly'; coords: [number, number][]; seconds: number; meters: number; steps: MapStep[] }
 export interface MapResult {
-  to: MapPlace; from?: MapPlace; mode: MapMode | 'place'; route?: MapRoute;
+  to: MapPlace; from?: MapPlace; mode: MapAskMode; route?: MapRoute;
   /** Why there is no route (no service that routes this way here), when there isn't one. */
   noRoute?: string;
   source: { id: string; label: string; ms: number };
@@ -132,7 +134,11 @@ export interface MapResult {
 }
 
 /** Links that open the trip in the app people use there. */
-export function mapHandoff(country: string | null, to: MapPlace, mode: MapMode | 'place'): { app: string; url: string }[] {
+export function mapHandoff(country: string | null, to: MapPlace, mode: MapAskMode, from?: MapPlace): { app: string; url: string }[] {
+  if (mode === 'fly') {
+    const q = from && from.name !== 'You' ? `Flights from ${from.name} to ${to.name}` : `Flights to ${to.name}`;
+    return [{ app: 'Google Flights', url: `https://www.google.com/travel/flights?q=${encodeURIComponent(q)}` }, { app: 'Google Maps', url: `https://www.google.com/maps/search/?api=1&query=${to.lat.toFixed(6)},${to.lng.toFixed(6)}` }];
+  }
   const ll = `${to.lat.toFixed(6)},${to.lng.toFixed(6)}`, name = encodeURIComponent(to.name);
   const gmode = { drive: 'driving', transit: 'transit', walk: 'walking', cycle: 'bicycling', place: 'driving' }[mode];
   const google = { app: 'Google Maps', url: mode === 'place' ? `https://www.google.com/maps/search/?api=1&query=${ll}` : `https://www.google.com/maps/dir/?api=1&destination=${ll}&travelmode=${gmode}` };
@@ -142,4 +148,34 @@ export function mapHandoff(country: string | null, to: MapPlace, mode: MapMode |
   return [google, apple];
 }
 export const minutesText = (s: number) => { const m = Math.max(1, Math.round(s / 60)); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`; };
-export const distanceText = (m: number) => (m < 950 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(m < 9500 ? 1 : 0)} km`);
+export const distanceText = (m: number) => (m < 950 ? `${Math.round(m / 10) * 10} m` : m < 9500 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m / 1000).toLocaleString('en')} km`);
+
+// ---------------------------------------------------------------- flights
+/** The great-circle line between two places, as [lng, lat] points that never jump across the 180° meridian. */
+export function greatCircle(a: { lat: number; lng: number }, b: { lat: number; lng: number }, n = 128): [number, number][] {
+  const r = Math.PI / 180, toV = (p: { lat: number; lng: number }) => [Math.cos(p.lat * r) * Math.cos(p.lng * r), Math.cos(p.lat * r) * Math.sin(p.lng * r), Math.sin(p.lat * r)];
+  const A = toV(a), B = toV(b);
+  const d = Math.acos(Math.min(1, Math.max(-1, A[0]! * B[0]! + A[1]! * B[1]! + A[2]! * B[2]!)));
+  if (d < 1e-9) return [[a.lng, a.lat], [b.lng, b.lat]];
+  const out: [number, number][] = [];
+  let prev = a.lng;
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, s1 = Math.sin((1 - t) * d) / Math.sin(d), s2 = Math.sin(t * d) / Math.sin(d);
+    const x = s1 * A[0]! + s2 * B[0]!, y = s1 * A[1]! + s2 * B[1]!, z = s1 * A[2]! + s2 * B[2]!;
+    const lat = Math.atan2(z, Math.sqrt(x * x + y * y)) / r;
+    let lng = Math.atan2(y, x) / r;
+    while (lng - prev > 180) lng -= 360;
+    while (lng - prev < -180) lng += 360;
+    prev = lng;
+    out.push([lng, lat]);
+  }
+  return out;
+}
+/** The distance along the surface, in metres. */
+export function greatCircleMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const r = Math.PI / 180, dLat = (b.lat - a.lat) * r, dLng = (b.lng - a.lng) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371_008.8 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+/** A rough flying time: about 830 km/h in the air, plus half an hour for take-off, climb and landing. An estimate only. */
+export const flightSeconds = (meters: number) => Math.round((meters / 1000 / 830) * 3600 + 30 * 60);
