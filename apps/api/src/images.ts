@@ -146,20 +146,38 @@ const OPENAI_SIZE: Record<ImageShape, string> = { square: '1024x1024', wide: '15
 const PIXELS: Record<ImageShape, [number, number]> = { square: [1024, 1024], wide: [1344, 768], tall: [768, 1344] };
 
 // ---------------------------------------------------------------- making a picture
-/** Cloudflare's FLUX.1 schnell, on Niko's own account (shares the free daily allowance with the brain and voices). */
-export async function workersImage(env: Env, prompt: string): Promise<Picture> {
-  let msg = '';
-  try {
-    const out: any = await env.AI.run(WORKERS_IMAGE_MODEL as any, { prompt, steps: 4, seed: Math.floor(Math.random() * 2_000_000_000) } as any);
-    if (out?.image) return fromB64(out.image);
-    msg = 'no image';
-  } catch (e) { if (e instanceof BrainFail) throw e; msg = String((e as Error)?.message ?? e); }
-  if (/4006|daily free allocation|neurons/i.test(msg)) {
-    const d = new Date(); const midnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) + 30_000;
-    throw new BrainFail('workers daily allowance', 'limit', midnight - Date.now(), 'Cloudflare’s free allowance for today is used up; it resets at midnight UTC.');
+/** FLUX.1 schnell on Workers AI takes prompts of up to 2,048 characters; longer ones are cut at a word. */
+const WORKERS_MAX_PROMPT = 2000;
+export const clipPrompt = (p: string, max = WORKERS_MAX_PROMPT) => (p.length <= max ? p : p.slice(0, max + 1).replace(/\s+\S*$/, ''));
+/** A plainer prompt: words that photo-style prompts use but word filters often read as violence, taken out. */
+export const plainPrompt = (p: string) => p
+  .replace(/\b(?:wide|close|long|medium|establishing|aerial|cinematic|drone|action|hero|money|beauty|glamou?r)[- ]?(?:angle )?shots?\b/gi, 'view')
+  .replace(/\b(?:shots?|shoot(?:ing)?|shooting star|captured?|capturing|explosions?|exploding|blast(?:ing)?|blood(?:y)?[- ]red|killer|stunning|striking|bombastic|gun(?:metal)?|bullet|fire(?:works)?|smok(?:e|y|ing)|burning|dramatic|cinematic)\b/gi, '')
+  .replace(/\s+([,.;])/g, '$1').replace(/,\s*,/g, ',').replace(/\s{2,}/g, ' ').trim();
+/** Cloudflare's FLUX.1 schnell, on Niko's own account (shares the free daily allowance with the brain and voices). Its
+ * word filter sometimes turns down an ordinary detailed prompt, so a refusal is followed by a plainer try: the prompt
+ * without photo jargon, then the person's own words. Only when all of those are turned down does it count as declined. */
+export async function workersImage(env: Env, prompt: string, asked = ''): Promise<Picture> {
+  const tries = [...new Set([clipPrompt(prompt), clipPrompt(plainPrompt(prompt)), clipPrompt(asked.trim())].filter((p) => p.length > 0))];
+  let said = '';
+  for (const p of tries) {
+    let msg = '';
+    try {
+      const out: any = await env.AI.run(WORKERS_IMAGE_MODEL as any, { prompt: p, steps: 4, seed: Math.floor(Math.random() * 2_000_000_000) } as any);
+      if (out?.image) return fromB64(out.image);
+      msg = 'no image';
+    } catch (e) { if (e instanceof BrainFail) throw e; msg = String((e as Error)?.message ?? e); }
+    if (/4006|daily free allocation|neurons/i.test(msg)) {
+      const d = new Date(); const midnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) + 30_000;
+      throw new BrainFail('workers daily allowance', 'limit', midnight - Date.now(), 'Cloudflare’s free allowance for today is used up; it resets at midnight UTC.');
+    }
+    // What Cloudflare said is logged (never the prompt), so a wrong reading of an error can be seen and fixed.
+    console.warn(`workers image: ${msg.replace(/\s+/g, ' ').slice(0, 200)}`);
+    if (!DECLINED.test(msg)) throw new BrainFail(`workers image: ${msg.slice(0, 120)}`, 'down', MIN, 'Cloudflare’s image model did not answer just now.');
+    said = msg;
   }
-  if (DECLINED.test(msg)) throw new Declined('Cloudflare’s image model declined it.');
-  throw new BrainFail(`workers image: ${msg.slice(0, 120)}`, 'down', MIN, 'Cloudflare’s image model did not answer just now.');
+  const why = said.replace(/^(?:AiError:\s*)+/i, '').replace(/^\d{3,5}:\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  throw new Declined(`Cloudflare’s image filter turned it down${why ? ` (“${why}”)` : ''}. Try describing it in plainer words.`);
 }
 
 /** One picture through one key. */
@@ -318,7 +336,7 @@ export interface Painted extends Picture { used: ImageSource; label: string; ms:
  * rest; a picture ends it. A service that declines the request is not rested: the next one is asked instead.
  * `only` tries one service (the Engine screen's Test), with an unsaved key where one is given.
  */
-export async function paint(env: Env, db: Db, user: { id: string; engine: unknown }, prompt: string, shape: ImageShape, only?: { entry: ImageSource; key?: ImageKey }, off: readonly string[] = []): Promise<Painted> {
+export async function paint(env: Env, db: Db, user: { id: string; engine: unknown }, prompt: string, shape: ImageShape, only?: { entry: ImageSource; key?: ImageKey }, off: readonly string[] = [], asked = ''): Promise<Painted> {
   const engine = (user.engine ?? {}) as EnginePrefs;
   let keys: ImageKey[] | null = null;
   let order = only ? [only.entry] : imageOrder(engine);
@@ -342,7 +360,7 @@ export async function paint(env: Env, db: Db, user: { id: string; engine: unknow
       let label = 'Cloudflare';
       try {
         let pic: Picture;
-        if (entry === 'workers') pic = await workersImage(env, prompt);
+        if (entry === 'workers') pic = await workersImage(env, prompt, asked);
         else if (entry === 'self-hosted') {
           label = 'Your image server';
           const k = only?.key ?? serverKey((await credentials(env, db, user.id, 'self-hosted-image').catch(() => null)) as any, label);

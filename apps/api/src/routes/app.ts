@@ -699,7 +699,7 @@ The app has these screens: home, inbox, calendar, notes, connections, appearance
 When the user asks to open one particular email, chat, event or note listed in DATA, reply in a few words and end with [[item:<inbox|calendar|notes>:<its title exactly as in DATA>]], such as [[item:notes:Testing 123]]. Emails and chats are in inbox (use the sender's name), events in calendar, notes in notes. Only for items the user asked for.
 You can scroll the screen and turn the pages of the list on screen. When the user asks to scroll, reply in a few words and end with [[scroll:down]], [[scroll:up]], [[scroll:top]] or [[scroll:bottom]]. When they ask for another page of the list, end with [[page:next]], [[page:prev]], [[page:first]], [[page:last]] or [[page:<number>]]. Never say you cannot scroll or change pages.`;
 /** Added to the prompt when an image service is switched on. */
-const IMAGE_RULE = `You can make pictures. When the user asks you to draw, paint, make, create or generate a picture, image, photo, illustration, logo, poster or similar, reply with one short sentence saying what you are making (for example "Painting a lighthouse at dusk.") and end with [[image:<prompt>]]. The prompt is for an image model: a full description of the subject, setting, style, colours, light and composition, in one paragraph, built from what the user asked. Start the prompt with "wide: " or "tall: " only when the user asks for a wide, landscape, banner, tall, portrait or phone-wallpaper picture.
+const IMAGE_RULE = `You can make pictures. When the user asks you to draw, paint, make, create or generate a picture, image, photo, illustration, logo, poster or similar, reply with one short sentence saying what you are making (for example "Painting a lighthouse at dusk.") and end with [[image:<prompt>]]. The prompt is for an image model: a plain description of the subject, setting, style, colours, light and composition, in one paragraph of at most 70 words, built from what the user asked. Use plain words: no camera or film jargon (no "shot", "capture", "cinematic") and no words about violence, bodies or danger unless the user asked for them, because some image filters read those wrongly. Start the prompt with "wide: " or "tall: " only when the user asks for a wide, landscape, banner, tall, portrait or phone-wallpaper picture.
 When the user asks to change the last picture (for example "make it night" or "add a dog"), write a new full prompt that keeps everything from the last [[image:…]] prompt except the change, in a new tag.
 Each image service checks requests against its own rules, so pass picture requests on with the tag rather than declining them yourself. Never put anything from DATA into a prompt unless the user asks for it. Use the tag only when the user asks for a picture.`;
 const NO_IMAGE_RULE = 'You cannot make pictures right now: they are switched off on the Engine screen. If the user asks for one, say so in a sentence.';
@@ -1313,8 +1313,8 @@ export function cleanPrompt(v: unknown): string {
 // The picture is passed straight back and never stored; only that a picture was made is counted, for the limit.
 app.post('/image', async (c) => {
   const u = c.get('user'), db = c.get('db');
-  const b = await c.req.json<{ prompt?: string; shape?: string; source?: string; key?: any }>().catch(() => ({} as any));
-  const prompt = cleanPrompt(b.prompt);
+  const b = await c.req.json<{ prompt?: string; shape?: string; source?: string; key?: any; asked?: string }>().catch(() => ({} as any));
+  const prompt = cleanPrompt(b.prompt), asked = cleanPrompt(b.asked).slice(0, 400);
   if (prompt.length < 3) return c.json({ error: 'Say what the picture should show.' }, 400);
   if (await tooMany(c, 'img:' + u.id, 30, 15)) return c.json({ error: 'Niko has made a lot of pictures in the last few minutes. Try again shortly.' }, 429);
   const shape: ImageShape = b.shape === 'wide' || b.shape === 'tall' ? b.shape : 'square';
@@ -1345,13 +1345,18 @@ app.post('/image', async (c) => {
     }
   }
   try {
-    const p = await paint(c.env, db, u, prompt, shape, only, await offFor(db, u));
+    const p = await paint(c.env, db, u, prompt, shape, only, await offFor(db, u), asked);
     return new Response(p.bytes, { headers: {
       'content-type': p.type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-disposition': 'inline',
       'x-niko-source': p.used, 'x-niko-label': encodeURIComponent(p.label), 'x-niko-ms': String(p.ms),
     } });
   } catch (e) {
-    if (e instanceof Declined) return c.json({ error: only ? `It declined that picture under its own rules.${e.detail ? ` It said: “${e.detail}”` : ''}` : 'Every image service declined that picture under its own rules.', declined: true, detail: e.detail }, 422);
+    if (e instanceof Declined) {
+      // With one service in the order, its own words say why (Cloudflare's filter, say); with several, a summary.
+      const one = e.detail && !e.detail.includes(' · ') ? e.detail.replace(/^[^:]{1,60}:\s*/, '') : '';
+      const error = only ? `It declined that picture under its own rules.${e.detail ? ` It said: “${e.detail}”` : ''}` : one || 'Every image service declined that picture under its own rules. Try describing it in plainer words.';
+      return c.json({ error, declined: true, detail: e.detail }, 422);
+    }
     const f = e instanceof BrainFail ? e : null;
     if (f?.message === 'no services') return c.json({ error: f.detail }, 400);
     if (f?.message === 'not on account') return c.json({ error: f.detail }, 403);

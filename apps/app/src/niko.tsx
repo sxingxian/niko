@@ -14,6 +14,8 @@ export type { Brief } from '@niko/shared';
 export interface PictureItem {
   id: number; prompt: string; shape: 'square' | 'wide' | 'tall'; status: 'painting' | 'done' | 'failed'; started: number;
   url?: string; type?: string; label?: string; ms?: number; error?: string;
+  /** The person's own words for it: a plainer prompt for a service whose filter turns down the detailed one. */
+  asked?: string;
 }
 const MAX_PICTURES = 8;
 
@@ -93,7 +95,7 @@ interface NikoState {
   /** Pictures made in this visit (oldest first), and the one on screen. */
   pictures: PictureItem[];
   picture: PictureItem | null;
-  paintPicture: (prompt: string, shape: PictureItem['shape'], more?: boolean) => void;
+  paintPicture: (prompt: string, shape: PictureItem['shape'], more?: boolean, asked?: string) => void;
   showPicture: (id: number) => void;
   closePicture: () => void;
   /** The map on Home, and what can be changed on it. */
@@ -497,7 +499,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         mapCtl.current?.abort(); mapRef.current = null; setMap(null);
         say(answer || 'Painting that now.', 0);
         if (here.current !== '/') navigate('/');
-        paintPicture(image.prompt, image.shape);
+        paintPicture(image.prompt, image.shape, false, text);
         return;
       }
       setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setReply(answer); say(answer, 0);
@@ -612,12 +614,12 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const closeMapFn = () => { mapCtl.current?.abort(); mapCtl.current = null; locationWait.current?.(false); locationWait.current = null; mapRef.current = null; setMap(null); };
 
   /** Paints a picture with the first image service that will (the server goes down the Engine screen's order). */
-  const paintPicture = (prompt: string, shape: PictureItem['shape'], more = false) => {
+  const paintPicture = (prompt: string, shape: PictureItem['shape'], more = false, words?: string) => {
     picCtl.current?.abort();
     const ctl = new AbortController();
     picCtl.current = ctl;
     const id = ++picSeq.current;
-    updatePictures((p) => [...p, { id, prompt, shape, status: 'painting', started: Date.now() }]);
+    updatePictures((p) => [...p, { id, prompt, shape, status: 'painting', started: Date.now(), asked: words }]);
     setPictureId(id); setReply(null);
     mapCtl.current?.abort(); mapRef.current = null; setMap(null);
     const asked = askId.current;
@@ -635,7 +637,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     };
     void (async () => {
       try {
-        const r = await fetch('/api/image', { method: 'POST', credentials: 'same-origin', signal: ctl.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, shape }) });
+        const r = await fetch('/api/image', { method: 'POST', credentials: 'same-origin', signal: ctl.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, shape, asked: words }) });
         if (!r.ok) { const j = await r.json().catch(() => ({})); throw Object.assign(new Error(j.error ?? 'The picture could not be made just now.'), { declined: !!j.declined }); }
         const blob = await r.blob();
         if (!/^image\/(jpeg|png|webp)$/.test(blob.type)) throw new Error('The picture could not be read.');

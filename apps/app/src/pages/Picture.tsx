@@ -165,7 +165,7 @@ export function PictureCard({ pic, tabbable }: { pic: PictureItem; tabbable: boo
 
   const act = async (what: 'save' | 'share' | 'more' | 'close', byVoice: boolean) => {
     if (what === 'close') { n.closePicture(); if (byVoice) n.carryOn(); return; }
-    if (what === 'more') { n.paintPicture(pic.prompt, pic.shape, true); return; }
+    if (what === 'more') { n.paintPicture(pic.prompt, pic.shape, true, pic.asked); return; }
     if (pic.status !== 'done') { if (byVoice) { n.setStatus('Heard', 'The picture isn’t finished yet.', 'speaking'); window.setTimeout(n.carryOn, 1400); } return; }
     if (what === 'save') {
       savePicture(pic); setNote('Saved to your device.');
@@ -203,7 +203,7 @@ export function PictureCard({ pic, tabbable }: { pic: PictureItem; tabbable: boo
       <div ref={frame} className={'pic-frame' + (pic.status === 'painting' ? ' busy' : '')} style={{ ['--ar' as string]: String(ar) }}>
         {pic.status !== 'failed' && !revealed && <Paint pic={pic} frame={frame} onRevealed={reveal} />}
         {pic.url && <img src={pic.url} alt={`A picture Niko made: ${pic.prompt}`} className={revealed ? 'on' : ''} draggable={false} />}
-        {pic.status === 'failed' && <div className="pic-failed"><p>{pic.error}</p><button className="sec" onClick={() => n.paintPicture(pic.prompt, pic.shape)} tabIndex={tab}>Try again</button></div>}
+        {pic.status === 'failed' && <div className="pic-failed"><p>{pic.error}</p><button className="sec" onClick={() => n.paintPicture(pic.prompt, pic.shape, false, pic.asked)} tabIndex={tab}>Try again</button></div>}
       </div>
       <p className="pic-prompt" title={pic.prompt}>“{pic.prompt}”</p>
       {pic.status === 'done' && <>

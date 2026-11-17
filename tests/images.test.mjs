@@ -205,3 +205,28 @@ await ok('what to do with the picture by voice', () => {
   for (const s of ['make it night', 'add a dog', 'what is the weather', 'send it']) assert.equal(pictureCommand(s), null, s);
 });
 console.log(`${pass} picture checks passed`);
+
+// Cloudflare's word filter: a refusal is followed by a plainer prompt, then the person's own words.
+{
+  const { workersImage, plainPrompt, clipPrompt } = await import('../apps/api/src/images.ts');
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const run = async (answers) => { const seen = []; const env = { AI: { run: async (_m, i) => { seen.push(i.prompt); const a = answers.shift(); if (a instanceof Error) throw a; return a; } } }; return { env, seen }; };
+  const t = async (name, fn) => { try { await fn(); console.log('PASS', name); } catch (e) { console.log('FAIL', name, e?.stack ?? e); process.exitCode = 1; } };
+  await t('a filtered prompt is tried again in plainer words, then in the person’s own words', async () => {
+    const { env, seen } = await run([new Error('AiError: 3030: Input prompt contains NSFW content.'), new Error('AiError: 3030: Input prompt contains NSFW content.'), { image: PNG }]);
+    const pic = await workersImage(env, 'A breathtaking wide-angle shot of a futuristic city, cinematic, dramatic smoky light', 'a futuristic city at night');
+    assert.ok(pic.bytes.byteLength > 0);
+    assert.equal(seen.length, 3); assert.ok(!/shot|cinematic|dramatic|smok/i.test(seen[1]), seen[1]); assert.equal(seen[2], 'a futuristic city at night');
+  });
+  await t('when every try is filtered, Niko says Cloudflare’s filter turned it down and why', async () => {
+    const { env } = await run([1, 2, 3].map(() => new Error('AiError: 3030: Input prompt contains NSFW content.')));
+    await assert.rejects(workersImage(env, 'a city at night, cinematic', 'a city'), (e) => e.message === 'declined' && /filter turned it down \(“Input prompt contains NSFW content\.”\)/.test(e.detail));
+  });
+  await t('other errors are not read as a refusal, and long prompts are cut to fit', async () => {
+    const { env, seen } = await run([new Error('AiError: 3040: Capacity temporarily exceeded')]);
+    await assert.rejects(workersImage(env, 'x'.repeat(10) + ' ' + 'word '.repeat(600), 'y'), (e) => e.why === 'down');
+    assert.ok(seen[0].length <= 2000);
+    assert.equal(clipPrompt('a b c', 3), 'a b');
+    assert.equal(plainPrompt('A wide shot of a lake, stunning, captured at dawn'), 'A view of a lake, at dawn');
+  });
+}
