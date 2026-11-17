@@ -415,3 +415,5 @@ body { background: #07090d; }
   .lim-row { grid-template-columns: 1fr; gap: 8px; }
   .lim-headrow { display: none; }
 }
+.setup .svc.blocked { opacity: .55; }
+.off-line { font-size: 13px; line-height: 1.5; padding: 10px 14px; border-radius: 14px; border: 1px dashed rgba(255,255,255,.22); }

@@ -992,7 +992,8 @@ function SetupSheet({ target, startTab, copy, others, onClose, onSaved }: {
       try {
         const [r] = await Promise.all([api<SetupReply & { off: string[] }>(`/admin/setup/${target.who}/${target.id}`), loadLib()]);
         setData(r);
-        if (copy) { setD(copy.draft); setDirty(true); setNote(`Copied from ${copy.from}. Check it, then save.`); }
+        // A copied setup never brings back what AI options turn off for this person.
+        if (copy) { setD({ ...copy.draft, builtins: Object.fromEntries(USAGE_KINDS.map((x) => [x, copy.draft.builtins[x] && r.builtins[x]])) as Record<UsageKind, boolean> }); setDirty(true); setNote(`Copied from ${copy.from}. Check it, then save.`); }
         else setD({ keys: r.setup.keys, order: r.setup.order, builtins: r.builtins, limits: r.limits });
       } catch (e) { setErr((e as Error).message); }
     })();
@@ -1011,8 +1012,13 @@ function SetupSheet({ target, startTab, copy, others, onClose, onSaved }: {
   const setList = (k: UsageKind, l: string[]) => change({ keys: { ...d.keys, [k]: l } });
   const libOf = (id: string) => lib.find((x) => x.id === id);
   const provCount = (k: UsageKind) => providedIds(d.keys[k]).length;
-  const brainEmpty = !provCount('brain') && !d.builtins.brain;
   const off = data.off ?? [];
+  // AI options decide what this person may use; the setup only arranges what is allowed.
+  const allowed = data.builtins;
+  const SECTION: Partial<Record<UsageKind, string>> = { voice: 'sec:voices', hear: 'sec:hears', image: 'sec:images', map: 'sec:maps' };
+  const secOff = (x: UsageKind) => !!SECTION[x] && off.includes(SECTION[x]!);
+  const keyAllowed = (x: UsageKind, key: PKey) => aiAllowed(off, OPTION_PREFIX[x] + presetOfKey(x, key.info));
+  const brainEmpty = !providedIds(d.keys.brain).some((id) => { const x = libOf(id); return x && keyAllowed('brain', x); }) && !d.builtins.brain;
   const k = tab === 'caps' ? null : tab;
   const tabs: [UsageKind | 'caps', string][] = [['brain', 'AI · answers'], ['voice', 'Voice'], ['hear', 'Listening'], ['image', 'Pictures'], ['map', 'Maps'], ['caps', 'Usage cap']];
   const tabName = tabs.find((t) => t[0] === tab)![1];
@@ -1038,13 +1044,13 @@ function SetupSheet({ target, startTab, copy, others, onClose, onSaved }: {
     setBusy(true);
     try {
       const give = { users: adding.give.filter((id) => others.find((o) => o.id === id)?.kind === 'user'), invites: adding.give.filter((id) => others.find((o) => o.id === id)?.kind === 'invite') };
-      const r = await api<{ key: { id: string } }>('/admin/setup/keys', { body: { kind: k, key: keyBody(k, { ...adding.form, preset: adding.preset }), give } });
+      const r = await api<{ key: { id: string }; given: number; skipped: number }>('/admin/setup/keys', { body: { kind: k, key: keyBody(k, { ...adding.form, preset: adding.preset }), give } });
       await loadLib();
-      setList(k, [r.key.id, ...list(k)]); setAdding(null);
+      setD((cur) => (cur ? { ...cur, keys: { ...cur.keys, [k]: [r.key.id, ...listOf(cur.keys, cur.builtins, k)] } } : cur)); setDirty(true); setAdding(null);
+      if (r.given || r.skipped) setNote(`Also given to ${r.given} ${r.given === 1 ? 'person' : 'people'}${r.skipped ? `; ${r.skipped} couldn’t get it because AI options turn ${provName} off for them` : ''}.`);
     } catch (e) { setAddErr((e as Error).message); } finally { setBusy(false); }
   };
   const save = async () => {
-    if (brainEmpty) { setTab('brain'); return setErr(`Add a way for Niko to answer ${first} first.`); }
     setBusy(true); setErr('');
     try {
       const keys = Object.fromEntries(USAGE_KINDS.map((x) => [x, list(x)]));
@@ -1055,7 +1061,7 @@ function SetupSheet({ target, startTab, copy, others, onClose, onSaved }: {
 
   // ---- one part's list
   const rows = k ? list(k) : [];
-  const fixedRows: [string, string, string][] = k === 'map' ? [['OpenStreetMap', 'Built in · always last', 'Built in']] : k && DEVICE_ROW[k] ? [[DEVICE_ROW[k]![0], DEVICE_ROW[k]![1], 'Device']] : [];
+  const fixedRows: [string, string, string][] = k === 'map' ? (allowed.map ? [['OpenStreetMap', 'Built in · always last', 'Built in']] : []) : k && DEVICE_ROW[k] ? [[DEVICE_ROW[k]![0], DEVICE_ROW[k]![1], 'Device']] : [];
   const move = (i: number, by: -1 | 1) => { if (!k) return; const l = [...rows]; const j = i + by; [l[i], l[j]] = [l[j]!, l[i]!]; setList(k, l); };
   const remove = (token: string) => {
     if (!k) return;
@@ -1097,14 +1103,16 @@ function SetupSheet({ target, startTab, copy, others, onClose, onSaved }: {
           <div className="setup-main">
             {k && <>
               <div className="setup-sec-head"><span className="k">{tabName} · in the order Niko tries them</span>
-                <span className="sub">{k === 'map' ? 'OpenStreetMap is always last and can’t be removed.' : `Built-in services need no key. Remove any you don’t want ${first} to use.`}</span></div>
-              {rows.map((token, i) => {
+                <span className="sub">{k === 'map' ? (allowed.map ? 'OpenStreetMap is always last and can’t be removed.' : 'OpenStreetMap is turned off in AI options.') : `Built-in services need no key. Remove any you don’t want ${first} to use.`}</span></div>
+              {secOff(k) && <p className="sub off-line">{tabName} {k === 'map' ? 'are' : k === 'voice' ? 'voices are' : 'is'} turned off for {first} in AI options, so there’s nothing to set up here{k === 'voice' ? ' beyond the device voice' : k === 'hear' ? ' beyond the device’s own recognition' : ''}. Change it in AI options first.</p>}
+              {!secOff(k) && rows.map((token, i) => {
                 const x = token === BUILTIN_TOKEN ? null : libOf(token);
                 const name = token === BUILTIN_TOKEN ? BUILT_ROW[k] : x ? serviceName(k, x.info) : 'Removed key';
-                const sub = token === BUILTIN_TOKEN ? 'Built in · Cloudflare · no key needed' : x ? `${x.label} ··· ${x.info.hint || '····'} · added by you · ${first} can’t see it` : 'No longer kept';
-                return <div key={token} className="svc">
+                const blocked = !!x && !keyAllowed(k, x);
+                const sub = token === BUILTIN_TOKEN ? 'Built in · Cloudflare · no key needed' : blocked ? `Turned off for ${first} in AI options · not given when you save` : x ? `${x.label} ··· ${x.info.hint || '····'} · added by you · ${first} can’t see it` : 'No longer kept';
+                return <div key={token} className={'svc' + (blocked ? ' blocked' : '')}>
                   <span className="svc-n">{i + 1}</span>
-                  <span className="svc-txt"><span className="svc-name"><b>{name}</b><span className={'tag' + (token === BUILTIN_TOKEN ? '' : ' own')}>{token === BUILTIN_TOKEN ? 'Built in' : 'From you'}</span></span><span className="sub">{sub}</span></span>
+                  <span className="svc-txt"><span className="svc-name"><b>{name}</b><span className={'tag' + (token === BUILTIN_TOKEN || blocked ? '' : ' own')}>{token === BUILTIN_TOKEN ? 'Built in' : blocked ? 'Off in AI options' : 'From you'}</span></span><span className="sub">{sub}</span></span>
                   <span className="svc-mv"><button className="mv" onClick={() => move(i, -1)} disabled={i === 0} aria-label={`Move ${name} up`}>↑</button><button className="mv" onClick={() => move(i, 1)} disabled={i === rows.length - 1} aria-label={`Move ${name} down`}>↓</button></span>
                   <span className="svc-rm"><button className="lnk" onClick={() => remove(token)}>Remove</button></span>
                 </div>;
@@ -1115,9 +1123,10 @@ function SetupSheet({ target, startTab, copy, others, onClose, onSaved }: {
                 <span className="svc-mv"><button className="mv" disabled aria-label={`${name} stays last`}>↑</button><button className="mv" disabled aria-label={`${name} stays last`}>↓</button></span>
                 <span className="svc-rm" />
               </div>)}
-              {k !== 'map' && !d.builtins[k] && <button className="lnk" style={{ alignSelf: 'flex-start', paddingLeft: 0 }} onClick={() => change({ builtins: { ...d.builtins, [k]: true } })}>Put {BUILT_ROW[k]} back</button>}
-              {k === 'brain' && brainEmpty && <p className="warn-line" role="alert">Nothing left to answer {first}. Add a service with your key, or put Workers AI back. You can’t save it like this.</p>}
-              {!adding && <button className="bt" style={{ alignSelf: 'flex-start', marginTop: 4 }} onClick={openAdd} disabled={!presets.length}>＋ Add a service with your key</button>}
+              {!secOff(k) && k !== 'map' && allowed[k] && !d.builtins[k] && <button className="lnk" style={{ alignSelf: 'flex-start', paddingLeft: 0 }} onClick={() => change({ builtins: { ...d.builtins, [k]: true } })}>Put {BUILT_ROW[k]} back</button>}
+              {!secOff(k) && k !== 'map' && !allowed[k] && <p className="sub off-line">{BUILT_ROW[k]} is turned off for {first} in AI options, so it isn’t offered here.</p>}
+              {k === 'brain' && brainEmpty && <p className="warn-line" role="status">No included way to answer yet: {first} will need an AI key of their own. Add a service with your key to include one.</p>}
+              {!adding && !secOff(k) && <button className="bt" style={{ alignSelf: 'flex-start', marginTop: 4 }} onClick={openAdd} disabled={!presets.length}>＋ Add a service with your key</button>}
               {adding && <div className="addbox">
                 <div className="psec-row"><b className="addbox-title">Add a service for {first}</b><button className="lnk" onClick={() => { setAdding(null); setAddErr(''); }}>Cancel</button></div>
                 <div className="chips-wrap" role="group" aria-label="Service">{presets.map((p) => <button key={p.id} className="chipb" aria-pressed={adding.preset === p.id} onClick={() => pickPreset(p.id)}>{p.name}</button>)}</div>
@@ -1198,11 +1207,16 @@ function EngineCard({ who, id, name, onSetup, onCopy, copyFrom }: {
   if (!data) return <div className="psec"><span className="k">Engine</span><span className="sub small">Loading…</span></div>;
   const provided = USAGE_KINDS.reduce((n, k) => n + providedIds(data.setup.keys[k]).length, 0);
   const short = (k: UsageKind, token: string) => { if (token === BUILTIN_TOKEN) return BUILT_SHORT[k]; const x = lib.find((y) => y.id === token); return x ? `${serviceName(k, x.info).split(' · ')[0]} (your key)` : ''; };
+  const off = data.off ?? [];
+  const SECTION: Partial<Record<UsageKind, string>> = { voice: 'sec:voices', hear: 'sec:hears', image: 'sec:images', map: 'sec:maps' };
   const line = (k: UsageKind) => {
-    const l = listOf(data.setup.keys, data.builtins, k).map((t) => short(k, t)).filter(Boolean);
-    if (k === 'map') l.push('OpenStreetMap');
+    if (SECTION[k] && off.includes(SECTION[k]!)) return k === 'voice' ? 'Device voice only (AI options)' : k === 'hear' ? 'Device recognition only (AI options)' : 'Turned off in AI options';
+    const l = listOf(data.setup.keys, data.builtins, k)
+      .filter((t) => { const x = t === BUILTIN_TOKEN ? null : lib.find((y) => y.id === t); return !x || aiAllowed(off, OPTION_PREFIX[k] + presetOfKey(k, x.info)); })
+      .map((t) => short(k, t)).filter(Boolean);
+    if (k === 'map' && data.builtins.map) l.push('OpenStreetMap');
     if (k === 'voice' || k === 'hear') l.push(k === 'voice' ? 'Device voice' : 'Device speech recognition');
-    return l.length ? l.slice(0, 2).join(', then ') : 'None';
+    return l.length ? l.slice(0, 2).join(', then ') : k === 'brain' ? 'Their own AI key' : k === 'image' ? 'Their own image key' : k === 'map' ? 'Their own map key' : 'None';
   };
   const parts: [UsageKind, string][] = [['brain', 'Answers'], ['voice', 'Voice'], ['hear', 'Listening'], ['image', 'Pictures'], ['map', 'Maps']];
   const tag = provided ? (who === 'user' ? 'Set up by you' : `Ready for when ${first} joins`) : 'Default';

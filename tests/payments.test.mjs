@@ -1033,7 +1033,7 @@ await ok('included services: the admin’s key is kept sealed, given through an 
   // Set up before they join: their key first and fixed, Workers AI removed, 100 answers a month.
   await admin.post('/admin/invites', { email: 'ivy@example.com', access: 'life' });
   const inv = (await admin.get('/admin/users?show=invited&q=ivy')).data.items[0];
-  assert.equal((await admin.put(`/admin/setup/invite/${inv.id}`, { keys: { brain: [] }, builtins: { brain: false } })).status, 400, 'something must still answer');
+  assert.equal((await admin.put(`/admin/setup/invite/${inv.id}`, { keys: { brain: [] }, builtins: { brain: false } })).status, 200, 'with nothing included, they bring their own key');
   r = await admin.put(`/admin/setup/invite/${inv.id}`, { keys: { brain: [pid, 'pxnotakeyxxx'] }, order: 'fixed', builtins: { brain: false }, limits: { brain: 100 } });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   r = await admin.get(`/admin/setup/invite/${inv.id}`);
@@ -1109,6 +1109,24 @@ await ok('included services: the admin’s key is kept sealed, given through an 
   assert.equal((await admin.put(`/admin/setup/user/${u.id}`, { keys: { brain: [pid] }, order: 'free', builtins: { brain: false } })).status, 200);
   await ivy.patch('/me', { engine: { brains: [`key:${own}`, `key:${pid}`] } });
   assert.deepEqual((await user('ivy@example.com')).engine.brains, [`key:${own}`, `key:${pid}`]);
+  // AI options decide: the setup never turns back on what they turn off.
+  assert.equal((await admin.put('/admin/ai/default', { access: { 'workers-ai': false, 'img:workers': false } })).status, 200);
+  r = await admin.get(`/admin/setup/user/${u.id}`);
+  assert.equal(r.data.builtins.brain, false); assert.equal(r.data.builtins.image, false);
+  r = await admin.put(`/admin/setup/user/${u.id}`, { keys: { brain: [pid] }, builtins: { brain: true } });
+  assert.equal(r.status, 400); assert.match(r.data.error, /AI options/);
+  // Off by default but on for her: the setup may use it.
+  assert.equal((await admin.put(`/admin/ai/users/${u.id}`, { access: { 'workers-ai': true } })).status, 200);
+  assert.equal((await admin.get(`/admin/setup/user/${u.id}`)).data.builtins.brain, true);
+  // A key for a service AI options turn off for her isn't given, here or through "Also give it to".
+  assert.equal((await admin.put(`/admin/ai/users/${u.id}`, { access: { 'workers-ai': true, 'ai:groq': false } })).status, 200);
+  assert.equal((await admin.put(`/admin/setup/user/${u.id}`, { keys: { brain: ['builtin', pid] }, builtins: { brain: true } })).status, 200);
+  assert.deepEqual((await user('ivy@example.com')).provided.keys.brain, ['builtin']);
+  r = await admin.post('/admin/setup/keys', { kind: 'brain', key: { baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', apiKey: 'gsk_second_key_5678' }, give: { users: [u.id] } });
+  assert.equal(r.status, 200); assert.equal(r.data.given, 0); assert.equal(r.data.skipped, 1);
+  assert.equal((await admin.del(`/admin/setup/keys/${r.data.key.id}`)).status, 200);
+  await admin.put(`/admin/ai/users/${u.id}`, { access: {} }); await admin.put('/admin/ai/default', { access: {} });
+
   // Workers AI can sit anywhere in the admin's list: here first, then the included key.
   assert.equal((await admin.put(`/admin/setup/user/${u.id}`, { keys: { brain: ['builtin', pid] }, order: 'fixed', builtins: { brain: true } })).status, 200);
   assert.deepEqual((await user('ivy@example.com')).engine.brains.slice(0, 2), ['workers-ai', `key:${pid}`]);

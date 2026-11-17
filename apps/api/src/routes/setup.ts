@@ -5,7 +5,7 @@
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { invites, providedKeys, users } from '@niko/db';
-import { accountLimits, aiHasBrain, aiOff, aiProviderOf, BUILTIN_TOKEN, providedIds, cleanAccountLimits, cleanAiAccess, cleanProvided, NOT_CHAT, USAGE_KINDS, type EnginePrefs, type ProvidedSetup, type UsageKind } from '@niko/shared';
+import { accountLimits, aiAllowed, aiHasBrain, aiOff, aiProviderOf, brainOption, hearOption, imageOption, mapOption, mapsOn, voiceOption, BUILTIN_TOKEN, providedIds, cleanAccountLimits, cleanAiAccess, cleanProvided, NOT_CHAT, USAGE_KINDS, type EnginePrefs, type ProvidedSetup, type UsageKind } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { audit, requireAdmin } from '../lib/session';
 import { publicHttpsUrl } from '../providers';
@@ -28,6 +28,15 @@ const KINDS = USAGE_KINDS as readonly UsageKind[];
 const isKind = (k: unknown): k is UsageKind => KINDS.includes(k as UsageKind);
 /** The built-in Workers AI switch for each kind (AI options keys). Maps keep OpenStreetMap as the last resort. */
 const BUILTIN: Partial<Record<UsageKind, string>> = { brain: 'workers-ai', voice: 'v:workers', hear: 'h:workers', image: 'img:workers' };
+const BUILTIN_NAMES: Partial<Record<UsageKind, string>> = { brain: 'Workers AI', voice: 'Workers AI voice', hear: 'Workers AI listening', image: 'Workers AI pictures' };
+/** Which built-in services AI options let this person use (a section that is off turns off all of it; maps keep
+ * OpenStreetMap only when it is on). The setup works inside AI options and never turns anything back on. */
+const builtinsAllowed = (off: string[]) => Object.fromEntries(KINDS.map((k) => [k, aiAllowed(off, k === 'map' ? 'map:osm' : BUILTIN[k]!) && (k !== 'map' || mapsOn(off))])) as Record<UsageKind, boolean>;
+/** The AI options entry a provided key belongs to, by its service. */
+function keyOption(kind: UsageKind, info: Record<string, string>): string {
+  const k = { provider: info.provider as any, baseUrl: info.baseUrl ?? '' };
+  return kind === 'brain' ? brainOption('key:x', k.baseUrl) : kind === 'voice' ? voiceOption('vkey:x', k) : kind === 'hear' ? hearOption('skey:x', k) : kind === 'image' ? imageOption('ikey:x', k) : mapOption('mkey:x', k);
+}
 const clip = (v: unknown, n: number) => (typeof v === 'string' ? v.trim().slice(0, n) : '');
 
 /** A key from the form, checked for its kind: its secret (sealed) and what may be shown. */
@@ -83,18 +92,21 @@ async function setupOfInvite(db: any, id: string) {
 const inviteSetup = (v: unknown) => (v && typeof v === 'object' ? v : {}) as { provided?: unknown; aiAccess?: unknown; limits?: unknown; engine?: unknown };
 
 /** Gives one person or invite a provided key (at the top of that kind), keeping the rest of their setup. */
-async function giveKey(db: any, who: 'user' | 'invite', id: string, kind: UsageKind, keyId: string) {
+async function giveKey(db: any, who: 'user' | 'invite', id: string, kind: UsageKind, keyId: string, option: string, defaults: Record<string, boolean>): Promise<boolean> {
   if (who === 'user') {
-    const u = await setupOfUser(db, id); if (!u) return;
+    const u = await setupOfUser(db, id); if (!u) return false;
+    if (!aiAllowed(aiOff(defaults, cleanAiAccess(u.aiAccess), u.role === 'admin'), option)) return false;
     const s = cleanProvided(u.provided);
     s.keys[kind] = [keyId, ...(s.keys[kind] ?? []).filter((x) => x !== keyId)];
     await db.update(users).set({ provided: { ...s, setAt: new Date().toISOString() }, engine: engineWithProvided(u.engine as Partial<EnginePrefs>, s) as any }).where(eq(users.id, u.id));
   } else {
-    const inv = await setupOfInvite(db, id); if (!inv) return;
+    const inv = await setupOfInvite(db, id); if (!inv) return false;
     const cur = inviteSetup(inv.setup), s = cleanProvided(cur.provided);
+    if (!aiAllowed(aiOff(defaults, cleanAiAccess(cur.aiAccess), inv.role === 'admin'), option)) return false;
     s.keys[kind] = [keyId, ...(s.keys[kind] ?? []).filter((x) => x !== keyId)];
     await db.update(invites).set({ setup: { ...cur, provided: s, engine: engineWithProvided((cur.engine ?? {}) as Partial<EnginePrefs>, s) } }).where(eq(invites.id, inv.id));
   }
+  return true;
 }
 /** Takes a provided key away from everyone who has it (when the key is removed). */
 async function takeKeyFromAll(db: any, keyId: string) {
@@ -135,10 +147,13 @@ setup.post('/keys', async (c) => {
   await db.insert(providedKeys).values({ id, kind: b.kind, label: k.label, info: k.info, secretEnc: await sealProvided(c.env, { ...k.secret, label: k.label }), createdBy: c.get('user').id });
   const toUsers = Array.isArray(b.give?.users) ? (b.give.users as unknown[]).map(String).slice(0, 200) : [];
   const toInvites = Array.isArray(b.give?.invites) ? (b.give.invites as unknown[]).map(String).slice(0, 200) : [];
-  for (const uid of toUsers) await giveKey(db, 'user', uid, b.kind, id);
-  for (const iid of toInvites) await giveKey(db, 'invite', iid, b.kind, id);
-  await audit(c, 'provided-key.added', { kind: b.kind, service: String(k.info.provider ?? ''), label: k.label, given: toUsers.length + toInvites.length }, c.get('user').id);
-  return c.json({ ok: true, key: { id, kind: b.kind, label: k.label, info: k.info } });
+  // Only to people whose AI options let them use this service.
+  const defaults = await aiDefaults(db), option = keyOption(b.kind, k.info as Record<string, string>);
+  let given = 0, skipped = 0;
+  for (const uid of toUsers) (await giveKey(db, 'user', uid, b.kind, id, option, defaults)) ? given++ : skipped++;
+  for (const iid of toInvites) (await giveKey(db, 'invite', iid, b.kind, id, option, defaults)) ? given++ : skipped++;
+  await audit(c, 'provided-key.added', { kind: b.kind, service: String(k.info.provider ?? ''), label: k.label, given }, c.get('user').id);
+  return c.json({ ok: true, key: { id, kind: b.kind, label: k.label, info: k.info }, given, skipped });
 });
 
 // Renames a key, or replaces it (a renewed key): everyone who has it moves to the new one at once.
@@ -182,13 +197,13 @@ setup.get('/:who/:id', async (c) => {
   if (who === 'user') {
     const u = await setupOfUser(db, c.req.param('id'));
     if (!u) return c.json({ error: 'No such user.' }, 404);
-    const off = aiOff(defaults, cleanAiAccess(u.aiAccess));
-    return c.json({ setup: cleanProvided(u.provided), builtins: Object.fromEntries(KINDS.map((k) => [k, BUILTIN[k] ? !off.includes(BUILTIN[k]!) : true])), off, limits: cleanAccountLimits(u.accountLimits), limitDefaults, usage: (await monthUsage(db, u.id)).kinds, joined: true });
+    const off = aiOff(defaults, cleanAiAccess(u.aiAccess), u.role === 'admin');
+    return c.json({ setup: cleanProvided(u.provided), builtins: builtinsAllowed(off), off, limits: cleanAccountLimits(u.accountLimits), limitDefaults, usage: (await monthUsage(db, u.id)).kinds, joined: true });
   }
   const inv = await setupOfInvite(db, c.req.param('id'));
   if (!inv) return c.json({ error: 'That invite is no longer open.' }, 404);
-  const cur = inviteSetup(inv.setup), off = aiOff(defaults, cleanAiAccess(cur.aiAccess));
-  return c.json({ setup: cleanProvided(cur.provided), builtins: Object.fromEntries(KINDS.map((k) => [k, BUILTIN[k] ? !off.includes(BUILTIN[k]!) : true])), off, limits: cleanAccountLimits(cur.limits), limitDefaults, usage: null, joined: false });
+  const cur = inviteSetup(inv.setup), off = aiOff(defaults, cleanAiAccess(cur.aiAccess), inv.role === 'admin');
+  return c.json({ setup: cleanProvided(cur.provided), builtins: builtinsAllowed(off), off, limits: cleanAccountLimits(cur.limits), limitDefaults, usage: null, joined: false });
 });
 
 setup.put('/:who/:id', async (c) => {
@@ -196,7 +211,7 @@ setup.put('/:who/:id', async (c) => {
   if (who !== 'user' && who !== 'invite') return c.json({ error: 'Not found.' }, 404);
   const b = await c.req.json<{ keys?: unknown; order?: unknown; builtins?: Record<string, unknown>; limits?: unknown }>().catch(() => ({} as any));
   // Only keys that are kept, and of the right kind, can be given.
-  const kept = await db.select({ id: providedKeys.id, kind: providedKeys.kind }).from(providedKeys);
+  const kept = await db.select({ id: providedKeys.id, kind: providedKeys.kind, info: providedKeys.info }).from(providedKeys);
   const asked = cleanProvided({ keys: b.keys, order: b.order });
   const s: ProvidedSetup = { keys: {}, order: asked.order, setAt: new Date().toISOString() };
   for (const k of KINDS) { const l = (asked.keys[k] ?? []).filter((id) => id === BUILTIN_TOKEN || kept.some((x) => x.id === id && x.kind === k)); if (providedIds(l).length || l.length) s.keys[k] = l; }
@@ -204,18 +219,24 @@ setup.put('/:who/:id', async (c) => {
   const target = who === 'user' ? await setupOfUser(db, c.req.param('id')) : await setupOfInvite(db, c.req.param('id'));
   if (!target) return c.json({ error: who === 'user' ? 'No such user.' : 'That invite is no longer open.' }, 404);
   const curAccess = cleanAiAccess(who === 'user' ? (target as any).aiAccess : inviteSetup((target as any).setup).aiAccess);
+  // AI options decide what this person may use: the setup can take a built-in service away, never give one back.
+  const isAdmin = (target as { role?: string }).role === 'admin';
+  const curOff = aiOff(defaults, curAccess, isAdmin);
   const access: Record<string, boolean> = { ...curAccess };
   for (const k of KINDS) {
     const opt = BUILTIN[k];
     if (!opt || typeof b.builtins?.[k] !== 'boolean') continue;
-    const on = b.builtins[k] as boolean;
-    if (on === (defaults[opt] ?? true)) delete access[opt]; else access[opt] = on;
+    const allowed = aiAllowed(curOff, opt);
+    if (b.builtins[k] && !allowed) return c.json({ error: `${BUILTIN_NAMES[k]} is turned off for this person in AI options. Change it there first.` }, 400);
+    if (!b.builtins[k] && allowed) access[opt] = false;
   }
-  // Something must answer: a provided AI key, or Workers AI.
-  if (!providedIds(s.keys.brain).length && aiOff(defaults, access).includes('workers-ai')) return c.json({ error: 'Nothing would be left to answer. Add a service with your key, or keep Workers AI.' }, 400);
-  if (!aiHasBrain(aiOff(defaults, access)) && !providedIds(s.keys.brain).length) return c.json({ error: 'Nothing would be left to answer. Keep Workers AI, or add an AI key.' }, 400);
-  // The built-in's place means nothing once it is removed.
-  for (const k of KINDS) if (s.keys[k] && BUILTIN[k] && aiOff(defaults, access).includes(BUILTIN[k]!)) { s.keys[k] = providedIds(s.keys[k]); if (!s.keys[k]!.length) delete s.keys[k]; }
+  const off = aiOff(defaults, access, isAdmin);
+  if (!aiHasBrain(off) && !providedIds(s.keys.brain).length) return c.json({ error: 'Nothing would be left to answer. Keep Workers AI, or add an AI key.' }, 400);
+  // Keys for services AI options turn off for this person aren't given (they would never be used).
+  for (const k of KINDS) if (s.keys[k]) s.keys[k] = s.keys[k]!.filter((id) => id === BUILTIN_TOKEN || aiAllowed(off, keyOption(k, ((kept.find((x) => x.id === id)?.info) ?? {}) as Record<string, string>)));
+  // The built-in's place means nothing once it isn't available.
+  const allowedNow = builtinsAllowed(off);
+  for (const k of KINDS) if (s.keys[k]) { if (!allowedNow[k]) s.keys[k] = providedIds(s.keys[k]); if (!s.keys[k]!.length) delete s.keys[k]; }
   const own = Object.fromEntries(Object.entries(cleanAccountLimits(b.limits)).filter(([k, v]) => v !== (limitDefaults as unknown as Record<string, unknown>)[k]));
   if (who === 'user') {
     const u = target as typeof users.$inferSelect;
