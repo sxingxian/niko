@@ -1,6 +1,6 @@
 // Weather: place lookup, the forecast summary, location rounding and the tags Niko uses to ask for other places.
 import assert from 'node:assert/strict';
-import { cleanWhere, forecastText, geocode, stripWeatherTags, weatherTags } from '../apps/api/src/weather.ts';
+import { cleanWhere, forecastCard, forecastText, geocode, stripWeatherTags, weatherTags, wxIcon } from '../apps/api/src/weather.ts';
 import { isWeatherQuestion } from '../packages/shared/src/index.ts';
 
 let pass = 0;
@@ -30,6 +30,19 @@ globalThis.fetch = async (url) => {
   return new Response('no', { status: 404 });
 };
 
+await ok('the weather card: now, today, the next hours every 3 hours, three days and one short tip', async () => {
+  const c = await forecastCard({ lat: 35.69, lon: 139.69, name: 'Tokyo, Japan' }, 'C', 'Tokyo');
+  assert.equal(c.place, 'Tokyo'); assert.equal(c.units, 'C');
+  assert.deepEqual(c.now, { temp: 15, feels: 12, sky: 'Overcast', icon: 'cloudy' });
+  assert.deepEqual(c.today, { hi: 17, lo: 9, rain: 20 });
+  assert.deepEqual(c.hours.map((h) => h.label), ['Now', '12 pm', '3 pm', '6 pm', '9 pm']);
+  assert.equal(c.hours[1].rain, 84); assert.equal(c.hours[1].icon, 'rain');
+  assert.deepEqual(c.days.map((d) => [d.label, d.hi, d.lo, d.rain, d.icon]), [['Today', 17, 9, 20, 'cloudy'], ['Mon', 15, 10, 85, 'rain'], ['Tue', 19, 8, 0, 'clear']]);
+  assert.equal(c.tip, '');
+  const here = await forecastCard({ lat: 35.69, lon: 139.69, name: 'where the user is now' }, 'C');
+  assert.equal(here.place, 'Tokyo', 'a place from the location is named by its time zone');
+  assert.equal(wxIcon(95), 'storm'); assert.equal(wxIcon(81), 'showers'); assert.equal(wxIcon(73), 'snow'); assert.equal(wxIcon(2), 'partly');
+});
 await ok('weather questions are recognised, others are not', () => {
   for (const q of ['What’s the weather like?', 'Will it rain this afternoon?', 'Do I need an umbrella tomorrow', 'How hot is it in Tokyo', 'forecast for the weekend', 'is it going to be stormy', 'any thunderstorms later', 'Is there drizzle']) assert.ok(isWeatherQuestion(q), q);
   for (const q of ['Reply to Mei Lin', 'What’s on my calendar today', 'Open my notes', 'Draft an email to Priya']) assert.ok(!isWeatherQuestion(q), q);

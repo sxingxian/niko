@@ -2,6 +2,8 @@
 // into a short plain-text summary that goes into Niko's prompt. Places are looked up by name with Open-Meteo's
 // geocoding. Answers are cached briefly; coordinates are rounded to about 1 km before use and never stored.
 
+import type { WeatherCard, WeatherIcon } from '@niko/shared';
+
 export interface Place { lat: number; lon: number; name: string }
 
 const WMO: Record<number, string> = {
@@ -56,8 +58,8 @@ export async function geocode(query: string): Promise<Place | null> {
   });
 }
 
-/** The forecast for one place as a short summary: now, the next 24 hours, and 7 days. */
-export async function forecastText(place: Place, units: 'C' | 'F' = 'C'): Promise<string> {
+/** Open-Meteo's forecast for one place (cached for 15 minutes). */
+async function forecast(place: Place, units: 'C' | 'F'): Promise<any> {
   const f = units === 'F';
   const params = new URLSearchParams({
     latitude: String(round2(place.lat)), longitude: String(round2(place.lon)), timezone: 'auto', forecast_days: '7',
@@ -66,7 +68,13 @@ export async function forecastText(place: Place, units: 'C' | 'F' = 'C'): Promis
     daily: 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,uv_index_max,sunrise,sunset',
     ...(f ? { temperature_unit: 'fahrenheit', wind_speed_unit: 'mph', precipitation_unit: 'inch' } : {}),
   });
-  const j = await cached(`fc:${params}`, 15 * 60, () => getJson(`https://api.open-meteo.com/v1/forecast?${params}`));
+  return cached(`fc:${params}`, 15 * 60, () => getJson(`https://api.open-meteo.com/v1/forecast?${params}`));
+}
+
+/** The forecast for one place as a short summary: now, the next 24 hours, and 7 days. */
+export async function forecastText(place: Place, units: 'C' | 'F' = 'C'): Promise<string> {
+  const f = units === 'F';
+  const j = await forecast(place, units);
   const deg = f ? '°F' : '°C', wind = f ? 'mph' : 'km/h', rainU = f ? 'in' : 'mm';
   const n = (v: unknown) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : '?');
   const c = j?.current ?? {};
@@ -97,3 +105,62 @@ export function weatherTags(reply: string): string[] {
   return [...reply.matchAll(/\[\[weather:([^\]\n]{1,80})\]\]/gi)].map((m) => m[1]!.trim()).filter(Boolean).slice(0, 3);
 }
 export const stripWeatherTags = (reply: string) => reply.replace(/\[\[weather:[^\]\n]{0,80}\]\]/gi, '').trim();
+
+// ---------------------------------------------------------------- the weather card on Home
+/** The kind of sky, for the card's icon. */
+export function wxIcon(code: unknown): WeatherIcon {
+  const c = Number(code);
+  if (c === 0 || c === 1) return 'clear';
+  if (c === 2) return 'partly';
+  if (c === 3) return 'cloudy';
+  if (c === 45 || c === 48) return 'fog';
+  if (c >= 51 && c <= 57) return 'drizzle';
+  if ((c >= 61 && c <= 67)) return 'rain';
+  if (c >= 80 && c <= 82) return 'showers';
+  if ((c >= 71 && c <= 77) || c === 85 || c === 86) return 'snow';
+  if (c >= 95) return 'storm';
+  return 'cloudy';
+}
+const int = (v: unknown) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : null);
+/** One short tip from the numbers (no model is asked, so it is never wordy or wrong about the data). */
+function tipFor(rain: number | null, hi: number | null, lo: number | null, uv: number | null, icon: WeatherIcon, f: boolean): string {
+  const hot = f ? 91 : 33, cold = f ? 41 : 5;
+  if (icon === 'storm' && (rain ?? 0) >= 40) return 'Thunderstorms likely: take an umbrella.';
+  if ((rain ?? 0) >= 60) return 'Take an umbrella.';
+  if ((rain ?? 0) >= 30) return 'Maybe pack an umbrella.';
+  if (icon === 'snow') return 'Snow: wrap up warm.';
+  if (hi !== null && hi >= hot) return 'Hot: drink plenty of water.';
+  if (lo !== null && lo <= cold) return 'Cold: wrap up warm.';
+  if ((uv ?? 0) >= 8) return 'Strong sun: wear sunscreen.';
+  return '';
+}
+/** The card for one place: now, today's high and low and rain, the next hours, and three days. */
+export async function forecastCard(place: Place, units: 'C' | 'F', label?: string): Promise<WeatherCard> {
+  const j = await forecast(place, units);
+  const c = j?.current ?? {}, h = j?.hourly ?? {}, d = j?.daily ?? {};
+  const now = String(c.time ?? '');
+  const times: string[] = Array.isArray(h.time) ? h.time : [];
+  const start = Math.max(0, times.findIndex((t) => t >= now.slice(0, 13)));
+  const hourLabel = (iso: string) => { const hr = Number(iso.slice(11, 13)); return hr === 0 ? '12 am' : hr === 12 ? '12 pm' : hr < 12 ? `${hr} am` : `${hr - 12} pm`; };
+  const hours: WeatherCard['hours'] = [];
+  for (let k = 0; k < 5; k++) {
+    const i = start + k * 3;
+    if (i >= times.length) break;
+    hours.push({ label: k === 0 ? 'Now' : hourLabel(times[i]!), temp: int(k === 0 ? c.temperature_2m : h.temperature_2m?.[i]), rain: int(h.precipitation_probability?.[i]), icon: wxIcon(k === 0 ? c.weather_code : h.weather_code?.[i]) });
+  }
+  const dates: string[] = Array.isArray(d.time) ? d.time : [];
+  const days: WeatherCard['days'] = dates.slice(0, 3).map((iso, i) => ({
+    label: i === 0 ? 'Today' : new Date(iso + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'UTC' }),
+    hi: int(d.temperature_2m_max?.[i]), lo: int(d.temperature_2m_min?.[i]), rain: int(d.precipitation_probability_max?.[i]), icon: wxIcon(d.weather_code?.[i]),
+  }));
+  const icon = wxIcon(c.weather_code), today = days[0];
+  // A place found from the browser's location has no name: its time zone's city is close enough ("Asia/Singapore").
+  const tzCity = String(j?.timezone ?? '').split('/').pop()?.replace(/_/g, ' ') ?? '';
+  const sky = (WMO[Number(c.weather_code)] ?? 'unsettled');
+  return {
+    place: (label || tzCity || 'Your location').slice(0, 60), units,
+    now: { temp: int(c.temperature_2m), feels: int(c.apparent_temperature), sky: sky[0]!.toUpperCase() + sky.slice(1), icon },
+    today: { hi: today?.hi ?? null, lo: today?.lo ?? null, rain: today?.rain ?? null },
+    hours, days, tip: tipFor(today?.rain ?? null, today?.hi ?? null, today?.lo ?? null, int(d.uv_index_max?.[0]), icon, units === 'F'),
+  };
+}

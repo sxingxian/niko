@@ -1,7 +1,7 @@
 // Shared Niko state: who is signed in, and the voice loop (wake word, commands, speech).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource } from '@niko/shared';
+import { aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
 import { countryCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
@@ -58,6 +58,8 @@ interface NikoState {
   label: string;
   line: string;
   reply: string | null;
+  /** The weather card for the answer it came with (shown instead of that answer's text). */
+  weather: { for: string; card: WeatherCard } | null;
   brief: Brief | null;
   micOn: boolean;
   voiceSupported: boolean;
@@ -166,6 +168,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [label, setLabel] = useState('Standing by');
   const [line, setLine] = useState('');
   const [reply, setReply] = useState<string | null>(null);
+  const [weather, setWeather] = useState<{ for: string; card: WeatherCard } | null>(null);
   const [brief, setBrief] = useState<Brief | null>(null);
   const [micOn, setMicOn] = useState(false);
   const navigate = useNavigate();
@@ -468,7 +471,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     try {
       // A weather question carries where this device is, rounded to about 1 km, when a weather service is connected.
       const where = meRef.current?.weather && isWeatherQuestion(text) ? await whereAmI() : undefined;
-      const r = await api<{ reply: string; brief: Brief }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}) } }).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
+      const r = await api<{ reply: string; brief: Brief; weather?: WeatherCard }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}) } }).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
       // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
       const { text: noScreen, path: asked } = takeScreenTag(r.reply);
@@ -497,7 +500,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         paintPicture(image.prompt, image.shape);
         return;
       }
-      setPictureId(null); setReply(answer); say(answer, 0);
+      setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setReply(answer); say(answer, 0);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) navigate('/' + item.view); }
       else if (asked) navigate(asked);
       else if (page && handler.current?.(page, true)) { /* the list on screen turned its page, quietly: Niko is speaking */ }
@@ -733,7 +736,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, [idle, listenForFollowUp]);
 
   const value = useMemo<NikoState>(() => ({
-    me, refreshMe, mode, label, line, reply, brief, micOn, voiceSupported: !!SR || (hearsFor(me).length > 0 && captureSupported()), toggleMic, stop, ask,
+    me, refreshMe, mode, label, line, reply, weather, brief, micOn, voiceSupported: !!SR || (hearsFor(me).length > 0 && captureSupported()), toggleMic, stop, ask,
     dismissReply: () => setReply(null),
     setCommandHandler: (fn) => { handler.current = fn; },
     setGlanceHandler: (fn) => { glanceHandler.current = fn; },
@@ -759,7 +762,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     resumable,
     resume: () => { void ask('continue'); },
     retry: () => { void ask('try again'); },
-  }), [me, refreshMe, mode, label, line, reply, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [me, refreshMe, mode, label, line, reply, weather, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

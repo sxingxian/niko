@@ -471,6 +471,16 @@ export const BRIEF_PARTS: BriefPart[] = ['mail', 'events', 'notes', 'chats'];
 /** A source that couldn't be read, tagged with the part it belongs to so it only shows on that part's screen. */
 export interface BriefProblem { part: BriefPart; source: string; text: string }
 export interface Brief { mail: MailItem[]; events: EventItem[]; notes: NoteItem[]; chats: ChatItem[]; problems: BriefProblem[] }
+/** The weather card on Home: numbers and one short tip, while Niko says the full answer. */
+export type WeatherIcon = 'clear' | 'partly' | 'cloudy' | 'fog' | 'drizzle' | 'rain' | 'showers' | 'snow' | 'storm';
+export interface WeatherCard {
+  place: string; units: 'C' | 'F';
+  now: { temp: number | null; feels: number | null; sky: string; icon: WeatherIcon };
+  today: { hi: number | null; lo: number | null; rain: number | null };
+  hours: { label: string; temp: number | null; rain: number | null; icon: WeatherIcon }[];
+  days: { label: string; hi: number | null; lo: number | null; rain: number | null; icon: WeatherIcon }[];
+  tip: string;
+}
 
 /** One block of a note's content, as plain text: Niko never renders a provider's HTML. */
 export interface DocBlock { kind: 'h1' | 'h2' | 'h3' | 'p' | 'li' | 'ol' | 'todo' | 'quote' | 'code' | 'hr' | 'prop'; text: string; done?: boolean; depth?: number; label?: string }

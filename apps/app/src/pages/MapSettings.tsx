@@ -3,7 +3,7 @@
 // Engine screen's "Save changes".
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { aiAllowed, mapsOn, MAP_PROVIDERS, MAP_MODE_NAMES, mapOption, mapPreset, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type BrainRest, type MapKeyInfo, type MapProvider, type MapSource } from '@niko/shared';
-import { api, Field, Icon, Switch } from '@niko/ui';
+import { api, Field, Icon } from '@niko/ui';
 import { useNiko } from '../niko';
 
 export interface MapLists { maps: MapSource[]; mapCountries: Record<string, MapSource[]>; dirty: boolean; saved: () => void }
@@ -35,14 +35,13 @@ export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
   const [maps, setMaps] = useState<MapSource[]>([]);
   const [lists, setLists] = useState<Record<string, MapSource[]>>({});
   const [dirty, setDirty] = useState(false);
-  const [open, setOpen] = useState('');
-  const [editing, setEditing] = useState('');
+  const [tab, setTab] = useState('ww');
+  const [menu, setMenu] = useState('');
   const [confirm, setConfirm] = useState('');
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [busy, setBusy] = useState('');
   const [err, setErr] = useState('');
-  const [addCc, setAddCc] = useState('');
   const dlg = useRef<HTMLDialogElement>(null);
   const started = useRef(false);
 
@@ -56,6 +55,14 @@ export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
   }, [me, load]);
   bind({ maps: [...maps, 'osm'], mapCountries: lists, dirty, saved: () => setDirty(false) });
   useEffect(() => { if (draft) dlg.current?.showModal(); }, [draft]);
+  // The ⋯ menu closes on a tap elsewhere or Escape.
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu('');
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenu(''); };
+    document.addEventListener('click', close); document.addEventListener('keydown', key);
+    return () => { document.removeEventListener('click', close); document.removeEventListener('keydown', key); };
+  }, [menu]);
   // Maps off for this account, or every map service off: the whole section goes, as Niko can't show maps.
   if (!me || !mapsOn(off)) return null;
   const osm = aiAllowed(off, 'map:osm');
@@ -63,9 +70,7 @@ export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
   const keyOf = (s: MapSource) => keys.find((k) => `mkey:${k.id}` === s);
   const ok = (s: MapSource) => { const k = keyOf(s); return !!k && aiAllowed(off, mapOption(s, k)); };
   const nameOf = (s: MapSource) => (s === 'osm' ? 'OpenStreetMap' : keyOf(s)?.label || (keyOf(s) ? mapPreset(keyOf(s)!.provider)!.name : 'Removed service'));
-  const inAnyList = (s: MapSource) => maps.includes(s) || Object.values(lists).some((l) => l.includes(s));
   const shown = maps.filter(ok);
-  const notInUse = keys.map((k) => `mkey:${k.id}` as MapSource).filter((s) => ok(s) && !inAnyList(s));
   const change = (fn: () => void) => { fn(); setDirty(true); };
   const presets = MAP_PROVIDERS.filter((p) => aiAllowed(off, `map:${p.id}`));
 
@@ -106,125 +111,134 @@ export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
     } catch (x: any) { setNote({ ok: false, text: x.message }); }
   };
 
-  const row = (s: MapSource, i: number | null, where: 'ww' | 'off') => {
-    const k = keyOf(s), on = i !== null, p = k ? mapPreset(k.provider)! : null, resting = restLine(me.engine.mapRest?.[s]);
-    const onlyHere = !!p?.only;
+  // ---- 1 · your map services: one quiet list; Test, Edit and Remove in each row's ⋯ menu.
+  const usedIn = (s: MapSource) => [...(maps.includes(s) ? ['Everywhere'] : []), ...Object.keys(lists).filter((cc) => lists[cc]!.includes(s)).map(regionName)];
+  const capsLine = (pr: MapProvider) => { const x = mapPreset(pr)!; return [x.places ? 'Places' : '', ...x.routes.map((m) => MAP_MODE_NAMES[m])].filter(Boolean).join(' · '); };
+  const homeOf = (k: MapKeyInfo) => mapPreset(k.provider)?.home ?? null;
+  const useIt = (k: MapKeyInfo) => {
+    const s = `mkey:${k.id}` as MapSource, home = homeOf(k);
+    change(() => { if (home) setLists((l) => ({ ...l, [home]: [...(l[home] ?? []), s] })); else setMaps((m) => [...m, s]); });
+    setTab(home ?? 'ww');
+  };
+  const serviceRow = (k: MapKeyInfo) => {
+    const s = `mkey:${k.id}` as MapSource, where = usedIn(s), resting = restLine(me.engine.mapRest?.[s]), home = homeOf(k);
+    const status = resting ? { col: 'is-warn', text: 'Resting' } : where.length ? { col: 'is-ok', text: 'Ready' } : { col: 'is-warn', text: 'Not used yet' };
     return (
-      <li key={s} className={'vrow' + (on ? ' on' : '')}>
-        <div className="vrow-head">
-          <span className="n" aria-hidden="true">{on ? i + 1 : '–'}</span>
-          <button type="button" className="vrow-title" aria-expanded={open === s} onClick={() => setOpen(open === s ? '' : s)}>
-            <b>{nameOf(s)}</b><span className="sub">{p ? `${p.name === nameOf(s) ? '' : `${p.name} · `}${can(k!.provider)}` : ''}</span>
-            {k?.provider === 'google' && <span className="sub vrow-warn">Not used for driving, walking or cycling routes in South Korea, or anywhere in China.</span>}
-            {onlyHere && <span className="sub vrow-warn">Only works in {p!.only!.map(regionName).join(', ')}: add it to that country’s list.</span>}
-            {resting && <span className="sub vrow-warn">{resting}</span>}
-          </button>
-          <span className="k tag">{k?.provider === 'self-hosted' ? 'Your server' : 'Your key'}</span>
-          {where === 'ww' && on && <span className="vrow-move">
-            <button type="button" className="stp" onClick={() => change(() => setMaps(move(maps, maps.indexOf(s), -1)))} disabled={i === 0} aria-label={`Move ${nameOf(s)} up`}>↑</button>
-            <button type="button" className="stp" onClick={() => change(() => setMaps(move(maps, maps.indexOf(s), 1)))} disabled={i === shown.length - 1} aria-label={`Move ${nameOf(s)} down`}>↓</button>
-          </span>}
-          <Switch on={on} onChange={(x) => change(() => setMaps(x ? [...maps, s] : maps.filter((y) => y !== s)))} label={`Use ${nameOf(s)} everywhere`} />
-        </div>
-        {open === s && k && (
-          <div className="vrow-body">
-            <div className="eng-fields col">
-              <p className="hint">{p!.note}</p>
-              <div className="eng-fields">
-                <button type="button" className="bt" onClick={() => test({ id: k.id, provider: k.provider, baseUrl: k.baseUrl, email: k.email }, k.id)} disabled={!!busy}>{busy === 'test-' + k.id ? 'Testing…' : 'Test'}</button>
-                <button type="button" className="bt" onClick={() => editDraft(k)}>Edit</button>
-                <button type="button" className={'bt' + (confirm === k.id ? ' danger' : '')} onClick={() => remove(k)} onBlur={() => confirm === k.id && setConfirm('')}>{confirm === k.id ? 'Tap again to remove' : 'Remove'}</button>
-              </div>
-            </div>
-          </div>
-        )}
+      <li key={k.id} className="msrv">
+        <span className="msrv-name"><b>{k.label || mapPreset(k.provider)!.name}</b><span className="sub">{capsLine(k.provider)}</span>{resting && <span className="sub vrow-warn">{resting}</span>}</span>
+        <span className={'msrv-status ' + status.col}><i aria-hidden="true" />{status.text}</span>
+        <span className="msrv-used">{where.length ? where.join(', ') : <button type="button" className="bt msrv-use" onClick={() => useIt(k)}>{home ? `Add to ${regionName(home)}` : 'Use everywhere'}</button>}</span>
+        <span className="msrv-more">
+          <button type="button" className="stp msrv-dots" aria-label={`More for ${k.label}`} aria-haspopup="menu" aria-expanded={menu === k.id} onClick={(e) => { e.stopPropagation(); setMenu(menu === k.id ? '' : k.id); setConfirm(''); }}>⋯</button>
+          {menu === k.id && (
+            <span className="msrv-menu" role="menu" onClick={(e) => e.stopPropagation()}>
+              <button type="button" role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); void test({ id: k.id, provider: k.provider, baseUrl: k.baseUrl, email: k.email }, k.id); }}>{busy === 'test-' + k.id ? 'Testing…' : 'Test'}</button>
+              <button type="button" role="menuitem" onClick={() => { setMenu(''); editDraft(k); }}>Edit</button>
+              <button type="button" role="menuitem" className="danger" onClick={() => { if (confirm === k.id) setMenu(''); void remove(k); }}>{confirm === k.id ? 'Tap again to remove' : 'Remove'}</button>
+            </span>
+          )}
+        </span>
       </li>
     );
   };
 
-  const countryCard = (cc: string) => {
-    const l = lists[cc] ?? [], usable = l.filter(ok), edit = editing === cc;
-    const addable = keys.map((k) => `mkey:${k.id}` as MapSource).filter((s) => ok(s) && !l.includes(s) && (!mapPreset(keyOf(s)!.provider)!.only || mapPreset(keyOf(s)!.provider)!.only!.includes(cc)));
-    const skipNote = cc === 'KR' ? 'Google has no driving, walking or cycling routes here, so Niko skips it for those.' : cc === 'CN' ? 'Maps in China use their own coordinates: only Amap, Baidu, OpenStreetMap and your own route server are used here, and Niko lines the pins up.' : '';
-    return (
-      <div key={cc} className="map-country">
-        <div className="map-country-head">
-          <b>{regionName(cc)}</b>
-          <button type="button" className="bt" onClick={() => setEditing(edit ? '' : cc)} aria-expanded={edit}>{edit ? 'Done' : 'Edit'}</button>
-        </div>
-        {!edit ? (
-          <span className="map-chain">
-            {usable.length ? usable.map((s) => <span key={s} className="map-chip">{nameOf(s)}</span>) : <span className="hint">No services yet.</span>}
-            <span className="hint">→ then Everywhere</span>
-          </span>
-        ) : (
-          <div className="eng-fields col">
-            {usable.length > 0 && <ol className="map-mini">{usable.map((s, i) => (
-              <li key={s}>
-                <span>{i + 1}. {nameOf(s)}</span>
-                <span className="vrow-move">
-                  <button type="button" className="bt map-mini-edit" onClick={() => editDraft(keyOf(s)!)}>Settings</button>
-                  <button type="button" className="stp" onClick={() => change(() => setLists({ ...lists, [cc]: move(l, l.indexOf(s), -1) }))} disabled={i === 0} aria-label={`Move ${nameOf(s)} up`}>↑</button>
-                  <button type="button" className="stp" onClick={() => change(() => setLists({ ...lists, [cc]: move(l, l.indexOf(s), 1) }))} disabled={i === usable.length - 1} aria-label={`Move ${nameOf(s)} down`}>↓</button>
-                  <button type="button" className="stp" onClick={() => change(() => setLists({ ...lists, [cc]: l.filter((x) => x !== s) }))} aria-label={`Take ${nameOf(s)} off ${regionName(cc)}’s list`}>×</button>
-                </span>
-              </li>
-            ))}</ol>}
-            <div className="eng-fields">
-              {addable.length > 0 && (
-                <label className="fld"><span className="k">Add a service to this list</span>
-                  <select className="in" value="" onChange={(x) => x.target.value && change(() => setLists({ ...lists, [cc]: [...l, x.target.value as MapSource] }))}>
-                    <option value="">Choose…</option>
-                    {addable.map((s) => <option key={s} value={s}>{nameOf(s)}</option>)}
-                  </select>
-                </label>
-              )}
-              <button type="button" className="bt" onClick={() => { setErr(''); setDraft({ ...newDraft(), provider: presets.find((p) => p.home === cc)?.id ?? presets[0]!.id, list: cc }); }}>Add a new service</button>
-              <button type="button" className={'bt' + (confirm === 'cc:' + cc ? ' danger' : '')} onClick={() => { if (confirm !== 'cc:' + cc) { setConfirm('cc:' + cc); return; } setConfirm(''); setEditing(''); change(() => { const n = { ...lists }; delete n[cc]; setLists(n); }); }} onBlur={() => confirm === 'cc:' + cc && setConfirm('')}>{confirm === 'cc:' + cc ? 'Tap again to remove' : 'Remove country'}</button>
-            </div>
-          </div>
-        )}
-        {skipNote && <span className="hint">{skipNote}</span>}
-      </div>
-    );
-  };
+  // ---- 2 · which Niko tries first: a tab for Everywhere and one for each country.
+  const allowedKeys = keys.filter((k) => ok(`mkey:${k.id}` as MapSource));
+  const tabs = ['ww', ...Object.keys(lists).sort((a, b) => regionName(a).localeCompare(regionName(b)))];
+  const cur = tabs.includes(tab) ? tab : 'ww';
+  const own = (cur === 'ww' ? maps : lists[cur] ?? []).filter(ok);
+  const setOwn = (l: MapSource[]) => change(() => { if (cur === 'ww') setMaps([...l, ...maps.filter((x) => !ok(x))]); else setLists({ ...lists, [cur]: l }); });
+  const then = cur === 'ww' ? [] : shown.filter((s) => !own.includes(s));
+  const fullChain = [...own, ...then.filter((s) => !own.includes(s)), ...(osm ? ['osm' as MapSource] : [])];
+  const addable = allowedKeys.map((k) => `mkey:${k.id}` as MapSource).filter((s) => !own.includes(s) && (() => { const only = mapPreset(keyOf(s)!.provider)!.only; return !only || (cur !== 'ww' && only.includes(cur)); })());
+  const skipNote = cur === 'KR' ? 'Google is skipped here for driving, walking and cycling routes.' : cur === 'CN' ? 'Only Amap, Baidu, OpenStreetMap and your own route server are used here; Niko lines the pins up.' : '';
+  const orderRow = (s: MapSource, i: number) => (
+    <li key={s} className="mord">
+      <span className="mord-n">{i + 1}</span>
+      <span className="mord-name"><span>{nameOf(s)}</span><span className="sub">{capsLine(keyOf(s)!.provider)}</span></span>
+      <span className="vrow-move">
+        <button type="button" className="stp" onClick={() => setOwn(move(own, i, -1))} disabled={i === 0} aria-label={`Move ${nameOf(s)} up`}>↑</button>
+        <button type="button" className="stp" onClick={() => setOwn(move(own, i, 1))} disabled={i === own.length - 1} aria-label={`Move ${nameOf(s)} down`}>↓</button>
+        <button type="button" className="stp" onClick={() => setOwn(own.filter((x) => x !== s))} aria-label={`Take ${nameOf(s)} off this list`}>×</button>
+      </span>
+    </li>
+  );
+  const fadedRow = (s: MapSource, i: number) => (
+    <li key={s} className="mord faded">
+      <span className="mord-n">{i}</span>
+      <span className="mord-name"><span>{nameOf(s)}</span><span className="sub">{s === 'osm' ? 'Built in · always last' : capsLine(keyOf(s)!.provider)}</span></span>
+    </li>
+  );
 
   const p = draft ? mapPreset(draft.provider)! : null;
   const countryOptions = countries().filter((c) => !lists[c.cc]);
   return (
     <section className="g eng-card wide" aria-label="Maps">
-      <span className="k" style={{ paddingBottom: 6 }}>Maps · Niko uses in this order</span>
-      <p className="hint" style={{ paddingBottom: 8 }}>Ask Niko the way somewhere (“how do I get to the airport by train?”) or to show a place. The first service that works finds it, switching to the next when one reaches its limit, refuses its key or stops answering. When you’re in a country with its own list (or say you are, like “I’m in Korea”), that list comes first. The map picture is OpenStreetMap; keys stay on Niko’s server.</p>
+      <span className="k" style={{ paddingBottom: 6 }}>Maps</span>
+      <p className="hint" style={{ paddingBottom: 8 }}>Ask Niko the way somewhere or to show a place. Add your map services, then choose which Niko tries first, everywhere or in a country of your choosing.</p>
       {note && <p className={'hint' + (note.ok ? '' : ' vrow-warn')} role="status">{note.text}</p>}
 
-      <div className="map-subhead"><span className="k">Everywhere</span><span className="hint">Used in every country, after that country’s own list</span></div>
-      <ol className="vlist">
-        {shown.map((s, i) => row(s, i, 'ww'))}
-        {osm && <li className="vrow on">
-          <div className="vrow-head">
-            <span className="n" aria-hidden="true">{shown.length + 1}</span>
-            <span className="vrow-title"><b>OpenStreetMap</b><span className="sub">Built in · free, no key · the map and places; opens directions in the local maps app</span></span>
-            <span className="k tag">Built in</span>
-          </div>
-        </li>}
-      </ol>
-      {!osm && !shown.length && <p className="hint vrow-warn" style={{ padding: '4px 0 8px' }}>No map service is on yet, so Niko can’t show maps. Add one below.</p>}
-      {notInUse.length > 0 && <><span className="k" style={{ padding: '18px 0 6px' }}>Not in use</span><ul className="vlist">{notInUse.map((s) => row(s, null, 'off'))}</ul></>}
-
-      <div className="map-subhead"><span className="k">By country</span><span className="hint">Used first for trips in that country</span></div>
-      {Object.keys(lists).length ? <div className="map-countries">{Object.keys(lists).sort((a, b) => regionName(a).localeCompare(regionName(b))).map(countryCard)}</div>
-        : <p className="hint">No country has its own list yet. Korean, Chinese and Singapore services go into their country’s list when you add them.</p>}
-
-      <div className="map-add">
-        {presets.length > 0 && <button type="button" className="bt add-key" onClick={() => { setErr(''); setDraft(newDraft()); }} disabled={keys.length >= MAX_MAP_KEYS}><Icon name="plus" size={18} />Add a map service</button>}
-        {Object.keys(lists).length < MAX_MAP_COUNTRIES && (
-          <label className="fld map-add-cc"><span className="sr">Add a country</span>
-            <select className="in" value={addCc} onChange={(x) => { const cc = x.target.value; setAddCc(''); if (cc) { change(() => setLists({ ...lists, [cc]: [] })); setEditing(cc); } }}>
-              <option value="">+ Add a country</option>
-              {countryOptions.map((c) => <option key={c.cc} value={c.cc}>{c.name}</option>)}
-            </select>
-          </label>
+      <div className="map-step">
+        <div className="map-subhead"><span className="k" style={{ color: '#fff' }}>1 · Your map services</span><span className="hint">Keys stay on Niko’s server</span></div>
+        {allowedKeys.length > 0 && (
+          <ul className="msrv-list">
+            <li className="msrv msrv-head k" aria-hidden="true"><span>Service</span><span>Status</span><span>Used in</span><span /></li>
+            {allowedKeys.map(serviceRow)}
+          </ul>
         )}
+        {!allowedKeys.length && !osm && <p className="hint vrow-warn">No map service is on yet, so Niko can’t show maps. Add one below.</p>}
+        <div className="msrv-foot">
+          {presets.length > 0 && <button type="button" className="pri msrv-add" onClick={() => { setErr(''); setDraft(newDraft()); }} disabled={keys.length >= MAX_MAP_KEYS}><Icon name="plus" size={16} />Add a map service</button>}
+          {osm && <span className="hint">OpenStreetMap is built in and always tried last.</span>}
+        </div>
+      </div>
+
+      <div className="map-step">
+        <div className="map-subhead"><span className="k" style={{ color: '#fff' }}>2 · Which Niko tries first</span><span className="hint">If one is at its limit or can’t connect, Niko uses the next</span></div>
+        <div className="mtabs" role="tablist" aria-label="Where">
+          {tabs.map((t) => (
+            <button key={t} type="button" role="tab" className="mtab" aria-selected={cur === t} onClick={() => { setTab(t); setConfirm(''); }}>
+              <Icon name={t === 'ww' ? 'globe' : 'pin'} size={15} />{t === 'ww' ? 'Everywhere' : regionName(t)}
+            </button>
+          ))}
+          {tabs.length - 1 < MAX_MAP_COUNTRIES && (
+            <label className="mtab mtab-add"><Icon name="plus" size={15} /><span className="sr">Add a country</span>
+              <select value="" aria-label="Add a country" onChange={(x) => { const cc = x.target.value; if (cc) { change(() => setLists({ ...lists, [cc]: [] })); setTab(cc); } }}>
+                <option value="">Country</option>
+                {countryOptions.map((c) => <option key={c.cc} value={c.cc}>{c.name}</option>)}
+              </select>
+              <span aria-hidden="true">Country</span>
+            </label>
+          )}
+        </div>
+        <div className="mpanel" role="tabpanel">
+          <div className="mchain">
+            <span className="hint">{cur === 'ww' ? 'Anywhere without its own list, Niko tries:' : `In ${regionName(cur)}, Niko tries:`}</span>
+            <span className="mchain-items">
+              {fullChain.length ? fullChain.map((s, i) => <span key={s} className="mchain-item">{i > 0 && <span className="mchain-arrow" aria-hidden="true">→</span>}<span className={'map-chip' + (own.includes(s) ? ' own' : '')}>{i + 1} · {nameOf(s).replace(/ \((Singapore|Korea|China)\)$/, '')}</span></span>) : <span className="hint vrow-warn">Nothing yet: Niko can’t show maps here.</span>}
+            </span>
+            {skipNote && <span className="hint vrow-warn">{skipNote}</span>}
+          </div>
+          {own.length > 0 ? <ol className="mord-list">{own.map(orderRow)}</ol>
+            : <p className="hint">{cur === 'ww' ? 'No services in this list yet.' : 'No services in this list yet. Add one below; until then Niko uses Everywhere here.'}</p>}
+          <div className="mpanel-actions">
+            {addable.length > 0 && (
+              <label className="mtab mtab-add"><Icon name="plus" size={15} />
+                <select value="" aria-label="Add a service to this list" onChange={(x) => x.target.value && setOwn([...own, x.target.value as MapSource])}>
+                  <option value="">Add a service</option>
+                  {addable.map((s) => <option key={s} value={s}>{nameOf(s)}</option>)}
+                </select>
+                <span aria-hidden="true">Add a service to this list</span>
+              </label>
+            )}
+            {cur !== 'ww' && <button type="button" className={'bt' + (confirm === 'cc:' + cur ? ' danger' : ' quiet')} onClick={() => { if (confirm !== 'cc:' + cur) { setConfirm('cc:' + cur); return; } setConfirm(''); change(() => { const n = { ...lists }; delete n[cur]; setLists(n); }); setTab('ww'); }} onBlur={() => confirm === 'cc:' + cur && setConfirm('')}>{confirm === 'cc:' + cur ? 'Tap again to remove' : 'Remove this country'}</button>}
+          </div>
+          {cur !== 'ww' && (then.length > 0 || osm) && <>
+            <span className="k mthen">Then Everywhere <span className="hint">· change it on the Everywhere tab</span></span>
+            <ol className="mord-list">{[...then, ...(osm ? ['osm' as MapSource] : [])].map((s, i) => fadedRow(s, own.length + i + 1))}</ol>
+          </>}
+          {cur === 'ww' && osm && <ol className="mord-list">{fadedRow('osm', own.length + 1)}</ol>}
+        </div>
       </div>
       {off.some((k) => k.startsWith('map:')) && <p className="hint managed">Some options are managed by your administrator.</p>}
 

@@ -10,6 +10,8 @@ import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from 
 import { isStacked } from '../flow';
 import { PictureCard } from './Picture';
 import { MapCard } from './Map';
+import { WeatherCard } from './Weather';
+import type { WeatherCard as WxCard } from '@niko/shared';
 import { GlanceStack } from './Glance';
 import { toggleFullscreen, useFullscreen } from '../fullscreen';
 import type { Brief, BriefPart, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
@@ -130,13 +132,13 @@ export function Home() {
   const mapv = n.map;
   const open = !!n.reply || !!pic || !!mapv;
   // Keep the last answer on screen while its cards close.
-  const [shown, setShown] = useState<{ reply: string; chat: Brief['chats'][number] | null; id: number } | null>(null);
+  const [shown, setShown] = useState<{ reply: string; chat: Brief['chats'][number] | null; id: number; wx: WxCard | null } | null>(null);
   const [closing, setClosing] = useState(false);
   const [caption, setCaption] = useState<'' | 'aside' | 'back'>('');
   useEffect(() => {
     if (n.reply) {
       setClosing(false);
-      setShown((s) => ({ reply: n.reply!, chat: n.brief?.chats[0] ?? null, id: (s?.id ?? 0) + (s?.reply === n.reply ? 0 : 1) }));
+      setShown((s) => ({ reply: n.reply!, chat: n.brief?.chats[0] ?? null, id: (s?.id ?? 0) + (s?.reply === n.reply ? 0 : 1), wx: n.weather?.for === n.reply ? n.weather.card : null }));
       return;
     }
     if (!shown) return;
@@ -144,7 +146,7 @@ export function Home() {
     const t = window.setTimeout(() => { setClosing(false); setShown(null); }, 900);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [n.reply, wide]);
+  }, [n.reply, n.weather, wide]);
   const submit = (e: FormEvent) => { e.preventDefault(); const t = text; setText(''); setTyping(false); void n.ask(t); };
   const cards = shown ? (shown.chat ? 2 : 1) : 0;
   const card = !!pic || !!mapv;
@@ -201,6 +203,7 @@ export function Home() {
       <aside className="panels" aria-label="Niko’s answer" aria-hidden={!open} key={shown?.id ?? 0}>
         {shown && <>
           <div className="card-build" style={{ ['--d' as string]: '0s' }}>
+            {shown.wx ? <WeatherCard card={shown.wx} onClose={n.dismissReply} tabbable={open} /> : (
             <section className="g">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <span className="k">Niko</span>
@@ -208,6 +211,7 @@ export function Home() {
               </div>
               <p className="reply"><Words text={shown.reply} start={wide ? 1.0 : 0.35} /></p>
             </section>
+            )}
             <Outline />
           </div>
           {shown.chat && (

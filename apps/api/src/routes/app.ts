@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, sessions, users, type Db } from '@niko/db';
-import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource } from '@niko/shared';
+import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource, type WeatherCard } from '@niko/shared';
 import { accessState, APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -11,7 +11,7 @@ import { sendEmail } from '../lib/email';
 import { accessFor, paymentSettings } from '../billing';
 import { eventDetail, mailDetail, noteDetail } from '../details';
 import { BrainFail, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveKeys, testEntry, think } from '../brains';
-import { cleanWhere, forecastText, geocode, stripWeatherTags, weatherTags } from '../weather';
+import { cleanWhere, forecastCard, forecastText, geocode, stripWeatherTags, weatherTags } from '../weather';
 import { audioProblem, defaultHearLabel, hear, hearServerKey, HEAR_PROVIDERS_LIST, hearKeyInfo, hearKeyProblem, loadHearKeys, MAX_AUDIO_BYTES, saveHearKeys, type HearKey } from '../hears';
 import { NOT_ON_ACCOUNT, offFor } from '../access';
 import { diffGlance, limitsFor } from '../glance';
@@ -828,11 +828,14 @@ app.post('/chat', async (c) => {
   const wx = oneOff ? null : (await credentials(c.env, db, u.id, 'open-meteo').catch(() => null)) as { home?: string; units?: string } | null;
   const units: 'C' | 'F' = /^\s*°?f/i.test(wx?.units ?? '') ? 'F' : 'C';
   let weather = '';
+  // The card shown on Home: the place the answer is about (the first one, when it names several).
+  let wxCard: Promise<WeatherCard | null> | null = null;
+  const cardFor = (place: { lat: number; lon: number; name: string }, label?: string) => { wxCard ??= forecastCard(place, units, label).catch(() => null); };
   if (wx && isWeatherQuestion(text)) {
     const here = cleanWhere(b.where);
     try {
       const place = here ? { ...here, name: 'where the user is now' } : wx.home ? await geocode(wx.home) : null;
-      if (place) weather = `\n<WEATHER for ${here ? 'the user’s current location' : `the user’s home place, ${place.name}`}>\n${await forecastText(place, units)}\n</WEATHER>`;
+      if (place) { weather = `\n<WEATHER for ${here ? 'the user’s current location' : `the user’s home place, ${place.name}`}>\n${await forecastText(place, units)}\n</WEATHER>`; if (!here) cardFor(place, place.name.split(',')[0]); else cardFor(place); }
     } catch (e) { console.warn(`weather: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
   }
   const off = await offFor(db, u);
@@ -851,9 +854,11 @@ app.post('/chat', async (c) => {
     const asked = wx ? weatherTags(reply) : [];
     if (asked.length) {
       const extra: string[] = [];
+      wxCard = null; // the answer is about the places asked for now, so the card shows the first of them
       for (const name of asked) {
         try {
           const place = await geocode(name);
+          if (place) cardFor(place, place.name.split(',')[0]);
           extra.push(place ? `<WEATHER for ${place.name}>\n${await forecastText(place, units)}\n</WEATHER>` : `No place called “${name}” was found. Ask the user which place they mean.`);
         } catch (e) { extra.push(`The forecast for ${name} could not be fetched just now.`); console.warn(`weather: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
       }
@@ -867,7 +872,8 @@ app.post('/chat', async (c) => {
   }
   if (oneOff) reply = cleanDraft(reply);
   if (!oneOff) await db.insert(chatTurns).values([{ userId: u.id, role: 'user', content: text }, { userId: u.id, role: 'assistant', content: reply }]);
-  return c.json({ reply, engine: used, switched: used !== first, ...(oneOff ? {} : { brief }) });
+  const card = wxCard ? await (wxCard as Promise<WeatherCard | null>) : null;
+  return c.json({ reply, engine: used, switched: used !== first, ...(oneOff ? {} : { brief }), ...(card ? { weather: card } : {}) });
 });
 
 // ---------------------------------------------------------------- sending, with the countdown rule enforced here
