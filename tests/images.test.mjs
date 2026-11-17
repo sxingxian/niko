@@ -141,7 +141,7 @@ await ok('Ideogram: Api-Key, speed and aspect ratio; an unsafe picture is a decl
 await ok('Cloudflare FLUX: base64 picture back; the daily allowance rests it until midnight UTC', async () => {
   let got = null;
   const env = { AI: { run: async (m, i) => { got = { m, i }; return { image: b64(JPEG) }; } } };
-  const p = await workersImage(env, 'a lighthouse'); assert.equal(p.type, 'image/jpeg'); assert.equal(got.m, '@cf/black-forest-labs/flux-1-schnell'); assert.equal(got.i.steps, 4);
+  const p = await workersImage(env, 'a lighthouse'); assert.equal(p.type, 'image/jpeg'); assert.equal(got.m, '@cf/black-forest-labs/flux-1-schnell'); assert.equal(got.i.steps, 4); assert.equal('seed' in got.i, false, 'Cloudflare no longer takes a seed');
   const out = { AI: { run: async () => { throw new Error('4006: you have used up your daily free allocation of 10,000 neurons') } } };
   await assert.rejects(() => workersImage(out, 'x'), (e) => e.why === 'limit' && new Date(Date.now() + e.restMs).getUTCHours() === 0);
 });
@@ -228,5 +228,19 @@ console.log(`${pass} picture checks passed`);
     assert.ok(seen[0].length <= 2000);
     assert.equal(clipPrompt('a b c', 3), 'a b');
     assert.equal(plainPrompt('A wide shot of a lake, stunning, captured at dawn'), 'A view of a lake, at dawn');
+  });
+}
+
+{
+  const { workersImage } = await import('../apps/api/src/images.ts');
+  const t = async (name, fn) => { try { await fn(); console.log('PASS', name); } catch (e) { console.log('FAIL', name, e?.stack ?? e); process.exitCode = 1; } };
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  await t('a changed input format is not read as a refusal: the prompt alone is tried, then it rests briefly', async () => {
+    const seen = [];
+    const env = { AI: { run: async (_m, i) => { seen.push(Object.keys(i).sort().join(',')); if (i.steps) throw new Error("AiError: Error: Additional or unevaluated properties '/steps' at '/' not allowed"); return { image: PNG }; } } };
+    const pic = await workersImage(env, 'a futuristic city', 'a city');
+    assert.ok(pic.bytes.byteLength > 0); assert.deepEqual(seen, ['prompt,steps', 'prompt']);
+    const bad = { AI: { run: async () => { throw new Error("AiError: Error: Additional or unevaluated properties '/seed' at '/' not allowed"); } } };
+    await assert.rejects(workersImage(bad, 'a city'), (e) => e.why === 'down' && e.message !== 'declined');
   });
 }

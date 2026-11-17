@@ -75,12 +75,15 @@ export function imageKeyProblem(k: Pick<ImageKey, 'provider' | 'model' | 'baseUr
 // ---------------------------------------------------------------- reading answers
 /** Words services use when they decline a picture under their own rules. */
 const DECLINED = /moderat|safety|content[ _-]?polic|nsfw|inappropriate|prohibited|not allowed|violat|blocked|responsible ai|filtered|unsafe|explicit/i;
+/** A request the service could not read (its input format changed), which says nothing about the picture. */
+const BAD_INPUT = /additional or unevaluated propert|unevaluated propert|additional propert|type mismatch|oneOf at|required propert|input validation|invalid input|schema/i;
+const declinedText = (msg: string) => DECLINED.test(msg) && !BAD_INPUT.test(msg);
 
 async function fail(res: Response): Promise<BrainFail | Declined> {
   const body = (await res.text().catch(() => '')).slice(0, 2000), text = body.toLowerCase(), detail = providerMessage(body);
   const after = Number(res.headers.get('retry-after'));
   const wait = Number.isFinite(after) && after > 0 ? Math.min(Math.max(after * 1000, 15_000), HOUR) : 0;
-  if ([400, 403, 422].includes(res.status) && DECLINED.test(text) && !/api[ _-]?key|unauthori|permission|billing|account/.test(text)) return new Declined(detail);
+  if ([400, 403, 422].includes(res.status) && declinedText(text) && !/api[ _-]?key|unauthori|permission|billing|account/.test(text)) return new Declined(detail);
   const quota = /quota|credit|limit|billing|insufficient|exceeded|payment|balance/.test(text);
   if (res.status === 402 || (quota && [400, 403, 429].includes(res.status))) return new BrainFail(`limit ${res.status}`, 'limit', wait || HOUR, detail);
   if (res.status === 429) return new BrainFail(`rate ${res.status}`, 'limit', wait || MIN, detail);
@@ -162,18 +165,24 @@ export async function workersImage(env: Env, prompt: string, asked = ''): Promis
   let said = '';
   for (const p of tries) {
     let msg = '';
-    try {
-      const out: any = await env.AI.run(WORKERS_IMAGE_MODEL as any, { prompt: p, steps: 4, seed: Math.floor(Math.random() * 2_000_000_000) } as any);
-      if (out?.image) return fromB64(out.image);
-      msg = 'no image';
-    } catch (e) { if (e instanceof BrainFail) throw e; msg = String((e as Error)?.message ?? e); }
+    // Only the prompt and the number of steps are sent (Cloudflare no longer takes a seed). If the model's input format
+    // changes again and it refuses the steps too, it is asked once more with the prompt alone.
+    for (const input of [{ prompt: p, steps: 4 }, { prompt: p }]) {
+      try {
+        const out: any = await env.AI.run(WORKERS_IMAGE_MODEL as any, input as any);
+        if (out?.image) return fromB64(out.image);
+        msg = 'no image';
+      } catch (e) { if (e instanceof BrainFail) throw e; msg = String((e as Error)?.message ?? e); }
+      if (!BAD_INPUT.test(msg)) break;
+    }
     if (/4006|daily free allocation|neurons/i.test(msg)) {
       const d = new Date(); const midnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) + 30_000;
       throw new BrainFail('workers daily allowance', 'limit', midnight - Date.now(), 'Cloudflare’s free allowance for today is used up; it resets at midnight UTC.');
     }
     // What Cloudflare said is logged (never the prompt), so a wrong reading of an error can be seen and fixed.
     console.warn(`workers image: ${msg.replace(/\s+/g, ' ').slice(0, 200)}`);
-    if (!DECLINED.test(msg)) throw new BrainFail(`workers image: ${msg.slice(0, 120)}`, 'down', MIN, 'Cloudflare’s image model did not answer just now.');
+    if (BAD_INPUT.test(msg)) throw new BrainFail(`workers image input: ${msg.slice(0, 120)}`, 'down', 10 * MIN, 'Cloudflare’s image model did not accept the request. Niko will be updated for it.');
+    if (!declinedText(msg)) throw new BrainFail(`workers image: ${msg.slice(0, 120)}`, 'down', MIN, 'Cloudflare’s image model did not answer just now.');
     said = msg;
   }
   const why = said.replace(/^(?:AiError:\s*)+/i, '').replace(/^\d{3,5}:\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 120);
@@ -288,7 +297,7 @@ async function replicateImage(k: ImageKey, prompt: string, shape: ImageShape): P
   }
   if (p?.status === 'failed' || p?.status === 'canceled') {
     const e = providerMessage(String(p?.error ?? ''));
-    if (DECLINED.test(e)) throw new Declined(e);
+    if (declinedText(e)) throw new Declined(e);
     throw new BrainFail('replicate failed', 'down', MIN, e || 'The model could not make the picture.');
   }
   if (p?.status !== 'succeeded') throw new BrainFail('replicate slow', 'down', MIN, 'It did not finish the picture in time.');
