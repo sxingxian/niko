@@ -25,6 +25,9 @@ export const users = pgTable('users', {
   accountLimits: jsonb('account_limits').notNull().default({}).$type<Record<string, unknown>>(),
   /** Plan prices this account keeps when it next chooses a plan; null follows the current prices. */
   planPrices: jsonb('plan_prices').$type<{ plan: 'monthly' | 'yearly'; cents: number }[] | null>(),
+  /** 'kept' (kept when the default changed for new people only) or 'admin' (set for this person), and when. */
+  planPricesFrom: text('plan_prices_from'),
+  planPricesAt: ts('plan_prices_at'),
   // ---- access and payments (see migration 0007)
   lifetime: boolean('lifetime').notNull().default(false),
   accessUntil: ts('access_until'),

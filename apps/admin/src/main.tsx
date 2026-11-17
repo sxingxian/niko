@@ -13,7 +13,7 @@ function Codes({ codes }: { codes: string[] }) {
 }
 interface UserRow {
   id: string; name: string; email: string; role: string; status: string; isOwner: boolean; lastActiveAt: string | null;
-  access: AccessState; lifetime: boolean; accessUntil: string | null; accessKind: string | null; accessPaidUntil: string | null; accessStartMonths: number; paidMode: Mode | null; keptPrices: { plan: 'monthly' | 'yearly'; cents: number }[] | null;
+  access: AccessState; lifetime: boolean; accessUntil: string | null; accessKind: string | null; accessPaidUntil: string | null; accessStartMonths: number; paidMode: Mode | null; keptPrices: { plan: 'monthly' | 'yearly'; cents: number }[] | null; pricesFrom: 'kept' | 'admin' | null; pricesAt: string | null;
   sub: { plan: string | null; status: string | null; periodEnd: string | null; cancelAtEnd: boolean; mode: Mode | null } | null;
   signup: { state: 'verify' | 'pay' | 'waiting'; paid: boolean; mode: Mode | null; priceCents: number | null; months: number | null; removeAt: string | null } | null;
 }
@@ -443,10 +443,12 @@ function PaymentsAdmin({ guard }: { guard: (e: unknown) => void }) {
   // The settings as saved, to tell whether plan prices are being changed; and who gets the new ones.
   const [saved, setSaved] = useState<PaymentSettings | null>(null);
   const [pricesFor, setPricesFor] = useState<'everyone' | 'new' | null>(null);
+  const [alsoOwn, setAlsoOwn] = useState(false);
+  const [counts, setCounts] = useState<{ onDefault: number; ownPrices: number } | null>(null);
   const load = useCallback(async () => {
     try {
-      const r = await api<{ settings: PaymentSettings; stripe: boolean; mode: Mode; modes: Record<Mode, ModeStatus> }>('/admin/payments');
-      setS(r.settings); setSaved(r.settings); setReady(r.stripe); setMode(r.mode); setModes(r.modes);
+      const r = await api<{ settings: PaymentSettings; stripe: boolean; mode: Mode; modes: Record<Mode, ModeStatus>; onDefault: number; ownPrices: number }>('/admin/payments');
+      setS(r.settings); setSaved(r.settings); setCounts({ onDefault: r.onDefault, ownPrices: r.ownPrices }); setReady(r.stripe); setMode(r.mode); setModes(r.modes);
       setOnce(centsText(r.settings.onceCents)); setMPrice(centsText(r.settings.monthly.cents)); setYPrice(centsText(r.settings.yearly.cents));
       setLen(String(r.settings.unit === 'years' ? r.settings.months / 12 : r.settings.months));
     } catch (e) { guard(e); }
@@ -464,14 +466,15 @@ function PaymentsAdmin({ guard }: { guard: (e: unknown) => void }) {
     if (bad(once) || bad(mPrice) || bad(yPrice)) return setNote({ ok: false, text: 'Prices are in Singapore dollars, at least 0.50, like 12 or 12.50.' });
     if (!(months >= 1 && months <= MAX_MONTHS)) return setNote({ ok: false, text: `The pay-once time is 1 to ${MAX_MONTHS} months (${MAX_MONTHS / 12} years).` });
     if (s.monthly.on && !toCents(mPrice) && s.yearly.on && !toCents(yPrice)) return setNote({ ok: false, text: 'Give the plans that are on a price, or people can’t continue when their time ends.' });
-    if (plansChanging && !pricesFor) return setNote({ ok: false, text: 'Choose who gets the new plan prices before saving.' });
+    if (plansChanging && !pricesFor) return setNote({ ok: false, text: 'Choose who moves to the new default prices before saving.' });
     setBusy(true);
     try {
-      const r = await api<{ settings: PaymentSettings; changed: boolean; pricesFor: 'everyone' | 'new' | null; accounts: number }>('/admin/payments', { method: 'PUT', body: { settings: draft, ...(plansChanging ? { pricesFor } : {}) } });
-      setS(r.settings); setSaved(r.settings); setPricesFor(null);
+      const r = await api<{ settings: PaymentSettings; changed: boolean; pricesFor: 'everyone' | 'new' | null; accounts: number; ownMoved: number; onDefault: number; ownPrices: number }>('/admin/payments', { method: 'PUT', body: { settings: draft, ...(plansChanging ? { pricesFor, alsoOwn } : {}) } });
+      setS(r.settings); setSaved(r.settings); setPricesFor(null); setAlsoOwn(false); setCounts({ onDefault: r.onDefault, ownPrices: r.ownPrices });
+      const back = r.ownMoved ? ` ${r.ownMoved === 1 ? '1 account' : `${r.ownMoved} accounts`} with own prices went back on the default.` : '';
       setNote({ ok: true, text: !r.changed ? 'Saved. New invites and sign-ups use these prices.'
-        : r.pricesFor === 'everyone' ? 'Saved. Everyone pays the new plan prices from their next plan. Plans running now keep their price.'
-        : `Saved. New people get the new plan prices; ${r.accounts === 1 ? '1 account keeps' : `${r.accounts} accounts keep`} the prices they had.` });
+        : r.pricesFor === 'everyone' ? `Saved. Everyone on the default pays the new prices from their next plan.${back} Plans running now keep their price.`
+        : `Saved. New people get the new prices;${back} ${r.accounts === 1 ? '1 account keeps' : `${r.accounts} accounts keep`} today’s prices as their own.` });
     } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
   };
   const planRow = (key: 'monthly' | 'yearly', label: string, value: string, setValue: (v: string) => void) => {
@@ -497,8 +500,9 @@ function PaymentsAdmin({ guard }: { guard: (e: unknown) => void }) {
     {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
     {modes && <ModeCard mode={mode} modes={modes} guard={guard} onReload={(text, ok) => { setNote({ ok, text }); api<{ stripe: boolean; mode: Mode; modes: Record<Mode, ModeStatus> }>('/admin/payments').then((r) => { setReady(r.stripe); setMode(r.mode); setModes(r.modes); }).catch(guard); }} onSwitched={(m) => { setMode(m); setReady(modes[m].ready); setNote({ ok: true, text: m === 'live' ? 'Live. New payments now charge real money.' : 'Test mode. New payments use test cards.' }); }} />}
     <div className="pay-grid">
-      <section className="g card" aria-label="Pricing">
-        <div><span className="k">Pricing</span><p className="sub" style={{ marginTop: 6 }}>The default for new invites and sign-ups. Each invite can change it.</p></div>
+      <section className="g card" aria-label="Default prices">
+        <div><div className="card-head"><span className="k">Default prices</span>{counts && <span className="sub small">{counts.onDefault} on the default · {counts.ownPrices} with own prices</span>}</div>
+          <p className="sub" style={{ marginTop: 6 }}>What new invites and sign-ups get, and everyone on the default. Each invite can change the pay-once price; give one person their own plan prices in Users → Prices.</p></div>
         <div className="pay-block">
           <b className="pay-h">1 · Pay once</b>
           <div className="pay-line">
@@ -519,16 +523,17 @@ function PaymentsAdmin({ guard }: { guard: (e: unknown) => void }) {
           <p className="sub small">{s.monthly.on && s.yearly.on ? 'Both on: people pick monthly or yearly when their time ends.' : `Only ${s.monthly.on ? 'monthly' : 'yearly'} is offered when their time ends.`}</p>
           {plansChanging && saved && (
             <fieldset className="who-pays">
-              <legend className="pay-h">Who gets the new plan prices?</legend>
+              <legend className="pay-h">Who moves to the new default?</legend>
               <p className="sub small">Now: {offersLine(plansOffered(saved))}. New: {offersLine(plansOffered(draft)) || 'none'}.</p>
               <label className={'who-opt' + (pricesFor === 'everyone' ? ' on' : '')}>
                 <input type="radio" name="prices-for" checked={pricesFor === 'everyone'} onChange={() => { setPricesFor('everyone'); setNote(null); }} />
-                <span><b>Everyone, from their next plan</b><span className="sub small">People who already have Niko pay the new prices the next time they choose a plan, including anyone who kept older prices. Plans running now keep renewing at their price.</span></span>
+                <span><b>Everyone on the default, from their next plan</b><span className="sub small">{counts ? `The ${counts.onDefault} accounts on the default` : 'Accounts on the default'} pay the new prices the next time they choose a plan. Plans running now keep renewing at their price.</span></span>
               </label>
               <label className={'who-opt' + (pricesFor === 'new' ? ' on' : '')}>
                 <input type="radio" name="prices-for" checked={pricesFor === 'new'} onChange={() => { setPricesFor('new'); setNote(null); }} />
-                <span><b>Only new people</b><span className="sub small">Everyone with an account now keeps today’s plan prices for every plan they choose later. New invites and sign-ups get the new prices.</span></span>
+                <span><b>Only new people</b><span className="sub small">{counts ? `The ${counts.onDefault} accounts on the default keep` : 'Accounts on the default keep'} today’s prices as their own, for every plan they choose later. New invites and sign-ups get the new prices.</span></span>
               </label>
+              {!!counts?.ownPrices && <div className="pay-line" style={{ paddingTop: 4 }}><Switch on={alsoOwn} onChange={(v) => { setAlsoOwn(v); setNote(null); }} label="Also put accounts with own prices back on the default" /><span style={{ fontSize: 14 }}>Also put the {counts.ownPrices === 1 ? 'account' : `${counts.ownPrices} accounts`} with own prices back on the default</span></div>}
             </fieldset>
           )}
         </div>
@@ -536,7 +541,7 @@ function PaymentsAdmin({ guard }: { guard: (e: unknown) => void }) {
           <Switch on={s.openPay} onChange={(v) => set({ openPay: v })} label="Open sign-ups pay too" />
           <span className="pay-txt"><span>Open sign-ups pay too</span><span className="sub small">{s.openPay ? 'Same prices. They pay after confirming their email, then wait for you to switch them on. Unpaid sign-ups are removed after 7 days.' : 'They don’t pay to sign up. Once you switch them on, they choose a plan, unless you unlock them.'}</span></span>
         </div>
-        <div className="pay-acts"><button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save pricing'}</button><span className="sub small">Anyone who already paid keeps what they paid; plans running now keep renewing at their price.</span></div>
+        <div className="pay-acts"><button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save default prices'}</button><span className="sub small">Anyone who already paid keeps what they paid; plans running now keep renewing at their price.</span></div>
       </section>
       <div className="pay-side">
         <section className="g card" aria-label="What people see">
@@ -625,6 +630,87 @@ function UnlockDialog({ user, onClose, onDone }: { user: UserRow; onClose: () =>
   );
 }
 
+// ---------------------------------------------------------------- one person's plan prices
+// Default prices (follow Payments) or own prices, fixed for this person. With a plan running now, it can change too,
+// from its next renewal, with no charge or refund today.
+type Offer = { plan: 'monthly' | 'yearly'; cents: number };
+function PricesDialog({ user, defaults, onClose, onDone }: { user: UserRow; defaults: Offer[]; onClose: () => void; onDone: (text: string) => void }) {
+  const start = user.keptPrices ?? defaults;
+  const of = (p: 'monthly' | 'yearly') => start.find((x) => x.plan === p) ?? defaults.find((x) => x.plan === p);
+  const [mode, setMode] = useState<'default' | 'own'>(user.keptPrices ? 'own' : 'default');
+  const [mOn, setMOn] = useState(!!start.find((x) => x.plan === 'monthly'));
+  const [yOn, setYOn] = useState(!!start.find((x) => x.plan === 'yearly'));
+  const [m, setM] = useState(of('monthly') ? centsText(of('monthly')!.cents) : '');
+  const [y, setY] = useState(of('yearly') ? centsText(of('yearly')!.cents) : '');
+  const [renew, setRenew] = useState(false);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    box.current?.querySelector<HTMLElement>('input, button')?.focus();
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [onClose]);
+  const who = user.name?.split(' ')[0] || user.email;
+  const own: Offer[] = [...(mOn && toCents(m) ? [{ plan: 'monthly' as const, cents: toCents(m)! }] : []), ...(yOn && toCents(y) ? [{ plan: 'yearly' as const, cents: toCents(y)! }] : [])];
+  const chosen = mode === 'default' ? defaults : own;
+  const sub = user.sub && ['active', 'trialing', 'past_due', 'unpaid'].includes(user.sub.status ?? '') && !user.sub.cancelAtEnd ? user.sub : null;
+  const subName = sub?.plan === 'yearly' ? 'yearly' : 'monthly';
+  const subPrice = chosen.find((x) => x.plan === subName);
+  const now = user.keptPrices ? (user.pricesFrom === 'admin' ? 'Now: own prices, set by you.' : `Now: own prices, kept when the default changed${user.pricesAt ? ` on ${fmtDate(user.pricesAt)}` : ''}.`) : 'Now: the default prices.';
+  const go = async () => {
+    setErr('');
+    if (mode === 'own') {
+      if (!mOn && !yOn) return setErr(`Keep at least one plan on, or ${who} can’t continue when their time ends.`);
+      if ((mOn && !toCents(m)) || (yOn && !toCents(y))) return setErr('Each plan that is on needs a price of at least SGD 0.50, like 12 or 12.50.');
+    }
+    if (renew && sub && !subPrice) return setErr(`Their running plan is ${subName}: give a ${subName} price, or leave the running plan as it is.`);
+    setBusy(true);
+    try {
+      const r = await api<{ renewed: string | null }>(`/admin/users/${user.id}/plan-prices`, { method: 'PUT', body: mode === 'default' ? { mode, renew: renew && !!sub } : { mode, monthly: mOn ? toCents(m) : null, yearly: yOn ? toCents(y) : null, renew: renew && !!sub } });
+      onDone(`${user.name || user.email} ${mode === 'default' ? `is on the default prices: ${offersLine(defaults)}.` : `now has own prices: ${offersLine(own)}.`}${r.renewed ? ` Their running plan renews at ${r.renewed} from ${fmtDate(sub!.periodEnd)}.` : ''}`);
+    } catch (e) { setErr((e as Error).message); setBusy(false); }
+  };
+  const row = (label: string, per: string, on: boolean, setOn: (v: boolean) => void, val: string, setVal: (v: string) => void) => (
+    <div className="pay-line">
+      <Switch on={on} onChange={(v) => { setOn(v); setErr(''); }} label={`${label} plan`} />
+      <span style={{ width: 74 }}>{label}</span>
+      <label className="price"><span className="k">SGD</span><span className="sr">{label} price in Singapore dollars</span><input className="in" inputMode="decimal" placeholder="Amount" value={val} disabled={!on} onChange={(e) => { setVal(e.target.value); setErr(''); }} /></label>
+      <span className="sub">{per}</span>
+    </div>
+  );
+  return (
+    <div className="scrim" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div ref={box} className="dialog wide" role="dialog" aria-modal="true" aria-labelledby="prh">
+        <div><h2 id="prh">Plan prices for {user.name || user.email}</h2><p className="sub">{now}</p></div>
+        <div role="radiogroup" aria-label="Which prices" className="who-pays">
+          <label className={'who-opt' + (mode === 'default' ? ' on' : '')}>
+            <input type="radio" name="price-mode" checked={mode === 'default'} onChange={() => { setMode('default'); setErr(''); }} />
+            <span><b>Default prices</b><span style={{ fontSize: 15 }}>{offersLine(defaults) || 'No plans on'}</span><span className="sub small">Follows Payments → Default prices. When you change those, you choose whether people on the default move with them.</span></span>
+          </label>
+          <label className={'who-opt' + (mode === 'own' ? ' on' : '')}>
+            <input type="radio" name="price-mode" checked={mode === 'own'} onChange={() => { setMode('own'); setErr(''); }} />
+            <span><b>Own prices</b><span className="sub small">Fixed for {who} only. Changing the default prices never changes these.</span></span>
+          </label>
+        </div>
+        {mode === 'own' && <div className="own-prices">
+          {row('Monthly', 'a month', mOn, setMOn, m, setM)}
+          {row('Yearly', 'a year', yOn, setYOn, y, setY)}
+        </div>}
+        {sub && <div className="running">
+          <span style={{ fontSize: 14 }}>{who}’s {subName} plan is running{sub.mode === 'test' ? ' (test)' : ''}. New prices apply when {who} next chooses a plan.</span>
+          <div className="running-row"><Switch on={renew} onChange={setRenew} label="Also change the plan running now" />
+            <span><span style={{ fontSize: 14 }}>Also change the plan running now</span><span className="sub small" style={{ display: 'block' }}>From its next renewal ({fmtDate(sub.periodEnd)}), with no charge or refund today. Stripe’s receipts show the new price.</span></span></div>
+        </div>}
+        <div className="preview"><span>From {who}’s next plan: {offersLine(chosen) || '—'}{renew && sub && subPrice ? `. The running plan renews at ${money(subPrice.cents)} from ${fmtDate(sub.periodEnd)}.` : '.'}</span></div>
+        {err && <p className="err" role="alert">{err}</p>}
+        <div className="dialog-acts"><button className="bt" onClick={onClose}>Cancel</button><button className="pri" style={{ height: 44, fontSize: 14 }} onClick={go} disabled={busy}>{busy ? 'Saving…' : 'Save prices'}</button></div>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- users
 /** What the Payment column says about an account. */
 function payText(u: UserRow): { text: string; tone?: 'await' | 'ended' | 'warn' } {
@@ -648,9 +734,8 @@ function payText(u: UserRow): { text: string; tone?: 'await' | 'ended' | 'warn' 
   }
   if (u.access.has && u.accessKind === 'unlocked') return { text: u.accessPaidUntil ? `Paid to ${fmtDate(u.accessPaidUntil)} · then unlocked to ${fmtDate(u.accessUntil)}` : `Unlocked by admin · until ${fmtDate(u.accessUntil)}` };
   if (u.access.has && u.accessKind === 'free') return { text: `Free · until ${fmtDate(u.accessUntil)}` };
-  const kept = u.keptPrices ? ` · keeps ${offersLine(u.keptPrices)}` : '';
-  if (u.access.has) return { text: `Paid once · until ${fmtDate(u.accessUntil)}${testTag(u.paidMode)}${kept}` };
-  return { text: `Paid time ended · needs a plan${kept}`, tone: 'ended' };
+  if (u.access.has) return { text: `Paid once · until ${fmtDate(u.accessUntil)}${testTag(u.paidMode)}` };
+  return { text: 'Paid time ended · needs a plan', tone: 'ended' };
 }
 function statusText(u: UserRow): string {
   if (u.signup && u.status !== 'active') return u.signup.state === 'waiting' ? 'Waiting for you' : u.signup.state === 'pay' ? 'Not paid' : 'Confirming email';
@@ -684,6 +769,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
   const [note, setNote] = useState<{ ok: boolean; text: string; code?: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [unlocking, setUnlocking] = useState<UserRow | null>(null);
+  const [pricing, setPricing] = useState<UserRow | null>(null);
   const [fresh, setFresh] = useState<string[] | null>(null);
   const [confirmCodes, setConfirmCodes] = useState(false);
 
@@ -807,7 +893,12 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
                 <div key={u.id} className="tr pay">
                   <b>{u.name || '—'}</b><span className="sub ell">{u.email}</span><span>{u.role === 'admin' ? 'Admin' : 'Member'}</span>
                   <span className="st"><i className={u.status === 'active' ? 'on' : ''} />{statusText(u)}</span>
-                  <span className="paycell"><span className={'tone-' + (p.tone ?? 'plain')}>{p.text}</span>{canUnlock && <button className="bt sm" onClick={() => setUnlocking(u)}>Unlock</button>}</span>
+                  <span className="paycell">
+                    <span className="paytxt"><span className={'tone-' + (p.tone ?? 'plain')}>{p.text}</span>
+                      {canUnlock && pay && <span className="pricetag"><span className={'tag' + (u.keptPrices ? ' own' : '')}>{u.keptPrices ? (u.pricesFrom === 'admin' ? 'Own' : `Own · kept${u.pricesAt ? ' ' + fmtDate(u.pricesAt) : ''}`) : 'Default'}</span><span className="sub small">{offersLine(u.keptPrices ?? plansOffered(pay)) || 'no plans'}</span></span>}</span>
+                    {canUnlock && pay && <button className="bt sm" onClick={() => setPricing(u)}>Prices</button>}
+                    {canUnlock && <button className="bt sm" onClick={() => setUnlocking(u)}>Unlock</button>}
+                  </span>
                   <span>{u.isOwner ? <span className="k">Owner</span> : unpaid ? <button className="bt" onClick={() => remove(u)}>Remove</button> : <Switch on={u.status === 'active'} onChange={() => toggle(u)} label={`Account enabled for ${u.email}`} />}</span>
                 </div>
               );
@@ -825,6 +916,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
             })}
           </section>
           <p className="sub" style={{ fontSize: 13 }}>Paid sign-ups stay off until you switch them on; their paid time starts then. Unpaid sign-ups are removed after 7 days. Prices are fixed when the invite is sent. Card details go to Stripe, never to Niko. Every change here is written to the audit log.</p>
+          {pricing && pay && <PricesDialog user={pricing} defaults={plansOffered(pay)} onClose={() => setPricing(null)} onDone={async (text) => { setPricing(null); said(text); await load(); }} />}
           {unlocking && <UnlockDialog user={unlocking} onClose={() => setUnlocking(null)} onDone={async (text) => { setUnlocking(null); said(text); await load(); }} />}
         </> : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'security' ? <>
           <header><h1>Security</h1><p className="sub" style={{ fontSize: 15 }}>Your own admin sign-in: authenticator app and recovery codes.</p></header>

@@ -83,8 +83,19 @@ body { background: #07090d; }
 @media (max-width: 560px) { .gl-sel { min-width: 0; max-width: 52vw; } }
 
 /* Payments: invite prices, the Payment column, unlock, and the Payments page (Admin-Invite-Payment / Admin-Payments mockups). */
-.tr.pay { padding: 8px 0; grid-template-columns: minmax(110px, 1fr) minmax(150px, 1.25fr) 76px 130px minmax(220px, 1.9fr) 150px; min-width: 900px; }
-.paycell { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+.tr.pay { padding: 8px 0; grid-template-columns: minmax(100px, .9fr) minmax(150px, 1.1fr) 70px 110px minmax(330px, 2.6fr) 90px; min-width: 980px; }
+.paycell { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; padding: 6px 0; }
+.paytxt { display: flex; flex-direction: column; gap: 5px; min-width: 0; flex: 1 1 180px; }
+.paycell .bt.sm { flex: none; }
+.pricetag { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tag { font: 500 11px 'JetBrains Mono', monospace; letter-spacing: .12em; text-transform: uppercase; color: #b9c2cf; border: 1px solid rgba(255,255,255,.25); border-radius: 999px; padding: 3px 8px; white-space: nowrap; }
+.tag.own { color: #9fdcf3; border-color: rgba(159,220,243,.5); }
+.dialog.wide { width: min(600px, 100%); }
+.own-prices { display: flex; flex-direction: column; gap: 10px; padding-left: 34px; }
+.own-prices .in:disabled { opacity: .4; }
+.running { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-radius: 16px; border: 1px solid rgba(255,255,255,.18); }
+.running-row { display: flex; align-items: center; gap: 12px; }
+.card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .tone-await { color: #9fdcf3; }
 .tone-ended { color: #d9c3ff; }
 .tone-warn { color: #ffcf9a; }

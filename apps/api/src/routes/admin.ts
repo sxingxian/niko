@@ -1,6 +1,6 @@
 import { and, desc, eq, gt, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
-import { appSettings, auditLog, invites, recoveryCodes, sessions, signups, users } from '@niko/db';
+import { appSettings, auditLog, invites, recoveryCodes, sessions, signups, users, type Db } from '@niko/db';
 import { accessState, accountLimits, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
 import { connectInfo, connectStripe, dateLabel, forgetPayments, forgetStripeMode, inviteCodeHash, keysOf, makeInviteCode, paymentSettings, PAYMENTS_KEY, payNow, plansLine, secretsFor, STRIPE_MODE_KEY, stripeMode } from '../billing';
 import { isMode, keysFor, modeStatus, stripe, StripeError, stripeReady } from '../stripe';
@@ -132,7 +132,7 @@ admin.get('/users', requireAdmin, async (c) => {
     id: u.id, name: u.name, email: u.email, role: u.role, status: u.status, isOwner: u.isOwner, lastActiveAt: u.lastActiveAt,
     access: accessState(u, pay.graceDays),
     lifetime: u.lifetime, accessUntil: u.accessUntil, accessKind: u.accessKind, accessPaidUntil: u.accessPaidUntil, accessStartMonths: u.accessStartMonths, paidMode: u.paidMode,
-    keptPrices: cleanPlanPrices(u.planPrices),
+    keptPrices: cleanPlanPrices(u.planPrices), pricesFrom: u.planPrices ? u.planPricesFrom ?? 'kept' : null, pricesAt: u.planPrices ? u.planPricesAt : null,
     sub: u.subId ? { plan: u.subPlan, status: u.subStatus, periodEnd: u.subPeriodEnd, cancelAtEnd: u.subCancelAtEnd, mode: u.subMode } : null,
     signup: su ? { state: su.state, paid: !!su.paidAt, mode: su.paidAt ? su.stripeMode : null, priceCents: su.priceCents, months: su.months, removeAt: su.paidAt ? null : new Date(su.createdAt.getTime() + UNPAID_SIGNUP_DAYS * 86400_000) } : null,
   }));
@@ -300,7 +300,7 @@ admin.get('/payments', requireAdmin, async (c) => {
   const secrets = await secretsFor(c.env, db);
   const info = await connectInfo(db, true);
   const status = (m: 'test' | 'live') => ({ ...modeStatus(secrets, m), connectedAt: info[m]?.at ?? null, account: info[m]?.account ?? null });
-  return c.json({ settings: await paymentSettings(db, true), stripe: stripeReady(keysFor(secrets, mode)), mode, modes: { test: status('test'), live: status('live') } });
+  return c.json({ settings: await paymentSettings(db, true), stripe: stripeReady(keysFor(secrets, mode)), mode, modes: { test: status('test'), live: status('live') }, ...(await priceCounts(db)) });
 });
 // Connect: Niko sets up this Stripe mode itself (checks the key, makes the webhook and the billing page settings), so
 // nothing is set up by hand in Stripe. Safe to press again.
@@ -338,26 +338,81 @@ admin.put('/payments', requireAdmin, async (c) => {
   const s = cleanPayments(raw);
   if (raw.monthly?.on === false && raw.yearly?.on === false) return c.json({ error: 'Keep at least one plan on, or people can’t continue when their time ends.' }, 400);
   const db = c.get('db');
-  // Plan prices changed: the admin says whether accounts that already exist move to them at their next plan
-  // ('everyone'), or keep the plan prices they have now ('new': only new people get the new ones). Plans running now
-  // keep renewing at their own price in Stripe either way.
+  // Default plan prices changed: the admin says whether accounts on the default move to them at their next plan
+  // ('everyone'), or keep today's prices as their own ('new': only new people get the new ones). Accounts with their
+  // own prices keep them, unless the admin also puts them back on the default (alsoOwn). Plans running now keep
+  // renewing at their own price in Stripe either way.
   const before = await paymentSettings(db, true);
   const changed = plansDiffer(before, s);
   const pricesFor = (b as { pricesFor?: unknown }).pricesFor;
-  if (changed && plansOffered(before).length && pricesFor !== 'everyone' && pricesFor !== 'new') return c.json({ error: 'Choose who gets the new plan prices: everyone at their next plan, or only new people.' }, 400);
-  let moved = 0;
-  if (changed && pricesFor === 'everyone') {
-    moved = (await db.update(users).set({ planPrices: null }).where(isNotNull(users.planPrices)).returning({ id: users.id })).length;
-  } else if (changed && pricesFor === 'new' && plansOffered(before).length) {
-    // Accounts following the current prices keep the old ones; accounts that already kept prices keep theirs.
-    moved = (await db.update(users).set({ planPrices: plansOffered(before) })
-      .where(and(isNull(users.planPrices), sql`${users.role} <> 'admin'`, eq(users.lifetime, false))).returning({ id: users.id })).length;
+  const alsoOwn = (b as { alsoOwn?: unknown }).alsoOwn === true;
+  if (changed && plansOffered(before).length && pricesFor !== 'everyone' && pricesFor !== 'new') return c.json({ error: 'Choose who moves to the new default prices: everyone on the default at their next plan, or only new people.' }, 400);
+  let moved = 0, ownMoved = 0;
+  const payers = and(sql`${users.role} <> 'admin'`, eq(users.lifetime, false));
+  if (changed && plansOffered(before).length) {
+    if (alsoOwn) ownMoved = (await db.update(users).set({ planPrices: null, planPricesFrom: null, planPricesAt: null }).where(and(payers, isNotNull(users.planPrices))).returning({ id: users.id })).length;
+    if (pricesFor === 'new') {
+      moved = (await db.update(users).set({ planPrices: plansOffered(before), planPricesFrom: 'kept', planPricesAt: new Date() })
+        .where(and(payers, isNull(users.planPrices))).returning({ id: users.id })).length;
+    } else {
+      moved = Number((await db.select({ n: sql<number>`count(*)` }).from(users).where(and(payers, isNull(users.planPrices))))[0]?.n ?? 0);
+    }
   }
   await db.insert(appSettings).values({ key: PAYMENTS_KEY, value: s }).onConflictDoUpdate({ target: appSettings.key, set: { value: s } });
   forgetPayments();
   await audit(c, 'payments.default', { once: money(s.onceCents), length: lengthLabel(s.months), monthly: s.monthly.on ? money(s.monthly.cents) : 'off', yearly: s.yearly.on ? money(s.yearly.cents) : 'off', openPay: s.openPay, grace: s.graceDays, remind: s.remind,
-    ...(changed ? { newPlanPrices: pricesFor === 'everyone' ? 'everyone at their next plan' : 'new people only', accounts: moved, ...(pricesFor === 'new' ? { kept: offersLine(plansOffered(before)) } : {}) } : {}) }, c.get('user').id);
-  return c.json({ ok: true, settings: s, changed, pricesFor: changed ? pricesFor : null, accounts: moved });
+    ...(changed ? { newPlanPrices: pricesFor === 'new' ? 'new people only' : 'everyone on the default at their next plan', accounts: moved, ...(alsoOwn ? { ownPutBackOnDefault: ownMoved } : {}), ...(pricesFor === 'new' ? { kept: offersLine(plansOffered(before)) } : {}) } : {}) }, c.get('user').id);
+  return c.json({ ok: true, settings: s, changed, pricesFor: changed ? pricesFor : null, accounts: moved, ownMoved, ...(await priceCounts(db)) });
+});
+
+/** How many paying accounts are on the default plan prices, and how many have their own. */
+async function priceCounts(db: Db) {
+  const r = (await db.select({ own: sql<number>`count(*) filter (where ${users.planPrices} is not null)`, def: sql<number>`count(*) filter (where ${users.planPrices} is null)` })
+    .from(users).where(and(sql`${users.role} <> 'admin'`, eq(users.lifetime, false))))[0];
+  return { onDefault: Number(r?.def ?? 0), ownPrices: Number(r?.own ?? 0) };
+}
+
+// ---------------------------------------------------------------- one person's plan prices
+// Default (follows Payments → Default prices) or own prices, fixed for that person. Optionally the plan running now
+// changes too, from its next renewal, with no charge or refund today (Stripe: proration none).
+const LIVE_SUB = ['active', 'trialing', 'past_due', 'unpaid'];
+admin.put('/users/:id/plan-prices', requireAdmin, async (c) => {
+  const b = await c.req.json<{ mode?: unknown; monthly?: unknown; yearly?: unknown; renew?: unknown }>().catch(() => ({} as Record<string, unknown>));
+  const db = c.get('db');
+  const target = (await db.select().from(users).where(eq(users.id, c.req.param('id'))).limit(1))[0];
+  if (!target) return c.json({ error: 'No such user.' }, 404);
+  if (target.role === 'admin' || target.lifetime) return c.json({ error: 'Admins and lifetime accounts don’t choose plans.' }, 400);
+  let own: { plan: 'monthly' | 'yearly'; cents: number }[] | null = null;
+  if (b.mode === 'own') {
+    const pick = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+    const m = pick(b.monthly), y = pick(b.yearly);
+    if (m === null && y === null) return c.json({ error: 'Keep at least one plan on, or they can’t continue when their time ends.' }, 400);
+    own = cleanPlanPrices([...(m !== null ? [{ plan: 'monthly', cents: m }] : []), ...(y !== null ? [{ plan: 'yearly', cents: y }] : [])]);
+    if (!own || own.length !== (m !== null ? 1 : 0) + (y !== null ? 1 : 0)) return c.json({ error: 'Each plan that is on needs a price of at least SGD 0.50.' }, 400);
+  } else if (b.mode !== 'default') return c.json({ error: 'Choose default or own prices.' }, 400);
+  const offers = own ?? plansOffered(await paymentSettings(db, true));
+  // The plan running now, from its next renewal.
+  let renewed: string | null = null;
+  const live = !!target.subId && LIVE_SUB.includes(target.subStatus ?? '') && !target.subCancelAtEnd;
+  if (b.renew === true && live) {
+    const offer = offers.find((p) => p.plan === target.subPlan);
+    if (!offer) return c.json({ error: `Their running plan is ${target.subPlan}; give a ${target.subPlan} price to change it, or leave the running plan as it is.` }, 400);
+    try {
+      const keys = keysOf(c.env, target.subMode);
+      const sub = await stripe(keys, 'GET', `/subscriptions/${target.subId}`);
+      const item = sub?.items?.data?.[0];
+      const product = typeof item?.price?.product === 'string' ? item.price.product : item?.price?.product?.id;
+      if (!item?.id || !product) throw new Error('the plan has no item to change');
+      await stripe(keys, 'POST', `/subscriptions/${target.subId}`, {
+        items: [{ id: item.id, price_data: { currency: 'sgd', product, unit_amount: offer.cents, recurring: { interval: offer.plan === 'monthly' ? 'month' : 'year' } } }],
+        proration_behavior: 'none', metadata: { user_id: target.id, plan: offer.plan },
+      });
+      renewed = money(offer.cents);
+    } catch (e) { return c.json({ error: `Stripe didn’t accept the change to their running plan, so nothing was changed: ${(e as Error).message}` }, 502); }
+  }
+  await db.update(users).set(own ? { planPrices: own, planPricesFrom: 'admin', planPricesAt: new Date() } : { planPrices: null, planPricesFrom: null, planPricesAt: null }).where(eq(users.id, target.id));
+  await audit(c, 'plan_prices.user', { target: target.email, prices: own ? offersLine(own) : 'default', ...(renewed ? { runningPlanFromNextRenewal: renewed } : {}) }, c.get('user').id);
+  return c.json({ ok: true, keptPrices: own, pricesFrom: own ? 'admin' : null, renewed });
 });
 
 admin.put('/registration', requireAdmin, async (c) => {

@@ -670,7 +670,7 @@ await ok('changing plan prices: the admin chooses whether existing accounts keep
   assert.equal(await plansOf(kim), 'monthly:900,yearly:9000');
   // Changing plan prices needs a choice.
   let r = await admin.put('/admin/payments', { settings: { ...cur, monthly: { on: true, cents: 1200 }, yearly: { on: true, cents: 12000 } } });
-  assert.equal(r.status, 400); assert.match(r.data.error, /who gets the new plan prices/);
+  assert.equal(r.status, 400); assert.match(r.data.error, /who moves to the new default prices/);
   // Only new people: Kim keeps today's prices, and is charged them.
   r = await admin.put('/admin/payments', { settings: { ...cur, monthly: { on: true, cents: 1200 }, yearly: { on: true, cents: 12000 } }, pricesFor: 'new' });
   assert.equal(r.status, 200); assert.equal(r.data.changed, true); assert.ok(r.data.accounts >= 1);
@@ -687,14 +687,62 @@ await ok('changing plan prices: the admin chooses whether existing accounts keep
   // Saving without changing plan prices needs no choice and changes nobody.
   r = await admin.put('/admin/payments', { settings: { ...cur, monthly: { on: true, cents: 1500 }, yearly: { on: false, cents: 12000 }, remind: false } });
   assert.equal(r.status, 200); assert.equal(r.data.changed, false);
-  // Everyone: Kim moves to the current prices at the next plan.
+  // Everyone on the default: Kim, with her own (kept) prices, keeps them...
   r = await admin.put('/admin/payments', { settings: { ...cur, monthly: { on: true, cents: 1100 }, yearly: { on: true, cents: 11000 } }, pricesFor: 'everyone' });
   assert.equal(r.status, 200);
-  assert.equal(await plansOf(kim), 'monthly:1100,yearly:11000', 'everyone moves to the new prices');
+  assert.equal(await plansOf(kim), 'monthly:900,yearly:9000', 'own prices are not moved by a change of the default');
+  // ...unless the admin also puts accounts with own prices back on the default.
+  r = await admin.put('/admin/payments', { settings: { ...cur, monthly: { on: true, cents: 1100 }, yearly: { on: true, cents: 12000 } }, pricesFor: 'everyone', alsoOwn: true });
+  assert.equal(r.status, 200); assert.ok(r.data.ownMoved >= 1);
+  assert.equal(await plansOf(kim), 'monthly:1100,yearly:12000', 'everyone moves to the new prices');
   assert.equal((await user('kim@example.com')).plan_prices, null);
   const log = (await q("select detail from audit_log where action = 'payments.default' order by created_at desc limit 1"))[0].detail;
-  assert.equal(log.newPlanPrices, 'everyone at their next plan');
-  await admin.put('/admin/payments', { settings: cur, pricesFor: 'everyone' });
+  assert.equal(log.newPlanPrices, 'everyone on the default at their next plan'); assert.ok(log.ownPutBackOnDefault >= 1);
+  await admin.put('/admin/payments', { settings: cur, pricesFor: 'everyone', alsoOwn: true });
+});
+
+await ok('the admin gives one person their own plan prices, or puts them back on the default', async () => {
+  const kim = new Browser();
+  assert.equal((await kim.post('/auth/sign-in', { email: 'kim@example.com', password: 'a brand new long passphrase 42' })).status, 200);
+  const k = await user('kim@example.com');
+  const plansOf = async () => (await kim.get('/billing')).data.plans.map((p) => `${p.plan}:${p.cents}`).join();
+  const def = await plansOf();
+  let r = await admin.put(`/admin/users/${k.id}/plan-prices`, { mode: 'own', monthly: 650, yearly: null });
+  assert.equal(r.status, 200);
+  assert.equal(await plansOf(), 'monthly:650', 'only the plans given are offered, at their price');
+  r = await kim.post('/billing/checkout', { plan: 'monthly' });
+  assert.equal(stripeCalls.at(-1).p['line_items[0][price_data][unit_amount]'], '650', 'and charged');
+  const row = (await admin.get('/admin/users')).data.users.find((x) => x.email === 'kim@example.com');
+  assert.equal(row.pricesFrom, 'admin');
+  assert.equal((await admin.put(`/admin/users/${k.id}/plan-prices`, { mode: 'own', monthly: null, yearly: null })).status, 400, 'at least one plan');
+  assert.equal((await admin.put(`/admin/users/${k.id}/plan-prices`, { mode: 'own', monthly: 10, yearly: null })).status, 400, 'at least SGD 0.50');
+  const alex = await user('alex@example.com');
+  assert.equal((await admin.put(`/admin/users/${alex.id}/plan-prices`, { mode: 'own', monthly: 900 })).status, 400, 'admins choose no plan');
+  assert.equal((await kim.put(`/admin/users/${k.id}/plan-prices`, { mode: 'own', monthly: 100 })).status !== 200, true, 'members can’t set prices');
+  // The running plan changes too, from its next renewal, only when asked.
+  subs.set('sub_kim', { id: 'sub_kim', status: 'active', items: { data: [{ id: 'si_kim', price: { product: 'prod_test_plan-monthly' } }] } });
+  await q("update users set sub_id = 'sub_kim', sub_status = 'active', sub_plan = 'monthly', sub_mode = 'test', sub_cancel_at_end = false where id = $1", [k.id]);
+  const before = stripeCalls.length;
+  r = await admin.put(`/admin/users/${k.id}/plan-prices`, { mode: 'own', monthly: 700, yearly: 7000 });
+  assert.equal(r.status, 200); assert.equal(stripeCalls.length, before, 'no Stripe call unless the running plan is to change');
+  r = await admin.put(`/admin/users/${k.id}/plan-prices`, { mode: 'own', monthly: 750, yearly: 7000, renew: true });
+  assert.equal(r.status, 200); assert.equal(r.data.renewed, 'SGD 7.50');
+  const up = stripeCalls.at(-1);
+  assert.equal(up.method, 'POST'); assert.equal(up.path, '/subscriptions/sub_kim');
+  assert.equal(up.p['items[0][id]'], 'si_kim'); assert.equal(up.p['items[0][price_data][unit_amount]'], '750');
+  assert.equal(up.p['items[0][price_data][recurring][interval]'], 'month'); assert.equal(up.p.proration_behavior, 'none', 'no charge or refund today');
+  r = await admin.put(`/admin/users/${k.id}/plan-prices`, { mode: 'own', monthly: null, yearly: 7000, renew: true });
+  assert.equal(r.status, 400, 'a monthly plan needs a monthly price to change');
+  // Back on the default.
+  r = await admin.put(`/admin/users/${k.id}/plan-prices`, { mode: 'default' });
+  assert.equal(r.status, 200);
+  assert.equal(await plansOf(), def);
+  assert.equal((await user('kim@example.com')).plan_prices, null);
+  const counts = (await admin.get('/admin/payments')).data;
+  assert.ok(counts.onDefault >= 1 && typeof counts.ownPrices === 'number');
+  const audits = await q("select detail from audit_log where action = 'plan_prices.user' order by created_at");
+  assert.ok(audits.some((a) => a.detail.runningPlanFromNextRenewal === 'SGD 7.50') && audits.at(-1).detail.prices === 'default');
+  await q("update users set sub_id = null, sub_status = null, sub_plan = null where id = $1", [k.id]);
 });
 
 await sqlc.end();
