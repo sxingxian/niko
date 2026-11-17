@@ -397,8 +397,8 @@ body { background: #07090d; }
 /* Limits */
 .lim-find { height: 44px; font-size: 14px; margin: 0 2px; }
 .lim-badge { font: 500 11px 'JetBrains Mono', monospace; letter-spacing: .08em; border: 1px solid rgba(255,255,255,.3); border-radius: 999px; padding: 3px 9px; white-space: nowrap; flex: none; }
-.lim-badge.chg { color: #9fdcf3; border-color: rgba(159,220,243,.55); }
-.lim-badge.free { color: #7fe3a8; border-color: rgba(127,227,168,.55); }
+.lim-badge.is-chg { color: #9fdcf3; border-color: rgba(159,220,243,.55); }
+.lim-badge.is-free { color: #7fe3a8; border-color: rgba(127,227,168,.55); }
 .who-row[aria-pressed='true'] .lim-badge { color: #07090d; border-color: #07090d; }
 .who-txt span.warn { color: #ffb86b; opacity: 1; }
 .who-row[aria-pressed='true'] .who-txt span.warn { color: #9a5a12; }

@@ -100,6 +100,7 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [find, setFind] = useState('');
   const load = useCallback(async () => {
     try { const r = await api<{ defaults: Record<string, boolean>; users: AiUser[] }>('/admin/ai'); setDefaults(r.defaults); setPeople(r.users); }
     catch (e) { guard(e); }
@@ -137,12 +138,14 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
     <div className="ai-grid">
       <section className="g card ai-people" aria-label="Applies to">
         <span className="k" style={{ padding: '0 6px' }}>Applies to</span>
+        <input className="in lim-find" type="search" aria-label="Find a person" placeholder="Find a person" value={find} onChange={(e) => setFind(e.target.value)} />
         <div className="ai-list">
-          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default' }, ...people.map((p) => ({ id: p.id, name: p.name || p.email, sub: p.email, badge: p.role === 'admin' ? 'Admin' : count(p) ? `${count(p)} ${count(p) === 1 ? 'change' : 'changes'}` : 'Default' }))].map((p) => (
+          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default', tone: '' }, ...people.filter((p) => !find.trim() || `${p.name} ${p.email}`.toLowerCase().includes(find.trim().toLowerCase())).map((p) => ({ id: p.id, name: p.name || p.email, sub: p.email, badge: p.role === 'admin' ? 'Admin' : count(p) ? `${count(p)} ${count(p) === 1 ? 'change' : 'changes'}` : 'Default', tone: p.role === 'admin' ? ' is-free' : count(p) ? ' is-chg' : '' }))].map((p) => (
             <button key={p.id} className="who-row" aria-pressed={p.id === sel} onClick={() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; setSel(p.id); setNote(null); }}>
-              <span className="who-txt"><b>{p.name}</b><span>{p.sub}</span></span><span className="who-badge">{p.badge}</span>
+              <span className="who-txt"><b>{p.name}</b><span>{p.sub}</span></span><span className={'lim-badge' + p.tone}>{p.badge}</span>
             </button>
           ))}
+          {find.trim() && !people.some((p) => `${p.name} ${p.email}`.toLowerCase().includes(find.trim().toLowerCase())) && <p className="sub small" style={{ padding: '6px' }}>No one matches “{find.trim()}”.</p>}
         </div>
         <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>New accounts get the default. Admins always have every option.</p>
       </section>
@@ -200,6 +203,7 @@ function GlanceAdmin({ guard }: { guard: (e: unknown) => void }) {
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [find, setFind] = useState('');
   const load = useCallback(async () => {
     try { const r = await api<{ defaults: GlanceLimits; users: GlanceUser[] }>('/admin/glance'); setDefaults(r.defaults); setPeople(r.users); }
     catch (e) { guard(e); }
@@ -234,12 +238,14 @@ function GlanceAdmin({ guard }: { guard: (e: unknown) => void }) {
     <div className="ai-grid">
       <section className="g card ai-people" aria-label="Applies to">
         <span className="k" style={{ padding: '0 6px' }}>Applies to</span>
+        <input className="in lim-find" type="search" aria-label="Find a person" placeholder="Find a person" value={find} onChange={(e) => setFind(e.target.value)} />
         <div className="ai-list">
-          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default' }, ...people.map((p) => ({ id: p.id, name: p.name || p.email, sub: p.email, badge: count(p) ? `${count(p)} ${count(p) === 1 ? 'change' : 'changes'}` : 'Default' }))].map((p) => (
+          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default', tone: '' }, ...people.filter((p) => !find.trim() || `${p.name} ${p.email}`.toLowerCase().includes(find.trim().toLowerCase())).map((p) => ({ id: p.id, name: p.name || p.email, sub: p.email, badge: count(p) ? `${count(p)} ${count(p) === 1 ? 'change' : 'changes'}` : 'Default', tone: count(p) ? ' is-chg' : '' }))].map((p) => (
             <button key={p.id} className="who-row" aria-pressed={p.id === sel} onClick={() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; setSel(p.id); setNote(null); }}>
-              <span className="who-txt"><b>{p.name}</b><span>{p.sub}</span></span><span className="who-badge">{p.badge}</span>
+              <span className="who-txt"><b>{p.name}</b><span>{p.sub}</span></span><span className={'lim-badge' + p.tone}>{p.badge}</span>
             </button>
           ))}
+          {find.trim() && !people.some((p) => `${p.name} ${p.email}`.toLowerCase().includes(find.trim().toLowerCase())) && <p className="sub small" style={{ padding: '6px' }}>No one matches “{find.trim()}”.</p>}
         </div>
         <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>New accounts get the default. These limits apply to admins too.</p>
       </section>
@@ -363,7 +369,7 @@ function LimitsAdmin({ guard }: { guard: (e: unknown) => void }) {
         <div className="ai-list">
           {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default', warn: false }, ...shownPeople.map((p) => ({ id: p.id, name: p.invite ? p.email : p.name || p.email, sub: p.invite ? 'Invited · not joined yet' : near(p) ? 'Near a monthly amount' : p.email, badge: badge(p), warn: !p.invite && near(p) }))].map((p) => (
             <button key={p.id} className="who-row" aria-pressed={p.id === sel} onClick={() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; setSel(p.id); setNote(null); }}>
-              <span className="who-txt"><b>{p.name}</b><span className={p.warn ? 'warn' : ''}>{p.sub}</span></span><span className={'lim-badge' + (p.badge === 'Default' ? '' : p.badge === 'No limit' ? ' free' : ' chg')}>{p.badge}</span>
+              <span className="who-txt"><b>{p.name}</b><span className={p.warn ? 'warn' : ''}>{p.sub}</span></span><span className={'lim-badge' + (p.badge === 'Default' ? '' : p.badge === 'No limit' ? ' is-free' : ' is-chg')}>{p.badge}</span>
             </button>
           ))}
           {q && !shownPeople.length && <p className="sub small" style={{ padding: '6px' }}>No one matches “{find.trim()}”.</p>}
