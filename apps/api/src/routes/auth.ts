@@ -3,7 +3,7 @@ import { Hono, type Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { appSettings, invites, passkeys, passwordResets, sessions, signups, users, webauthnChallenges, type Invite } from '@niko/db';
-import { addMonths, CODE_TRIES, CURRENCY, isCodeShape, isEmail, lengthLabel, normalizeCode, passwordProblem, plansOffered } from '@niko/shared';
+import { addMonths, cleanAccountLimits, cleanAiAccess, cleanProvided, CODE_TRIES, CURRENCY, isCodeShape, isEmail, lengthLabel, normalizeCode, passwordProblem, plansOffered } from '@niko/shared';
 import { emailCodeHash, inviteCodeHash, makeEmailCode, paymentSettings, payNow, priceLine, setCustomer, syncCheckout, tellAdmins } from '../billing';
 import { isMode, NOT_READY, stripe } from '../stripe';
 import type { AppEnv } from '../env';
@@ -329,8 +329,14 @@ auth.post('/invite/:token', async (c) => {
   if (!claimed.length) return c.json({ error: GONE }, 404);
   const months = inv.months ?? 12;
   const access = inv.access === 'life' ? { lifetime: true } : { lifetime: false, accessUntil: addMonths(new Date(), months), accessKind: inv.access === 'free' ? 'free' : 'paid' };
+  // Set up before they joined: the services provided to them, AI option changes and monthly amounts.
+  const setup = (inv.setup ?? {}) as { provided?: unknown; aiAccess?: unknown; limits?: unknown; engine?: unknown };
   const [u] = await db.insert(users).values({
     email: inv.email, name: (b.name ?? '').slice(0, 80), passwordHash: await hashPassword(c.get('db'), b.password!), role: inv.role === 'admin' ? 'admin' : 'member',
+    ...(setup.provided ? { provided: cleanProvided(setup.provided) } : {}),
+    ...(setup.aiAccess ? { aiAccess: cleanAiAccess(setup.aiAccess) } : {}),
+    ...(setup.limits ? { accountLimits: cleanAccountLimits(setup.limits) } : {}),
+    ...(setup.engine && typeof setup.engine === 'object' ? { engine: setup.engine as Record<string, unknown> } : {}),
     ...access, ...(inv.access === 'paid' && isMode(inv.stripeMode) ? { paidMode: inv.stripeMode, ...setCustomer(inv.stripeMode, inv.stripeCustomerId) } : {}),
   }).returning();
   deleteCookie(c, INVITE_COOKIE, { path: '/', secure: true });

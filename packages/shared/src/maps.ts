@@ -48,7 +48,7 @@ export type MapSource = 'osm' | `mkey:${string}`;
 export const MAP_ENTRY = /^(osm|mkey:[a-z0-9]{1,16})$/;
 export const MAX_MAP_KEYS = 12;
 export const MAX_MAP_COUNTRIES = 20;
-export interface MapKeyInfo { id: string; label: string; provider: MapProvider; baseUrl: string; email: string }
+export interface MapKeyInfo { id: string; label: string; provider: MapProvider; baseUrl: string; email: string; provided?: boolean }
 
 /** The Everywhere list: the built-in map alone until the user adds services. */
 export function mapOrder(e: { maps?: unknown } | undefined): MapSource[] {

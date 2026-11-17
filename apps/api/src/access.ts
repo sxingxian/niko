@@ -20,4 +20,4 @@ export const forgetAiDefaults = () => { cache = null; };
 export async function offFor(db: Db, user: { role: string; aiAccess?: unknown }): Promise<string[]> {
   return aiOff(await aiDefaults(db), cleanAiAccess(user.aiAccess), user.role === 'admin');
 }
-export const NOT_ON_ACCOUNT = 'That isn’t available on your account. Your administrator chooses which AI services you can use.';
+export const NOT_ON_ACCOUNT = 'That isn’t included in your plan.';

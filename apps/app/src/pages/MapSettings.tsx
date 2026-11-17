@@ -2,7 +2,8 @@
 // Keys are saved from the sheet straight away (and go to the server only); the order of the lists is saved with the
 // Engine screen's "Save changes".
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { aiAllowed, mapsOn, MAP_PROVIDERS, MAP_MODE_NAMES, mapOption, mapPreset, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type BrainRest, type MapKeyInfo, type MapProvider, type MapSource } from '@niko/shared';
+import { aiAllowed, mapsOn, MAP_PROVIDERS, MAP_MODE_NAMES, mapOption, mapPreset, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type BrainRest, type MapKeyInfo, type MapProvider, type MapSource, type UsageInfo } from '@niko/shared';
+import { MonthLine, UsageLines } from './Usage';
 import { api, Field, Icon } from '@niko/ui';
 import { useNiko } from '../niko';
 
@@ -28,7 +29,7 @@ function restLine(r: BrainRest | undefined) {
 }
 const move = <T,>(l: T[], i: number, by: -1 | 1): T[] => { const j = i + by; if (j < 0 || j >= l.length) return l; const n = l.slice(); [n[i], n[j]] = [n[j]!, n[i]!]; return n; };
 
-export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
+export function MapSettings({ bind, usage = null }: { bind: (l: MapLists) => void; usage?: UsageInfo | null }) {
   const { me, refreshMe } = useNiko();
   const off = me?.aiOff ?? [];
   const [keys, setKeys] = useState<MapKeyInfo[]>([]);
@@ -125,12 +126,12 @@ export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
     const status = resting ? { col: 'is-warn', text: 'Resting' } : where.length ? { col: 'is-ok', text: 'Ready' } : { col: 'is-warn', text: 'Not used yet' };
     return (
       <li key={k.id} className="msrv">
-        <span className="msrv-name"><b>{k.label || mapPreset(k.provider)!.name}</b><span className="sub">{capsLine(k.provider)}</span>{resting && <span className="sub vrow-warn">{resting}</span>}</span>
+        <span className="msrv-name"><b>{k.label || mapPreset(k.provider)!.name}</b><span className="sub">{k.provided ? `Included · ${capsLine(k.provider)}` : capsLine(k.provider)}</span><UsageLines usage={usage} kind="map" entry={s} provided={k.provided} service={mapPreset(k.provider)?.name} />{resting && <span className="sub vrow-warn">{resting}</span>}</span>
         <span className={'msrv-status ' + status.col}><i aria-hidden="true" />{status.text}</span>
         <span className="msrv-used">{where.length ? where.join(', ') : <button type="button" className="bt msrv-use" onClick={() => useIt(k)}>{home ? `Add to ${regionName(home)}` : 'Use everywhere'}</button>}</span>
         <span className="msrv-more">
-          <button type="button" className="stp msrv-dots" aria-label={`More for ${k.label}`} aria-haspopup="menu" aria-expanded={menu === k.id} onClick={(e) => { e.stopPropagation(); setMenu(menu === k.id ? '' : k.id); setConfirm(''); }}>⋯</button>
-          {menu === k.id && (
+          {!k.provided && <button type="button" className="stp msrv-dots" aria-label={`More for ${k.label}`} aria-haspopup="menu" aria-expanded={menu === k.id} onClick={(e) => { e.stopPropagation(); setMenu(menu === k.id ? '' : k.id); setConfirm(''); }}>⋯</button>}
+          {menu === k.id && !k.provided && (
             <span className="msrv-menu" role="menu" onClick={(e) => e.stopPropagation()}>
               <button type="button" role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); void test({ id: k.id, provider: k.provider, baseUrl: k.baseUrl, email: k.email }, k.id); }}>{busy === 'test-' + k.id ? 'Testing…' : 'Test'}</button>
               <button type="button" role="menuitem" onClick={() => { setMenu(''); editDraft(k); }}>Edit</button>
@@ -152,13 +153,16 @@ export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
   const fullChain = [...own, ...then.filter((s) => !own.includes(s)), ...(osm ? ['osm' as MapSource] : [])];
   const addable = allowedKeys.map((k) => `mkey:${k.id}` as MapSource).filter((s) => !own.includes(s) && (() => { const only = mapPreset(keyOf(s)!.provider)!.only; return !only || (cur !== 'ww' && only.includes(cur)); })());
   const skipNote = cur === 'KR' ? 'Google is skipped here for driving, walking and cycling routes.' : cur === 'CN' ? 'Only Amap, Baidu, OpenStreetMap and your own route server are used here; Niko lines the pins up.' : '';
+  // Included services stay first when the plan says so.
+  const fixed = usage?.plan.order === 'fixed';
+  const prov = (s: MapSource) => !!keyOf(s)?.provided;
   const orderRow = (s: MapSource, i: number) => (
     <li key={s} className="mord">
       <span className="mord-n">{i + 1}</span>
       <span className="mord-name"><span>{nameOf(s)}</span><span className="sub">{capsLine(keyOf(s)!.provider)}</span></span>
       <span className="vrow-move">
-        <button type="button" className="stp" onClick={() => setOwn(move(own, i, -1))} disabled={i === 0} aria-label={`Move ${nameOf(s)} up`}>↑</button>
-        <button type="button" className="stp" onClick={() => setOwn(move(own, i, 1))} disabled={i === own.length - 1} aria-label={`Move ${nameOf(s)} down`}>↓</button>
+        <button type="button" className="stp" onClick={() => setOwn(move(own, i, -1))} disabled={i === 0 || (fixed && (prov(s) || prov(own[i - 1]!)))} aria-label={`Move ${nameOf(s)} up`}>↑</button>
+        <button type="button" className="stp" onClick={() => setOwn(move(own, i, 1))} disabled={i === own.length - 1 || (fixed && prov(s))} aria-label={`Move ${nameOf(s)} down`}>↓</button>
         <button type="button" className="stp" onClick={() => setOwn(own.filter((x) => x !== s))} aria-label={`Take ${nameOf(s)} off this list`}>×</button>
       </span>
     </li>
@@ -175,6 +179,7 @@ export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
   return (
     <section className="g eng-card wide" aria-label="Maps">
       <span className="k" style={{ paddingBottom: 6 }}>Maps</span>
+      <MonthLine usage={usage} kind="map" />
       <p className="hint" style={{ paddingBottom: 8 }}>Ask Niko the way somewhere or to show a place. Add your map services, then choose which Niko tries first, everywhere or in a country of your choosing.</p>
       {note && <p className={'hint' + (note.ok ? '' : ' vrow-warn')} role="status">{note.text}</p>}
 
@@ -188,7 +193,7 @@ export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
         )}
         {!allowedKeys.length && !osm && <p className="hint vrow-warn">No map service is on yet, so Niko can’t show maps. Add one below.</p>}
         <div className="msrv-foot">
-          {presets.length > 0 && <button type="button" className="pri msrv-add" onClick={() => { setErr(''); setDraft(newDraft()); }} disabled={keys.length >= MAX_MAP_KEYS}><Icon name="plus" size={16} />Add a map service</button>}
+          {presets.length > 0 && <button type="button" className="pri msrv-add" onClick={() => { setErr(''); setDraft(newDraft()); }} disabled={keys.filter((k) => !k.provided).length >= MAX_MAP_KEYS}><Icon name="plus" size={16} />Add a map service</button>}
           {osm && <span className="hint">OpenStreetMap is built in and always tried last.</span>}
         </div>
       </div>
@@ -240,7 +245,7 @@ export function MapSettings({ bind }: { bind: (l: MapLists) => void }) {
           {cur === 'ww' && osm && <ol className="mord-list">{fadedRow('osm', own.length + 1)}</ol>}
         </div>
       </div>
-      {off.some((k) => k.startsWith('map:')) && <p className="hint managed">Some options are managed by your administrator.</p>}
+      {off.some((k) => k.startsWith('map:')) && <p className="hint managed">Some options aren’t included in your plan.</p>}
 
       <dialog ref={dlg} className="sheet wide" onClose={() => { setDraft(null); setErr(''); }}>
         {draft && p && (

@@ -1,7 +1,7 @@
 import { and, desc, eq, gt, ilike, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { appSettings, auditLog, invites, recoveryCodes, sessions, signups, users, type Db } from '@niko/db';
-import { accessState, accountLimits, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
+import { accessState, accountLimits, cleanProvided, USAGE_KINDS, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
 import { connectInfo, connectStripe, dateLabel, forgetPayments, forgetStripeMode, inviteCodeHash, keysOf, makeInviteCode, paymentSettings, PAYMENTS_KEY, payNow, plansLine, secretsFor, STRIPE_MODE_KEY, stripeMode } from '../billing';
 import { isMode, keysFor, modeStatus, stripe, StripeError, stripeReady } from '../stripe';
 import { forgetGlanceDefaults, GLANCE_DEFAULT_KEY, glanceDefaults } from '../glance';
@@ -14,8 +14,11 @@ import { clearThrottle, lockedMessage, recordFailure, throttleMinutes } from '..
 import { codeBlock, esc, rowsBlock, sendEmail } from '../lib/email';
 import { audit, clientIp, endSession, requireAdmin, requireAdminPassword, startSession, tooMany } from '../lib/session';
 import { findUser, registrationMode } from './auth';
+import { includedByUser, nextReset } from '../usage';
+import { setup } from './setup';
 
 export const admin = new Hono<AppEnv>();
+admin.route('/setup', setup);
 type Ctx = Context<AppEnv>;
 
 // Step 1: password. The session it creates is useless until the second factor passes.
@@ -143,6 +146,8 @@ export function inShow(i: Listed, show: Show): boolean {
   if (show === 'ended') return i.status === 'active' && payer && !has;
   return show === 'active' && i.status === 'active' && (!payer || has);
 }
+/** How many provided keys a person (or invite) has, and the order rule, for the Users list and panel. */
+const setupSummary = (v: unknown) => { const st = cleanProvided(v); return { keys: USAGE_KINDS.reduce((n, k) => n + (st.keys[k]?.length ?? 0), 0), order: st.order }; };
 admin.get('/users', requireAdmin, async (c) => {
   const db = c.get('db');
   const pay = await paymentSettings(db);
@@ -152,6 +157,7 @@ admin.get('/users', requireAdmin, async (c) => {
     id: u.id, name: u.name, email: u.email, role: u.role, status: u.status, isOwner: u.isOwner, lastActiveAt: u.lastActiveAt,
     access: accessState(u, pay.graceDays),
     lifetime: u.lifetime, accessUntil: u.accessUntil, accessKind: u.accessKind, accessPaidUntil: u.accessPaidUntil, accessStartMonths: u.accessStartMonths, paidMode: u.paidMode,
+    engineSetup: setupSummary(u.provided),
     keptPrices: cleanPlanPrices(u.planPrices), pricesFrom: u.planPrices ? u.planPricesFrom ?? 'kept' : null, pricesAt: u.planPrices ? u.planPricesAt : null,
     sub: u.subId ? { plan: u.subPlan, status: u.subStatus, periodEnd: u.subPeriodEnd, cancelAtEnd: u.subCancelAtEnd, mode: u.subMode } : null,
     signup: su ? { state: su.state, paid: !!su.paidAt, mode: su.paidAt ? su.stripeMode : null, priceCents: su.priceCents, months: su.months, removeAt: su.paidAt ? null : new Date(su.createdAt.getTime() + UNPAID_SIGNUP_DAYS * 86400_000) } : null,
@@ -159,9 +165,9 @@ admin.get('/users', requireAdmin, async (c) => {
   const pending = await db.select({
     id: invites.id, email: invites.email, role: invites.role, expiresAt: invites.expiresAt, access: invites.access, priceCents: invites.priceCents, months: invites.months,
     paidAt: invites.paidAt, stripeMode: invites.stripeMode, codeTries: invites.codeTries, hasCode: sql<boolean>`${invites.codeHash} is not null`,
-    createdAt: invites.createdAt,
+    createdAt: invites.createdAt, setup: invites.setup,
   }).from(invites).where(and(isNull(invites.usedAt), isNull(invites.revokedAt), gt(invites.expiresAt, new Date()))).orderBy(invites.createdAt);
-  const all = [...list, ...pending.map((i) => ({ ...i, kind: 'invite' as const }))]
+  const all = [...list, ...pending.map(({ setup: st, ...i }) => ({ ...i, engineSetup: setupSummary((st as { provided?: unknown } | null)?.provided), kind: 'invite' as const }))]
     .sort((a, b) => Number('isOwner' in b && b.isOwner) - Number('isOwner' in a && a.isOwner) || b.createdAt.getTime() - a.createdAt.getTime());
   const q = (c.req.query('q') ?? '').trim().toLowerCase().slice(0, 100);
   const show: Show = (SHOW as readonly string[]).includes(c.req.query('show') ?? '') ? (c.req.query('show') as Show) : 'all';
@@ -526,7 +532,28 @@ admin.put('/glance/users/:id', requireAdmin, async (c) => {
 admin.get('/limits', requireAdmin, async (c) => {
   const db = c.get('db');
   const list = await db.select({ id: users.id, name: users.name, email: users.email, role: users.role, status: users.status, accountLimits: users.accountLimits }).from(users).orderBy(users.createdAt);
-  return c.json({ defaults: accountLimits(await accountDefaults(db, true), {}), users: list.map((u) => ({ ...u, accountLimits: cleanAccountLimits(u.accountLimits) })) });
+  // This month's use of included services per person (listening shown in minutes, as its amount is set).
+  const used = await includedByUser(db);
+  const inMinutes = (u?: Record<string, number>) => (u ? { ...u, hear: Math.ceil((u.hear ?? 0) / 60) } : { brain: 0, voice: 0, hear: 0, image: 0, map: 0 });
+  const pending = await db.select({ id: invites.id, email: invites.email, role: invites.role, setup: invites.setup }).from(invites)
+    .where(and(isNull(invites.usedAt), isNull(invites.revokedAt), gt(invites.expiresAt, new Date()))).orderBy(invites.createdAt);
+  return c.json({
+    defaults: accountLimits(await accountDefaults(db, true), {}), month: new Date().toISOString().slice(0, 7), resets: nextReset(),
+    users: list.map((u) => ({ ...u, accountLimits: cleanAccountLimits(u.accountLimits), used: inMinutes(used[u.id]) })),
+    invites: pending.map(({ setup: st, ...i }) => ({ ...i, accountLimits: cleanAccountLimits((st as { limits?: unknown } | null)?.limits) })),
+  });
+});
+// An invite's monthly amounts, kept with its setup and copied to the account when they join.
+admin.put('/limits/invites/:id', requireAdmin, async (c) => {
+  const b = await c.req.json<{ limits?: unknown }>().catch(() => ({} as { limits?: unknown }));
+  const db = c.get('db');
+  const inv = (await db.select().from(invites).where(and(eq(invites.id, c.req.param('id')), isNull(invites.usedAt), isNull(invites.revokedAt), gt(invites.expiresAt, new Date()))).limit(1))[0];
+  if (!inv) return c.json({ error: 'That invite is no longer open.' }, 404);
+  const defaults = accountLimits(await accountDefaults(db, true), {});
+  const own = Object.fromEntries(Object.entries(cleanAccountLimits(b.limits)).filter(([k, v]) => v !== (defaults as unknown as Record<string, unknown>)[k]));
+  await db.update(invites).set({ setup: { ...((inv.setup as object | null) ?? {}), limits: own } }).where(eq(invites.id, inv.id));
+  await audit(c, 'limits.invite', { target: inv.email, changes: Object.entries(own).map(([k, v]) => `${k} ${v}`).join(', ') || 'follows the default' }, c.get('user').id);
+  return c.json({ ok: true, limits: own });
 });
 admin.put('/limits/default', requireAdmin, async (c) => {
   const b = await c.req.json<{ limits?: unknown }>().catch(() => ({} as { limits?: unknown }));
@@ -534,7 +561,7 @@ admin.put('/limits/default', requireAdmin, async (c) => {
   const db = c.get('db');
   await db.insert(appSettings).values({ key: ACCOUNT_LIMITS_KEY, value: limits }).onConflictDoUpdate({ target: appSettings.key, set: { value: limits } });
   forgetAccountDefaults();
-  await audit(c, 'limits.default', { calendars: limits.calendars }, c.get('user').id);
+  await audit(c, 'limits.default', { calendars: limits.calendars, monthly: USAGE_KINDS.map((k) => `${k} ${limits[k] || 'no limit'}`).join(', ') }, c.get('user').id);
   return c.json({ ok: true, defaults: limits });
 });
 admin.put('/limits/users/:id', requireAdmin, async (c) => {

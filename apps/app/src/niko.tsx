@@ -210,7 +210,10 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   /** Speech-in services this account may use: keys go by their service on the server, so here only the section and the
    * built-in services are checked; a key the admin turned off is refused there, and the device then listens. */
   const hearsFor = (m: Me | null | undefined) => { const off = m?.aiOff ?? []; return off.includes('sec:hears') ? [] : hearOrder(m?.engine as EnginePrefs | undefined).filter((e) => e.startsWith('skey:') || aiAllowed(off, hearOption(e))); };
-  const apiHearing = () => hearsFor(meRef.current).length > 0 && captureSupported();
+  // When this month's included listening is used up (and there's no own key to go on with), the device's own
+  // recognition listens until the 1st, rather than sending each recording only to be refused.
+  const hearUsedUpUntil = useRef(0);
+  const apiHearing = () => Date.now() >= hearUsedUpUntil.current && hearsFor(meRef.current).length > 0 && captureSupported();
   // Niko's last line and when it finished, so its own voice heard late through the mic is never taken as a question.
   const lastSaid = useRef<{ text: string; until: number }>({ text: '', until: 0 });
   const ECHO_MS = 6000;
@@ -304,6 +307,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         if (!r.text.trim()) { setMode('idle'); setLabel('Didn’t catch that'); setLine('Say it again, or tap the mic.'); return; }
         askRef.current(r.text.trim());
       } catch (e) {
+        if ((e as { usedUp?: boolean }).usedUp) { const d = new Date(); hearUsedUpUntil.current = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1); }
         if (SR) {
           // None of the services could hear it: the device's own recognition listens for the next try.
           setVoiceProblem(`Speech in: ${(e as Error).message}`);
@@ -600,6 +604,13 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       if (mine !== askId.current) return;
       if (e?.data?.brief) setBrief(e.data.brief);
       setReply(e.message); setResumable({ canContinue: false });
+      // This month's included answers are used up and there's no own key to go on with: say so plainly, once. Asking
+      // again won't help until it resets, so there's no "try again" hint and no retry streak.
+      if (e?.data?.usedUp) {
+        if (wantRec.current) say(e.message, -1, { label: 'Included this month', line: 'Add your own AI key on the Engine screen to keep going now.' });
+        else { setMode('idle'); setLabel('Included this month'); setLine(e.message); }
+        return;
+      }
       // Said aloud, and then Niko keeps listening for a few seconds (as after any answer), so "try again" works
       // without saying "Niko" first. Before, it only showed the problem and stopped listening.
       // Niko never says "try again" itself: the mic heard the end of that line and asked again, failing in a loop.
@@ -668,7 +679,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         if (ctl.signal.aborted) return;
         const r = await fetch('/api/maps/route', { method: 'POST', credentials: 'same-origin', signal: ctl.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: v.to, from: v.from, mode: v.mode, here, country: mapCountryRef.current }) });
         const j = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(j.error ?? 'The map couldn’t be shown just now.');
+        if (!r.ok) throw Object.assign(new Error(j.error ?? 'The map couldn’t be shown just now.'), { usedUp: !!j.usedUp });
         const res = j as MapResult;
         set((m) => ({ ...m, status: 'done', result: res, error: undefined, located: !!here, times: res.route && res.route.mode !== 'fly' ? { ...m.times, [res.route.mode]: res.route.seconds } : m.times }));
         if (res.route) tell(`About ${minutesText(res.route.seconds).replace(' h', ' hours').replace(' min', ' minutes')} ${MODE_WORDS[res.route.mode]}.`);
@@ -677,7 +688,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       } catch (e: any) {
         if (ctl.signal.aborted) return;
         set((m) => ({ ...m, status: 'failed', error: String(e?.message ?? 'The map couldn’t be shown just now.') }));
-        tell('I couldn’t find that on the map.');
+        tell(e?.usedUp ? 'This month’s included map searches are used up.' : 'I couldn’t find that on the map.');
       } finally {
         if (mapCtl.current === ctl) mapCtl.current = null;
       }
@@ -733,7 +744,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       try {
         const sent = Date.now();
         const r = await fetch('/api/image', { method: 'POST', credentials: 'same-origin', signal: ctl.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, shape, asked: words }) });
-        if (!r.ok) { const j = await r.json().catch(() => ({})); if (r.status === 423 && j.locked) lockedSignal(sent); throw Object.assign(new Error(j.error ?? 'The picture could not be made just now.'), { declined: !!j.declined }); }
+        if (!r.ok) { const j = await r.json().catch(() => ({})); if (r.status === 423 && j.locked) lockedSignal(sent); throw Object.assign(new Error(j.error ?? 'The picture could not be made just now.'), { declined: !!j.declined, usedUp: !!j.usedUp }); }
         const blob = await r.blob();
         if (!/^image\/(jpeg|png|webp)$/.test(blob.type)) throw new Error('The picture could not be read.');
         if (!picturesRef.current.some((x) => x.id === id)) return;
@@ -745,7 +756,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         const stopped = ctl.signal.aborted && picCtl.current !== ctl;
         const msg = stopped ? 'Stopped.' : ctl.signal.aborted ? 'The picture took too long to make.' : String(e?.message ?? 'The picture could not be made just now.');
         updatePictures((p) => p.map((x) => (x.id === id ? { ...x, status: 'failed', error: msg } : x)));
-        if (!stopped) tell(e?.declined ? 'None of the image services would make that picture.' : 'I couldn’t make that picture just now.');
+        if (!stopped) tell(e?.usedUp ? 'This month’s included pictures are used up.' : e?.declined ? 'None of the image services would make that picture.' : 'I couldn’t make that picture just now.');
       } finally {
         window.clearTimeout(timer);
         if (picCtl.current === ctl) picCtl.current = null;

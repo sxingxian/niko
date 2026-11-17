@@ -15,6 +15,8 @@ import type { Env } from './env';
 import { BrainFail, providerMessage } from './brains';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
+import { arranged, withProvided } from './provided';
+import { usageGate } from './usage';
 
 export interface MapKey extends MapKeyInfo { apiKey: string; secret: string; password: string }
 export const MAP_PROVIDERS_LIST: MapProvider[] = ['google', 'mapbox', 'onemap', 'openrouteservice', 'naver', 'kakao', 'amap', 'baidu', 'here', 'tomtom', 'geoapify', 'maptiler', 'self-hosted'];
@@ -52,7 +54,11 @@ export async function saveMapKeys(env: Env, db: Db, userId: string, keys: MapKey
   const secret = { keys: keys.map(({ id, label, provider, baseUrl, email, apiKey, secret, password }) => ({ id, label, provider, baseUrl, email, apiKey, secret, password })) };
   await db.insert(connections).values({ id: crypto.randomUUID(), userId, provider: 'map-keys', secretEnc: await seal(env.ENCRYPTION_KEY, secret), meta: { label: `${keys.length} map service${keys.length === 1 ? '' : 's'}` } });
 }
-export const mapKeyInfo = (k: MapKey): MapKeyInfo => ({ id: k.id, label: k.label, provider: k.provider, baseUrl: k.baseUrl, email: k.email });
+export const mapKeyInfo = (k: MapKey & { provided?: boolean }): MapKeyInfo => ({ id: k.id, label: k.label, provider: k.provider, baseUrl: k.baseUrl, email: k.email, ...(k.provided ? { provided: true } : {}) });
+/** This person's own keys with the ones the admin provides added (for using and listing, never for saving). */
+export async function mapKeys(env: Env, db: Db, user: { id: string; provided?: unknown }): Promise<(MapKey & { provided?: boolean })[]> {
+  return withProvided<MapKey>(env, db, user, 'map', await loadMapKeys(env, db, user.id));
+}
 /** Checks a key's settings before it is saved or used. Returns a message for the person, or null. */
 export function mapKeyProblem(k: Pick<MapKey, 'provider' | 'baseUrl' | 'apiKey' | 'secret' | 'email' | 'password'>, saved?: boolean): string | null {
   const p = mapPreset(k.provider);
@@ -428,10 +434,12 @@ async function amapRoute(k: MapKey, from: MapPlace, to: MapPlace, mode: MapMode)
 export interface MapAsk { to: string; from?: string; mode: MapAskMode; here: Near; country: 'auto' | 'ww' | string }
 type Entry = { entry: MapSource; provider: MapProvider | 'osm'; label: string; key?: MapKey };
 
-export async function findRoute(env: Env, db: Db, user: { id: string; engine: unknown }, ask: MapAsk, off: readonly string[] = []): Promise<MapResult> {
+export async function findRoute(env: Env, db: Db, user: { id: string; engine: unknown; provided?: unknown; accountLimits?: unknown }, ask: MapAsk, off: readonly string[] = []): Promise<MapResult> {
   if (!mapsOn(off)) throw new BrainFail('not on account', 'refused', 0, 'Maps aren’t available on your account.');
   const engine = (user.engine ?? {}) as EnginePrefs;
-  const keys = await loadMapKeys(env, db, user.id);
+  const keys = await mapKeys(env, db, user);
+  // Included services (the admin's map keys and OpenStreetMap) stop at the month's amount of searches.
+  const gate = await usageGate(db, user, 'map');
   const t0 = Date.now();
 
   // Which country's list: the one they said, else where they are (if they allowed their location), else none.
@@ -445,7 +453,8 @@ export async function findRoute(env: Env, db: Db, user: { id: string; engine: un
   let changed = Object.keys(rest).length !== Object.keys(engine.mapRest ?? {}).length;
   const skipped = new Set<string>();
 
-  const entries = (cc: string | null): Entry[] => mapChain(engine, cc && lists[cc] ? cc : null).chain.flatMap((entry): Entry[] => {
+  const entries = (cc: string | null): Entry[] => arranged(user, 'map', mapChain(engine, cc && lists[cc] ? cc : null).chain).flatMap((entry): Entry[] => {
+    if (gate.blocked(entry)) return [];
     if (entry === 'osm') return aiAllowed(off, 'map:osm') ? [{ entry, provider: 'osm', label: 'OpenStreetMap' }] : [];
     const key = keys.find((k) => `mkey:${k.id}` === entry);
     if (!key || !aiAllowed(off, mapOption(entry, key))) return [];
@@ -459,7 +468,7 @@ export async function findRoute(env: Env, db: Db, user: { id: string; engine: un
   };
   const worked = (e: Entry) => { if (rest[e.entry]) { delete rest[e.entry]; changed = true; } };
 
-  if (!entries(null).length && !Object.keys(lists).some((cc) => entries(cc).length)) throw new BrainFail('no services', 'refused', 0, 'No map service is set up yet. Add one on the Engine screen.');
+  if (!entries(null).length && !Object.keys(lists).some((cc) => entries(cc).length)) throw gate.anyBlocked() ? new BrainFail('included used up', 'limit', 0, gate.message) : new BrainFail('no services', 'refused', 0, 'No map service is set up yet. Add one on the Engine screen.');
   try {
     // 1. The place (and the start, when they named one), from the first service that finds it.
     const placeList = ordered(entries(country)).filter((e) => {
@@ -532,6 +541,8 @@ export async function findRoute(env: Env, db: Db, user: { id: string; engine: un
     const handoffCc = toCc ?? country;
     const chain = entries(tripCc ?? country).map((e) => e.label);
     const credit = source.provider === 'osm' ? '© OpenStreetMap contributors' : `© ${mapPreset(source.provider)?.name.replace(/ \(.*\)$/, '') ?? source.label}${handoffCc === 'CN' ? '' : ' · © OpenStreetMap contributors'}`;
+    // One search or route, counted against the service that gave the result.
+    await gate.count(source.entry);
     return {
       to, ...(from ? { from } : {}), mode: ask.mode, ...(r ? { route: r } : {}), ...(noRoute ? { noRoute } : {}),
       source: { id: source.entry, label: source.label, ms: Date.now() - t0 },

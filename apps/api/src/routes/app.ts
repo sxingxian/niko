@@ -10,19 +10,22 @@ import { hashPassword, verifyPassword } from '../lib/password';
 import { sendEmail } from '../lib/email';
 import { accessFor, paymentSettings } from '../billing';
 import { eventDetail, mailDetail, noteDetail } from '../details';
-import { BrainFail, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveKeys, testEntry, think } from '../brains';
+import { BrainFail, brainKeys, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveKeys, testEntry, think } from '../brains';
 import { cleanWhere, forecastCard, forecastText, geocode, stripWeatherTags, weatherTags } from '../weather';
-import { audioProblem, defaultHearLabel, hear, hearServerKey, HEAR_PROVIDERS_LIST, hearKeyInfo, hearKeyProblem, loadHearKeys, MAX_AUDIO_BYTES, saveHearKeys, type HearKey } from '../hears';
+import { audioProblem, defaultHearLabel, hear, hearServerKey, HEAR_PROVIDERS_LIST, hearKeyInfo, hearKeyProblem, hearKeys, loadHearKeys, MAX_AUDIO_BYTES, saveHearKeys, type HearKey } from '../hears';
 import { NOT_ON_ACCOUNT, offFor } from '../access';
 import { diffGlance, limitsFor } from '../glance';
-import { Declined, defaultImageLabel, serverKey, IMAGE_PROVIDERS_LIST, imageKeyInfo, imageKeyProblem, loadImageKeys, MAX_PROMPT, paint, saveImageKeys, type ImageKey } from '../images';
-import { defaultVoiceLabel, listVoices, loadVoiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
+import { Declined, defaultImageLabel, serverKey, IMAGE_PROVIDERS_LIST, imageKeyInfo, imageKeyProblem, imageKeys, loadImageKeys, MAX_PROMPT, paint, saveImageKeys, type ImageKey } from '../images';
+import { defaultVoiceLabel, listVoices, loadVoiceKeys, voiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
 import { calendarIdLink, calendarsOf, calendarsSecret, cleanCalName, icalCheckOne, newCalId, normalizeLink, shownCalendars, type Cal } from '../calendarlink';
 import { accountLimitsFor } from '../limits';
-import { cleanPoint, findRoute, loadMapKeys, mapKeyInfo, mapKeyProblem, MAP_PROVIDERS_LIST, NotFound, saveMapKeys, testMapKey, type MapKey } from '../maps';
+import { cleanPoint, findRoute, loadMapKeys, mapKeyInfo, mapKeys, mapKeyProblem, MAP_PROVIDERS_LIST, NotFound, saveMapKeys, testMapKey, type MapKey } from '../maps';
 import { IMAP_PROVIDERS, imapCheck, isImapProvider } from '../mailbox';
 import { lockInfo, lockOf } from '../lock';
+import { arranged } from '../provided';
+import { nextReset, usageGate } from '../usage';
 import { lock } from './lock';
+import { usage } from './usage';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
   telegramSetWebhook, type AppKeys, api as providerApi, googleCals,
@@ -42,6 +45,8 @@ app.use('*', async (c, next) => {
   await next();
 });
 
+
+app.route('/usage', usage);
 
 const clampNum = (v: unknown, lo: number, hi: number, d: number) => (typeof v === 'number' && isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : d);
 
@@ -102,28 +107,30 @@ app.patch('/me', async (c) => {
     // The brain order may only name Workers AI, the model server, and keys this account has saved.
     let brains: BrainEntry[] | null = null;
     if (Array.isArray(e.brains)) {
-      const saved = new Set((await loadKeys(c.env, c.get('db'), u.id)).map((k) => `key:${k.id}`));
-      brains = [...new Set(e.brains.map(String).filter((x: string) => BRAIN_ENTRY.test(x) && (!x.startsWith('key:') || saved.has(x))))].slice(0, MAX_AI_KEYS + 2) as BrainEntry[];
+      const saved = new Set((await brainKeys(c.env, c.get('db'), u)).map((k) => `key:${k.id}`));
+      brains = arranged(u, 'brain', [...new Set(e.brains.map(String).filter((x: string) => BRAIN_ENTRY.test(x) && (!x.startsWith('key:') || saved.has(x))))].slice(0, MAX_AI_KEYS + 8) as BrainEntry[]);
       if (!brains.length) return c.json({ error: 'Switch on at least one brain.' }, 400);
     }
     // The speech-in order may only name Cloudflare and speech-in keys this account has saved.
     let hears: HearSource[] | null = null;
     if (Array.isArray(e.hears)) {
-      const saved = new Set((await loadHearKeys(c.env, c.get('db'), u.id)).map((k) => `skey:${k.id}`));
-      hears = hearOrder({ hears: e.hears }).filter((x) => !x.startsWith('skey:') || saved.has(x)).slice(0, MAX_HEAR_KEYS + 1);
+      const saved = new Set((await hearKeys(c.env, c.get('db'), u)).map((k) => `skey:${k.id}`));
+      hears = arranged(u, 'hear', hearOrder({ hears: e.hears }).filter((x) => !x.startsWith('skey:') || saved.has(x)).slice(0, MAX_HEAR_KEYS + 7));
     }
     // The image order may only name Cloudflare and image keys this account has saved. Empty switches pictures off.
     let images: ImageSource[] | null = null;
     if (Array.isArray(e.images)) {
-      const saved = new Set((await loadImageKeys(c.env, c.get('db'), u.id)).map((k) => `ikey:${k.id}`));
-      images = imageOrder({ images: e.images }).filter((x) => !x.startsWith('ikey:') || saved.has(x)).slice(0, MAX_IMAGE_KEYS + 1);
+      const saved = new Set((await imageKeys(c.env, c.get('db'), u)).map((k) => `ikey:${k.id}`));
+      images = imageOrder({ images: e.images }).filter((x) => !x.startsWith('ikey:') || saved.has(x)).slice(0, MAX_IMAGE_KEYS + 7);
+      // With pictures switched off (an empty list) a fixed order doesn't switch them back on.
+      if (images.length) images = arranged(u, 'image', images);
     }
     // The map lists may only name the built-in map and map services this account has saved.
     let maps: MapSource[] | null = null, mapCountries: Record<string, MapSource[]> | null = null;
     if (Array.isArray(e.maps) || (e.mapCountries && typeof e.mapCountries === 'object')) {
-      const saved = new Set((await loadMapKeys(c.env, c.get('db'), u.id)).map((k) => `mkey:${k.id}`));
-      const ok = (list: unknown) => [...new Set((Array.isArray(list) ? list : []).map(String).filter((x) => MAP_ENTRY.test(x) && (x === 'osm' || saved.has(x))))].slice(0, MAX_MAP_KEYS + 1) as MapSource[];
-      if (Array.isArray(e.maps)) maps = ok(e.maps);
+      const saved = new Set((await mapKeys(c.env, c.get('db'), u)).map((k) => `mkey:${k.id}`));
+      const ok = (list: unknown) => [...new Set((Array.isArray(list) ? list : []).map(String).filter((x) => MAP_ENTRY.test(x) && (x === 'osm' || saved.has(x))))].slice(0, MAX_MAP_KEYS + 7) as MapSource[];
+      if (Array.isArray(e.maps)) maps = arranged(u, 'map', ok(e.maps));
       if (e.mapCountries && typeof e.mapCountries === 'object') {
         mapCountries = {};
         for (const [cc, list] of Object.entries(e.mapCountries as Record<string, unknown>).slice(0, MAX_MAP_COUNTRIES)) if (/^[A-Z]{2}$/.test(cc)) mapCountries[cc] = ok(list);
@@ -132,8 +139,8 @@ app.patch('/me', async (c) => {
     // The voice order may only name the built-in voices and voice keys this account has saved.
     let voices: VoiceSource[] | null = null;
     if (Array.isArray(e.voices)) {
-      const saved = new Set((await loadVoiceKeys(c.env, c.get('db'), u.id)).map((k) => `vkey:${k.id}`));
-      voices = voiceOrder({ voices: e.voices }).filter((x) => VOICE_ENTRY.test(x) && (!x.startsWith('vkey:') || saved.has(x))).slice(0, MAX_VOICE_KEYS + 3);
+      const saved = new Set((await voiceKeys(c.env, c.get('db'), u)).map((k) => `vkey:${k.id}`));
+      voices = arranged(u, 'voice', voiceOrder({ voices: e.voices }).filter((x) => VOICE_ENTRY.test(x) && (!x.startsWith('vkey:') || saved.has(x))).slice(0, MAX_VOICE_KEYS + 9));
     }
     set.engine = {
       ...(u.engine as object),
@@ -737,12 +744,12 @@ const IMAGE_RULE = `You can make pictures. When the user asks you to draw, paint
 When the user asks to change the last picture (for example "make it night" or "add a dog"), write a new full prompt that keeps everything from the last [[image:…]] prompt except the change, in a new tag.
 Each image service checks requests against its own rules, so pass picture requests on with the tag rather than declining them yourself. Never put anything from DATA into a prompt unless the user asks for it. Use the tag only when the user asks for a picture.`;
 const NO_IMAGE_RULE = 'You cannot make pictures right now: they are switched off on the Engine screen. If the user asks for one, say so in a sentence.';
-const NOT_ON_ACCOUNT_IMAGE_RULE = 'You cannot make pictures: they aren’t available on this account (the administrator chooses this). If the user asks for one, say so in a sentence. Never use an image tag.';
+const NOT_ON_ACCOUNT_IMAGE_RULE = 'You cannot make pictures: they aren’t included in this account’s plan. If the user asks for one, say so in a sentence. Never use an image tag.';
 /** Maps: the built-in map always works, so this is added unless the administrator has turned maps off. */
 const MAP_RULE = `You can show maps on screen. When the user asks how to get somewhere, for directions, how long it takes to get somewhere, where a place is, or to see a place on a map, reply with one short sentence (for example "Here's the way to Changi Airport.") and end with [[map:<how>|<destination>]] or, when they name where they start from, [[map:<how>|<destination>|<start>]]. <how> is drive, transit, walk or cycle when they say how they are travelling ("by train", "by bus", "on foot", "drive me", "by bike"), fly when they ask about a flight, a flight path or flying somewhere (write airports or cities, such as "Haneda Airport, Tokyo", and the start when they name it), place when they only want to see where something is, and any when they don't say. Write the destination as a searchable name with its city or country when you know it, such as "Gangnam Station, Seoul". Never use a map tag for anything in DATA unless the user asks for it.
 When the user asks to switch how they travel on the map that is showing ("show me by train instead", "walking"), end with [[map:<how>|same]].`;
 const NO_MAP_RULE = 'You cannot show maps yet: no map service is set up. If the user asks for directions or a map, say they can add a map service on the Engine screen. Never use a map tag.';
-const NOT_ON_ACCOUNT_MAP_RULE = 'You cannot show maps: they aren’t available on this account (the administrator chooses this). If the user asks for one, say so in a sentence. Never use a map tag.';
+const NOT_ON_ACCOUNT_MAP_RULE = 'You cannot show maps: they aren’t included in this account’s plan. If the user asks for one, say so in a sentence. Never use a map tag.';
 /** Added to the prompt when a weather service is connected. */
 const WEATHER_RULE = `Weather forecasts come from Open-Meteo and are given in WEATHER blocks. Answer weather questions from them in plain spoken words: the conditions, temperatures and the chance of rain that matter for what was asked, without listing every number.
 When the user asks about the weather in a place whose forecast is not given, reply with only [[weather:<place>, <country if known>]] (one tag per place, at most three) and nothing else; you will then be given the forecasts.`;
@@ -753,7 +760,7 @@ const clip = (v: unknown, n: number) => (typeof v === 'string' ? v.trim().slice(
 const sameOrigin = (a: string, b: string) => { try { return new URL(a).origin === new URL(b).origin; } catch { return false; } };
 
 app.get('/engine/keys', async (c) => {
-  const keys = await loadKeys(c.env, c.get('db'), c.get('user').id);
+  const keys = await brainKeys(c.env, c.get('db'), c.get('user'));
   return c.json({ keys: keys.map(keyInfo) });
 });
 
@@ -907,6 +914,7 @@ app.post('/chat', async (c) => {
     reply = stripWeatherTags(reply) || 'I couldn’t get that forecast just now.';
   } catch (e) {
     console.error(`chat: no brain answered: ${String((e as Error)?.message ?? e).slice(0, 300)}`);
+    if (e instanceof BrainFail && e.message === 'included used up') return c.json({ error: e.detail, usedUp: true, ...(oneOff ? {} : { brief }) }, 429);
     return c.json({ error: 'None of Niko’s brains answered just now. Check them on the Engine screen, or try again in a moment.', ...(oneOff ? {} : { brief }) }, 502);
   }
   if (oneOff) reply = cleanDraft(reply);
@@ -1020,12 +1028,12 @@ app.post('/automations/:provider/run', async (c) => {
 
 // ---------------------------------------------------------------- voice keys (the Voice screen)
 app.get('/voice/keys', async (c) => {
-  const keys = await loadVoiceKeys(c.env, c.get('db'), c.get('user').id);
+  const keys = await voiceKeys(c.env, c.get('db'), c.get('user'));
   return c.json({ keys: keys.map(voiceKeyInfo) });
 });
 
 /** A voice key from the screen: its settings, checked and trimmed. */
-function voiceKeyFrom(b: any): Omit<VoiceKey, 'id' | 'apiKey' | 'label'> & { label: string; apiKey: string } {
+export function voiceKeyFrom(b: any): Omit<VoiceKey, 'id' | 'apiKey' | 'label'> & { label: string; apiKey: string } {
   const provider = (['openai', 'elevenlabs', 'google', 'azure', 'deepgram', 'cartesia', 'fishaudio'] as const).find((p) => p === b?.provider) ?? 'openai';
   return { provider, label: clip(b?.label, 40), voice: clip(b?.voice, 120), model: clip(b?.model, 100), baseUrl: provider === 'openai' ? clip(b?.baseUrl, 500) : '', region: provider === 'azure' ? clip(b?.region, 30).toLowerCase() : '', apiKey: clip(b?.apiKey, 4000) };
 }
@@ -1091,10 +1099,10 @@ app.post('/voice/keys/voices', async (c) => {
 
 // ---------------------------------------------------------------- speech in (the Voice screen's Listening list)
 app.get('/voice/hear-keys', async (c) => {
-  const keys = await loadHearKeys(c.env, c.get('db'), c.get('user').id);
+  const keys = await hearKeys(c.env, c.get('db'), c.get('user'));
   return c.json({ keys: keys.map(hearKeyInfo) });
 });
-function hearKeyFrom(b: any): Omit<HearKey, 'id'> {
+export function hearKeyFrom(b: any): Omit<HearKey, 'id'> {
   const provider = HEAR_PROVIDERS_LIST.find((p) => p === b?.provider) ?? 'openai';
   return { provider, label: clip(b?.label, 40), model: clip(b?.model, 80), baseUrl: provider === 'openai' ? clip(b?.baseUrl, 500) : '', region: provider === 'azure' ? clip(b?.region, 30).toLowerCase() : '', apiKey: clip(b?.apiKey, 4000) };
 }
@@ -1188,16 +1196,17 @@ app.post('/voice/stt', async (c) => {
     return c.json({ text: r.text.slice(0, 2000), used: r.used });
   } catch (e) {
     const f = e instanceof BrainFail ? e : null;
+    if (f?.message === 'included used up') return c.json({ error: f.detail, usedUp: true }, 429);
     return c.json({ error: (f?.why === 'limit' ? 'Its usage limit is reached.' : f?.why === 'refused' ? 'It refused the request. Check its key and settings.' : 'It did not answer just now.') + (f?.detail ? ` It said: “${f.detail}”` : '') }, 502);
   }
 });
 
 // ---------------------------------------------------------------- pictures (the Engine screen's Images list)
 app.get('/image/keys', async (c) => {
-  const keys = await loadImageKeys(c.env, c.get('db'), c.get('user').id);
+  const keys = await imageKeys(c.env, c.get('db'), c.get('user'));
   return c.json({ keys: keys.map(imageKeyInfo) });
 });
-function imageKeyFrom(b: any): Omit<ImageKey, 'id'> {
+export function imageKeyFrom(b: any): Omit<ImageKey, 'id'> {
   const provider = IMAGE_PROVIDERS_LIST.find((p) => p === b?.provider) ?? 'openai';
   return { provider, label: clip(b?.label, 40), model: clip(b?.model, 120), baseUrl: provider === 'openai' ? clip(b?.baseUrl, 500) : '', apiKey: clip(b?.apiKey, 4000) };
 }
@@ -1244,10 +1253,10 @@ app.delete('/image/keys/:id', async (c) => {
 
 // ---------------------------------------------------------------- maps (the Engine screen's Maps lists)
 app.get('/map/keys', async (c) => {
-  const keys = await loadMapKeys(c.env, c.get('db'), c.get('user').id);
+  const keys = await mapKeys(c.env, c.get('db'), c.get('user'));
   return c.json({ keys: keys.map(mapKeyInfo) });
 });
-function mapKeyFrom(b: any): Omit<MapKey, 'id'> {
+export function mapKeyFrom(b: any): Omit<MapKey, 'id'> {
   const provider = MAP_PROVIDERS_LIST.find((p) => p === b?.provider) ?? 'google';
   return { provider, label: clip(b?.label, 40), baseUrl: provider === 'self-hosted' ? clip(b?.baseUrl, 500) : '', email: provider === 'onemap' ? clip(b?.email, 200) : '', apiKey: clip(b?.apiKey, 4000), secret: clip(b?.secret, 4000), password: provider === 'onemap' ? clip(b?.password, 400) : '' };
 }
@@ -1340,6 +1349,7 @@ app.post('/maps/route', async (c) => {
     const f = e instanceof BrainFail ? e : null;
     if (f?.message === 'not on account') return c.json({ error: f.detail }, 403);
     if (f?.message === 'no services') return c.json({ error: f.detail }, 400);
+    if (f?.message === 'included used up') return c.json({ error: f.detail, usedUp: true }, 429);
     console.warn(`maps: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
     return c.json({ error: 'The map services didn’t answer just now. Try again in a moment.' }, 502);
   }
@@ -1400,6 +1410,7 @@ app.post('/image', async (c) => {
     const f = e instanceof BrainFail ? e : null;
     if (f?.message === 'no services') return c.json({ error: f.detail }, 400);
     if (f?.message === 'not on account') return c.json({ error: f.detail }, 403);
+    if (f?.message === 'included used up') return c.json({ error: f.detail, usedUp: true }, 429);
     return c.json({ error: (f?.why === 'limit' ? (only ? 'Its usage limit is reached.' : 'Every image service has reached its limit for now.') : f?.why === 'refused' ? (only ? 'It refused the request. Check its key and model.' : 'The image services refused the request. Check them on the Engine screen.') : 'The picture could not be made just now.') + (f?.detail ? ` It said: “${f.detail}”` : '') }, 502);
   }
 });
@@ -1422,21 +1433,26 @@ app.post('/voice/tts', async (c) => {
   const source = b.source === 'elevenlabs' ? 'vkey:el1' : String(b.source ?? '');
   const preview = b.preview === true;
   const off = await offFor(db, u);
+  // Included voices (the admin's keys and Cloudflare's) stop at the month's amount; the app then skips this voice
+  // until the 1st and speaks with the next one.
+  const gate = await usageGate(db, u, 'voice');
+  if (!preview && gate.blocked(source)) return ttsError(c, gate.message, 429, { until: nextReset().getTime(), why: 'limit' });
   try {
     let out: { bytes: Uint8Array; type: string };
     // A voice the admin has turned off for this account is refused; the app then speaks with the next one.
     if (off.length) {
-      const k = source.startsWith('vkey:') ? (await loadVoiceKeys(c.env, db, u.id)).find((x) => `vkey:${x.id}` === source) : undefined;
+      const k = source.startsWith('vkey:') ? (await voiceKeys(c.env, db, u)).find((x) => `vkey:${x.id}` === source) : undefined;
       const typed = preview && b.key ? voiceKeyFrom(b.key) : undefined;
       if (!aiAllowed(off, voiceOption(source, typed ?? k))) return ttsError(c, NOT_ON_ACCOUNT, 403);
     }
     if (source === 'workers') out = await workersTts(c, text, typeof b.workersVoice === 'string' ? b.workersVoice : (u.engine as Partial<EnginePrefs>)?.workersVoice);
     else if (source === 'self-hosted') out = await selfHostedTts(c, text, b);
     else if (source.startsWith('vkey:')) {
-      const keys = await loadVoiceKeys(c.env, db, u.id);
+      const keys = await voiceKeys(c.env, db, u);
       const saved = keys.find((x) => `vkey:${x.id}` === source);
       let key: VoiceKey | undefined = saved;
-      if (preview && b.key) {
+      // A provided key is never previewed with settings typed on the screen (that would send its key elsewhere).
+      if (preview && b.key && !(saved as { provided?: boolean } | undefined)?.provided) {
         // Preview with what is on the screen: a typed key, or the saved one where it is still for the same service and address.
         const k = voiceKeyFrom(b.key);
         const apiKey = k.apiKey || savedFor(saved, k);
@@ -1447,6 +1463,7 @@ app.post('/voice/tts', async (c) => {
       out = await speakWithKey(key, text);
     } else return ttsError(c, 'Unknown voice.', 400);
     if (!preview && (u.engine as unknown as EnginePrefs)?.voiceRest?.[source]) await noteVoice(db, u, source, null);
+    if (!preview) await gate.count(source);
     return new Response(out.bytes, { headers: { 'content-type': out.type, 'cache-control': 'no-store' } });
   } catch (e) {
     const f = e instanceof BrainFail ? e : new BrainFail(String((e as Error)?.message ?? e).slice(0, 200), 'down', 60_000);

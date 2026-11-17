@@ -181,7 +181,7 @@ export const voiceName = (v: VoiceSource | 'device' | undefined) => (v && v in V
 /** Voice services that a key can be added for. "openai" also covers any OpenAI-compatible speech API. */
 export type VoiceProvider = 'openai' | 'elevenlabs' | 'google' | 'azure' | 'deepgram' | 'cartesia' | 'fishaudio';
 /** A saved voice key as the Voice screen sees it: everything except the key itself. */
-export interface VoiceKeyInfo { id: string; label: string; provider: VoiceProvider; voice: string; model: string; baseUrl: string; region: string }
+export interface VoiceKeyInfo { id: string; label: string; provider: VoiceProvider; voice: string; model: string; baseUrl: string; region: string; provided?: boolean }
 export const VOICE_PROVIDERS: { id: string; provider: VoiceProvider; name: string; baseUrl?: string; models?: string[]; voices?: { id: string; name: string }[]; note: string }[] = [
   { id: 'openai', provider: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'],
     voices: ['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse'].map((v) => ({ id: v, name: v[0]!.toUpperCase() + v.slice(1) })),
@@ -200,7 +200,7 @@ export const VOICE_PROVIDERS: { id: string; provider: VoiceProvider; name: strin
 export type HearSource = 'workers' | 'self-hosted' | `skey:${string}`;
 export const HEAR_ENTRY = /^(workers|self-hosted|skey:[a-z0-9]{1,16})$/;
 export type HearProvider = 'openai' | 'deepgram' | 'elevenlabs' | 'fishaudio' | 'google' | 'azure';
-export interface HearKeyInfo { id: string; label: string; provider: HearProvider; model: string; baseUrl: string; region: string }
+export interface HearKeyInfo { id: string; label: string; provider: HearProvider; model: string; baseUrl: string; region: string; provided?: boolean }
 export const HEAR_PROVIDERS: { id: string; provider: HearProvider; name: string; baseUrl?: string; models?: string[]; note: string }[] = [
   { id: 'openai', provider: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'whisper-1'], note: 'Accurate in many languages, paid per minute.' },
   { id: 'groq', provider: 'openai', name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], note: 'Very fast Whisper, with a free allowance.' },
@@ -229,7 +229,7 @@ export const IMAGE_ENTRY = /^(workers|self-hosted|ikey:[a-z0-9]{1,16})$/;
 export const MAX_IMAGE_KEYS = 10;
 /** Image services a key can be added for. "openai" also covers any service with an OpenAI-compatible images API. */
 export type ImageProvider = 'openai' | 'google' | 'stability' | 'fal' | 'replicate' | 'bfl' | 'ideogram';
-export interface ImageKeyInfo { id: string; label: string; provider: ImageProvider; model: string; baseUrl: string }
+export interface ImageKeyInfo { id: string; label: string; provider: ImageProvider; model: string; baseUrl: string; provided?: boolean }
 /** The shape of a picture: square unless the user asks for a wide or tall one. */
 export type ImageShape = 'square' | 'wide' | 'tall';
 export const IMAGE_PROVIDERS: { id: string; provider: ImageProvider; name: string; baseUrl?: string; models: string[]; modelLabel?: string; note: string }[] = [
@@ -282,7 +282,7 @@ export type BrainEntry = 'workers-ai' | 'self-hosted-ai' | `key:${string}`;
 /** Why a brain is being skipped for now, and until when (ms since 1970). Set by the server only. */
 export interface BrainRest { until: number; why: 'limit' | 'refused' | 'down' }
 /** A saved AI key as the Engine screen sees it: everything except the key itself. */
-export interface AiKeyInfo { id: string; label: string; provider: 'openai' | 'anthropic' | 'google'; baseUrl: string; model: string }
+export interface AiKeyInfo { id: string; label: string; provider: 'openai' | 'anthropic' | 'google'; baseUrl: string; model: string; /** Included with the plan (the admin's key, never shown). */ provided?: boolean }
 export const MAX_AI_KEYS = 10;
 /** Model names that are not chat models (safety checkers, speech, embeddings, images), which can't answer as Niko. */
 export const NOT_CHAT = /(guard|safeguard|whisper|tts|speech|embed|moderation|playai|orpheus|dall-e|image|imagen|audio|transcri|realtime|rerank|veo)/i;
@@ -504,14 +504,69 @@ export const GLANCE_PART_NAMES: Record<GlancePart, string> = { mail: 'Emails', c
 /** Calendar links: each one is downloaded and unpacked when Niko builds the day, so their number is capped. */
 export const CALENDAR_LIMIT_DEFAULT = 20, CALENDAR_LIMIT_MAX = 50;
 export const CALENDAR_LIMIT_STEPS = [1, 3, 5, 10, 15, 20, 30, 40, 50];
-export interface AccountLimits { calendars: number }
+/** The services counted for the monthly included amounts: answers, spoken replies, minutes of listening, pictures,
+ * map searches and routes. Only Niko's included services count (the admin's provided keys and the built-in ones);
+ * a person's own keys, the on-device voice and the device's own listening never do. */
+export type UsageKind = 'brain' | 'voice' | 'hear' | 'image' | 'map';
+export const USAGE_KINDS: UsageKind[] = ['brain', 'image', 'map', 'voice', 'hear'];
+export const USAGE_NAMES: Record<UsageKind, string> = { brain: 'Answers', voice: 'Voice', hear: 'Listening', image: 'Pictures', map: 'Maps' };
+export const USAGE_UNITS: Record<UsageKind, [string, string]> = { brain: ['answer', 'answers'], voice: ['spoken reply', 'spoken replies'], hear: ['minute', 'minutes'], image: ['picture', 'pictures'], map: ['search', 'searches'] };
+/** The amounts offered each month (0 = no limit). Listening is in minutes. */
+export const USAGE_STEPS: Record<UsageKind, number[]> = {
+  brain: [100, 200, 500, 1000, 2000, 5000, 10000, 0], voice: [100, 200, 500, 1000, 2000, 5000, 10000, 0],
+  hear: [30, 60, 120, 300, 600, 1200, 3000, 0], image: [10, 25, 50, 100, 250, 500, 1000, 0], map: [100, 250, 500, 1000, 2500, 5000, 10000, 0],
+};
+export interface AccountLimits { calendars: number; brain: number; voice: number; hear: number; image: number; map: number }
 export function cleanAccountLimits(v: unknown): Partial<AccountLimits> {
   const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
-  return typeof o.calendars === 'number' && CALENDAR_LIMIT_STEPS.includes(o.calendars) ? { calendars: o.calendars } : {};
+  const out: Partial<AccountLimits> = {};
+  if (typeof o.calendars === 'number' && CALENDAR_LIMIT_STEPS.includes(o.calendars)) out.calendars = o.calendars;
+  for (const k of USAGE_KINDS) if (typeof o[k] === 'number' && USAGE_STEPS[k].includes(o[k] as number)) out[k] = o[k] as number;
+  return out;
 }
+/** Until the admin sets amounts, nothing is limited (a new limit never takes anyone by surprise). */
 export function accountLimits(defaults: Partial<AccountLimits>, own: Partial<AccountLimits>): AccountLimits {
-  return { calendars: CALENDAR_LIMIT_DEFAULT, ...defaults, ...own };
+  return { calendars: CALENDAR_LIMIT_DEFAULT, brain: 0, voice: 0, hear: 0, image: 0, map: 0, ...defaults, ...own };
 }
+/** Keys the admin provides have ids starting "px", so they never clash with a person's own keys. */
+export const PROVIDED_ID = /^px[a-z0-9]{10}$/;
+const ENTRY_PREFIX: Record<UsageKind, string> = { brain: 'key:', voice: 'vkey:', hear: 'skey:', image: 'ikey:', map: 'mkey:' };
+export const entryPrefix = (k: UsageKind) => ENTRY_PREFIX[k];
+/** Whether a service counts towards the monthly included amounts: Niko's built-in ones and the admin's keys. */
+export function includedEntry(kind: UsageKind, entry: string): boolean {
+  if (entry.startsWith(ENTRY_PREFIX[kind]) && PROVIDED_ID.test(entry.slice(ENTRY_PREFIX[kind].length))) return true;
+  return kind === 'brain' ? entry === 'workers-ai' : kind === 'map' ? entry === 'osm' : entry === 'workers';
+}
+/** The person's setup from the admin: which provided keys they get for each kind (in order), and whether they may
+ * reorder them ('free') or the provided ones stay first ('fixed'). */
+export interface ProvidedSetup { keys: Partial<Record<UsageKind, string[]>>; order: 'free' | 'fixed'; setAt?: string }
+export function cleanProvided(v: unknown): ProvidedSetup {
+  const o = (v && typeof v === 'object' ? v : {}) as Record<string, any>;
+  const keys: Partial<Record<UsageKind, string[]>> = {};
+  for (const k of USAGE_KINDS) if (Array.isArray(o.keys?.[k])) { const l = [...new Set((o.keys[k] as unknown[]).map(String).filter((x) => PROVIDED_ID.test(x)))].slice(0, 6); if (l.length) keys[k] = l; }
+  return { keys, order: o.order === 'fixed' ? 'fixed' : 'free', ...(typeof o.setAt === 'string' ? { setAt: o.setAt } : {}) };
+}
+/** An order with the provided services placed as the admin set them: first, in the admin's order, when fixed. */
+export function arrangeOrder<T extends string>(order: T[], provided: string[], mode: 'free' | 'fixed'): T[] {
+  if (mode !== 'fixed' || !provided.length) return order;
+  // Included services the person switched off stay off; the ones in use go first, in the admin's order.
+  const own = order.filter((e) => !provided.includes(e));
+  return [...(provided.filter((p) => order.includes(p as T)) as T[]), ...own];
+}
+/** What a person's Engine and Voice pages show about the month. Counts: listening in seconds, the rest in uses. */
+export interface UsageInfo {
+  month: string; resets: string;
+  kinds: Record<UsageKind, { limit: number; included: number; own: number }>;
+  /** Uses per service this month, keyed "kind|entry". */
+  entries: Record<string, number>;
+  /** Included with the plan: the provided services' names per kind, the built-in ones that are on, and the order rule. */
+  plan: { order: 'free' | 'fixed'; provided: Partial<Record<UsageKind, string[]>>; builtins: Record<UsageKind, boolean> };
+  /** What a service reports for one of the person's own keys (ElevenLabs, OpenRouter), keyed by entry. */
+  reports: Record<string, { service: string; head: string; sub: string; pct?: number; at: number }>;
+  /** The person's own keys per kind: entry and name (never the key). */
+  own: Record<UsageKind, { entry: string; label: string }[]>;
+}
+
 /** One saved calendar link, as shown to its owner. A private address is shown only as its server and file name. */
 export interface CalendarLink { id: string; name: string; kind: 'private' | 'public'; on: boolean; address: string }
 

@@ -54,6 +54,7 @@ const unflat = (params) => {
   return out;
 };
 const mapCalls = [];
+const aiCalls = [];
 const slowCal = { on: false };
 globalThis.fetch = async (input, init = {}) => {
   // Like Cloudflare Workers: redirect must be 'follow' or 'manual'.
@@ -70,6 +71,13 @@ globalThis.fetch = async (input, init = {}) => {
     mapCalls.push(String(input));
     if (u.pathname.startsWith('/search/geocode/v6/')) return Response.json({ features: [{ properties: { name: 'Marina Bay Sands' }, geometry: { coordinates: [103.8607, 1.2834] } }] });
     return Response.json({ code: 'Ok', routes: [{ duration: 900, distance: 7000, geometry: { coordinates: [[103.82, 1.35], [103.8607, 1.2834]] }, legs: [{ steps: [{ maneuver: { instruction: 'Head south' }, distance: 7000 }] }] }] });
+  }
+  // An AI service for included keys (Groq) and one for a person's own key (OpenRouter), which also reports usage.
+  if (u.hostname === 'api.groq.com' || u.hostname === 'openrouter.ai') {
+    const auth = init.headers?.authorization ?? init.headers?.Authorization ?? '';
+    aiCalls.push({ host: u.hostname, path: u.pathname, auth });
+    if (u.pathname === '/api/v1/key') return Response.json({ data: { usage_monthly: 25.5, limit: 100, limit_remaining: 74.5, limit_reset: 'monthly' } });
+    return Response.json({ choices: [{ message: { content: u.hostname === 'api.groq.com' ? 'From the included key.' : 'From my own key.' } }] });
   }
   if (u.hostname !== 'api.stripe.com') throw new Error('unexpected fetch ' + u);
   const method = init.method ?? 'GET';
@@ -997,6 +1005,116 @@ await ok('screen lock: set with the password, kept by the server, new items only
   r = await b.put('/lock', { on: false, password: PWJ });
   assert.equal(r.status, 200); assert.equal(r.data.on, false);
   assert.ok(!(await user('jun@example.com')).screen_lock.hash, 'the code is gone');
+});
+
+// ---------------------------------------------------------------- set up Niko per person: included keys and monthly amounts
+await ok('included services: the admin’s key is kept sealed, given through an invite, counted, capped, and never shown', async () => {
+  const ADMIN_KEY = 'gsk_admin_secret_key_1234';
+  // Members can't reach any of it.
+  const member = new Browser();
+  assert.equal((await member.post('/auth/sign-in', { email: 'nur@example.com', password: PW })).status, 200);
+  assert.ok([401, 403].includes((await member.get('/admin/setup/keys')).status));
+
+  // Added once: checked with the service first, then kept sealed. Only the service, model and last 4 come back.
+  aiCalls.length = 0;
+  let r = await admin.post('/admin/setup/keys', { kind: 'brain', key: { baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', apiKey: ADMIN_KEY } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(aiCalls.at(-1).auth, `Bearer ${ADMIN_KEY}`, 'tested with the service it is for');
+  const pid = r.data.key.id;
+  assert.match(pid, /^px[a-z0-9]{10}$/);
+  assert.ok(!JSON.stringify(r.data).includes(ADMIN_KEY));
+  const row = (await q('select * from provided_keys where id = $1', [pid]))[0];
+  assert.ok(!row.secret_enc.includes(ADMIN_KEY) && !JSON.stringify(row.info).includes(ADMIN_KEY), 'sealed in the database');
+  assert.equal(row.info.hint, '1234');
+  r = await admin.get('/admin/setup/keys');
+  assert.ok(!JSON.stringify(r.data).includes(ADMIN_KEY) && r.data.keys.some((k) => k.id === pid));
+  assert.equal((await admin.post('/admin/setup/keys', { kind: 'brain', key: { baseUrl: 'http://10.0.0.1/v1', model: 'm', apiKey: 'k' } })).status, 400, 'only public https');
+
+  // Set up before they join: their key first and fixed, Workers AI removed, 100 answers a month.
+  await admin.post('/admin/invites', { email: 'ivy@example.com', access: 'life' });
+  const inv = (await admin.get('/admin/users?show=invited&q=ivy')).data.items[0];
+  r = await admin.put(`/admin/setup/invite/${inv.id}`, { keys: { brain: [pid, 'pxnotakeyxxx'] }, order: 'fixed', builtins: { brain: false }, limits: { brain: 100 } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  r = await admin.get(`/admin/setup/invite/${inv.id}`);
+  assert.deepEqual(r.data.setup.keys.brain, [pid], 'only kept keys');
+  assert.equal(r.data.builtins.brain, false); assert.equal(r.data.limits.brain, 100);
+  const e = lastEmail('ivy@example.com');
+  const ivy = new Browser();
+  await ivy.post(`/auth/invite/${inviteToken(e.html)}/code`, { code: inviteCode(e.html) });
+  assert.equal((await ivy.post(`/auth/invite/${inviteToken(e.html)}`, { name: 'Ivy', password: PW })).status, 200);
+  const u = await user('ivy@example.com');
+  assert.deepEqual(u.provided.keys.brain, [pid]); assert.equal(u.provided.order, 'fixed');
+  assert.equal(u.account_limits.brain, 100); assert.equal(u.ai_access['workers-ai'], false);
+  assert.equal(u.engine.brains[0], `key:${pid}`);
+
+  // Ivy sees it as included, without the key, and can't change or remove it.
+  r = await ivy.get('/engine/keys');
+  const shownKey = r.data.keys.find((k) => k.id === pid);
+  assert.equal(shownKey.provided, true); assert.ok(!JSON.stringify(r.data).includes(ADMIN_KEY) && !('apiKey' in shownKey));
+  assert.equal((await ivy.post('/engine/keys', { id: pid, baseUrl: 'https://evil.example.com/v1', model: 'x', apiKey: '' })).status, 404, 'not one of her own keys');
+  await ivy.del(`/engine/keys/${pid}`);
+  assert.ok((await ivy.get('/engine/keys')).data.keys.some((k) => k.id === pid), 'still there');
+  assert.ok(!(await q("select count(*)::int as n from connections where user_id = $1 and provider = 'custom-ai'", [u.id]))[0]?.n || !JSON.stringify(await q('select * from connections where user_id = $1', [u.id])).includes(pid), 'never saved into her own keys');
+
+  // Answers come from the included key, sent only to its service, and are counted.
+  aiCalls.length = 0;
+  r = await ivy.post('/chat', { message: 'hello', tz: 0 });
+  assert.equal(r.status, 200, JSON.stringify(r.data)); assert.match(r.data.reply, /included key/);
+  assert.ok(aiCalls.every((c) => c.host === 'api.groq.com' && c.auth === `Bearer ${ADMIN_KEY}`));
+  let counts = await q('select entry, n from usage_counts where user_id = $1 and kind = $2', [u.id, 'brain']);
+  assert.deepEqual(counts, [{ entry: `key:${pid}`, n: 1 }]);
+  r = await ivy.get('/usage');
+  assert.equal(r.data.kinds.brain.limit, 100); assert.equal(r.data.kinds.brain.included, 1); assert.equal(r.data.kinds.brain.own, 0);
+  assert.equal(r.data.plan.order, 'fixed'); assert.equal(r.data.plan.builtins.brain, false); assert.equal(r.data.plan.provided.brain.length, 1);
+  assert.ok(!JSON.stringify(r.data).includes(ADMIN_KEY) && !/admin/i.test(JSON.stringify(r.data)), 'no key, and no mention of an admin');
+
+  // At the month's amount: with no key of her own, Niko says when it comes back.
+  await q('update usage_counts set n = 100 where user_id = $1', [u.id]);
+  aiCalls.length = 0;
+  r = await ivy.post('/chat', { message: 'hello again', tz: 0 });
+  assert.equal(r.status, 429); assert.equal(r.data.usedUp, true); assert.match(r.data.error, /100 included answers/);
+  assert.equal(aiCalls.length, 0, 'the included key is not used past the amount');
+
+  // With her own key, Niko goes on with it. Her key is never counted towards what’s included, and is never capped.
+  r = await ivy.post('/engine/keys', { baseUrl: 'https://openrouter.ai/api/v1', model: 'meta-llama/llama-3.3-70b-instruct', apiKey: 'sk-or-own-9999' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const own = r.data.key.id;
+  // Fixed: the included key stays first even when she puts hers above it.
+  r = await ivy.patch('/me', { engine: { brains: [`key:${own}`, `key:${pid}`] } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.deepEqual((await user('ivy@example.com')).engine.brains, [`key:${pid}`, `key:${own}`]);
+  aiCalls.length = 0;
+  r = await ivy.post('/chat', { message: 'and now', tz: 0 });
+  assert.equal(r.status, 200, JSON.stringify(r.data)); assert.match(r.data.reply, /own key/);
+  assert.ok(aiCalls.every((c) => c.host === 'openrouter.ai' && c.auth === 'Bearer sk-or-own-9999'), 'the admin key went nowhere');
+  counts = Object.fromEntries((await q('select entry, n from usage_counts where user_id = $1', [u.id])).map((x) => [x.entry, x.n]));
+  assert.equal(counts[`key:${pid}`], 100); assert.equal(counts[`key:${own}`], 1);
+
+  // What OpenRouter reports for her own key is shown, asked with her key only, at most every five minutes.
+  aiCalls.length = 0;
+  r = await ivy.get('/usage');
+  assert.equal(r.data.kinds.brain.own, 1);
+  assert.match(r.data.reports[`key:${own}`].head, /OpenRouter says: \$25\.50/);
+  assert.deepEqual(aiCalls.map((c) => [c.path, c.auth]), [['/api/v1/key', 'Bearer sk-or-own-9999']]);
+  aiCalls.length = 0; await ivy.get('/usage');
+  assert.equal(aiCalls.length, 0, 'cached');
+  assert.deepEqual(r.data.own.brain.map((k) => k.entry), [`key:${own}`]);
+
+  // The Limits page shows this month's use and the invites' amounts.
+  r = await admin.get('/admin/limits');
+  assert.equal(r.data.users.find((x) => x.email === 'ivy@example.com').used.brain, 100);
+
+  // Free order: she can put hers first. Removing the key takes it from everyone straight away.
+  assert.equal((await admin.put(`/admin/setup/user/${u.id}`, { keys: { brain: [pid] }, order: 'free', builtins: { brain: false } })).status, 200);
+  await ivy.patch('/me', { engine: { brains: [`key:${own}`, `key:${pid}`] } });
+  assert.deepEqual((await user('ivy@example.com')).engine.brains, [`key:${own}`, `key:${pid}`]);
+  assert.equal((await admin.del(`/admin/setup/keys/${pid}`)).status, 200);
+  assert.deepEqual((await user('ivy@example.com')).provided.keys, {});
+  assert.ok(!(await user('ivy@example.com')).engine.brains.includes(`key:${pid}`));
+  assert.ok(!(await ivy.get('/engine/keys')).data.keys.some((k) => k.id === pid));
+  assert.equal((await q('select count(*)::int as n from provided_keys')).at(0).n, 0);
+  const log = JSON.stringify(await q("select action, detail from audit_log where action like 'provided-key.%' or action like 'setup.%'"));
+  assert.ok(log.includes('provided-key.added') && log.includes('setup.invite') && log.includes('provided-key.removed') && !log.includes(ADMIN_KEY), 'audited without the key');
 });
 
 await sqlc.end();

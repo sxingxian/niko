@@ -30,6 +30,8 @@ export const users = pgTable('users', {
   planPricesAt: ts('plan_prices_at'),
   /** Screen lock settings, with the code as a peppered bcrypt hash. */
   screenLock: jsonb('screen_lock'),
+  /** Services the admin provides: { keys: { brain: [ids], voice: [...], ... }, order: 'free' | 'fixed' }. */
+  provided: jsonb('provided'),
   // ---- access and payments (see migration 0007)
   lifetime: boolean('lifetime').notNull().default(false),
   accessUntil: ts('access_until'),
@@ -88,6 +90,8 @@ export const invites = pgTable('invites', {
   stripeCustomerId: text('stripe_customer_id'),
   refundedAt: ts('refunded_at'),
   stripeMode: text('stripe_mode'),
+  /** Set up before they join: provided services, order rule, AI option changes and monthly amounts, copied on accepting. */
+  setup: jsonb('setup'),
 });
 
 /** Open sign-ups in progress: confirm email, pay, then wait for an admin. */
@@ -254,4 +258,24 @@ export const glanceState = pgTable('glance_state', {
   seen: jsonb('seen').notNull().default({}).$type<Record<string, number>>(),
   upcoming: jsonb('upcoming').notNull().default([]).$type<{ id: string; provider: string; title: string; start: number; source: string }[]>(),
   updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
+/** A key the admin provides to people. The secret is sealed; info holds what may be shown (service, model, last 4). */
+export const providedKeys = pgTable('provided_keys', {
+  id: text('id').primaryKey(),
+  kind: text('kind').notNull(),
+  label: text('label').notNull().default(''),
+  info: jsonb('info').notNull().default({}).$type<Record<string, unknown>>(),
+  secretEnc: text('secret_enc').notNull(),
+  createdBy: uuid('created_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+/** How much each person used each month, per kind and service: one number, never what was said. */
+export const usageCounts = pgTable('usage_counts', {
+  userId: uuid('user_id').notNull(),
+  month: text('month').notNull(),
+  kind: text('kind').notNull(),
+  entry: text('entry').notNull(),
+  n: integer('n').notNull().default(0),
 });

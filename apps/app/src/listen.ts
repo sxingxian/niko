@@ -98,6 +98,6 @@ export async function transcribe(wav: Blob, extra: { source?: string; key?: unkn
   if (extra.server) form.set('server', JSON.stringify(extra.server));
   const res = await fetch('/api/voice/stt', { method: 'POST', credentials: 'same-origin', body: form });
   const j = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(j.error ?? 'That could not be heard.');
+  if (!res.ok) throw Object.assign(new Error(j.error ?? 'That could not be heard.'), { usedUp: !!j.usedUp });
   return { text: String(j.text ?? ''), used: String(j.used ?? '') };
 }

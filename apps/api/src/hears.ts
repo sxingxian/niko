@@ -10,6 +10,8 @@ import { BrainFail, providerMessage } from './brains';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
 import { AZURE_REGION } from './voices';
+import { arranged, withProvided } from './provided';
+import { usageGate } from './usage';
 
 export interface HearKey extends HearKeyInfo { apiKey: string }
 export const MAX_AUDIO_BYTES = 2 * 1024 * 1024; // about a minute of 16 kHz speech
@@ -30,7 +32,11 @@ export async function saveHearKeys(env: Env, db: Db, userId: string, keys: HearK
   const secret = { keys: keys.map(({ id, label, provider, model, baseUrl, region, apiKey }) => ({ id, label, provider, model, baseUrl, region, apiKey })) };
   await db.insert(connections).values({ id: crypto.randomUUID(), userId, provider: 'hear-keys', secretEnc: await seal(env.ENCRYPTION_KEY, secret), meta: { label: `${keys.length} speech-in key${keys.length === 1 ? '' : 's'}` } });
 }
-export const hearKeyInfo = (k: HearKey): HearKeyInfo => ({ id: k.id, label: k.label, provider: k.provider, model: k.model, baseUrl: k.baseUrl, region: k.region });
+export const hearKeyInfo = (k: HearKey & { provided?: boolean }): HearKeyInfo => ({ id: k.id, label: k.label, provider: k.provider, model: k.model, baseUrl: k.baseUrl, region: k.region, ...(k.provided ? { provided: true } : {}) });
+/** This person's own keys with the ones the admin provides added (for using and listing, never for saving). */
+export async function hearKeys(env: Env, db: Db, user: { id: string; provided?: unknown }): Promise<(HearKey & { provided?: boolean })[]> {
+  return withProvided<HearKey>(env, db, user, 'hear', await loadHearKeys(env, db, user.id));
+}
 export function defaultHearLabel(k: { provider: HearProvider; baseUrl: string }): string {
   if (k.provider !== 'openai') return { deepgram: 'Deepgram', elevenlabs: 'ElevenLabs', fishaudio: 'Fish Audio', google: 'Google Cloud', azure: 'Microsoft Azure' }[k.provider];
   try { const h = new URL(k.baseUrl).hostname.replace(/^api\./, ''); return h === 'openai.com' ? 'OpenAI' : h === 'groq.com' ? 'Groq' : h; } catch { return 'OpenAI-compatible'; }
@@ -141,13 +147,23 @@ export function audioProblem(audio: Uint8Array): string | null {
  * Turns speech into text with the first service in the order that works. Services that are resting are tried last.
  * Each failure sets a rest; an answer ends it. `only` tries one service (the Voice screen's Test).
  */
-export async function hear(env: Env, db: Db, user: { id: string; engine: unknown }, audio: Uint8Array, lang: string, only?: { entry: HearSource; key?: HearKey }, off: readonly string[] = []): Promise<{ text: string; used: HearSource }> {
+/** How long a recording is, from its WAV header (the app sends 16-bit WAV); rounded up to whole seconds. */
+export function wavSeconds(audio: Uint8Array): number {
+  if (audio.length < 44) return 0;
+  const v = new DataView(audio.buffer, audio.byteOffset, audio.byteLength);
+  const rate = v.getUint32(24, true), channels = v.getUint16(22, true) || 1, bits = v.getUint16(34, true) || 16;
+  const per = rate * channels * (bits / 8);
+  return per > 0 ? Math.max(1, Math.ceil((audio.length - 44) / per)) : 0;
+}
+
+export async function hear(env: Env, db: Db, user: { id: string; engine: unknown; provided?: unknown; accountLimits?: unknown }, audio: Uint8Array, lang: string, only?: { entry: HearSource; key?: HearKey }, off: readonly string[] = []): Promise<{ text: string; used: HearSource }> {
   const engine = (user.engine ?? {}) as EnginePrefs;
   let keys: HearKey[] | null = null;
-  let order = only ? [only.entry] : hearOrder(engine);
+  let order = only ? [only.entry] : arranged(user, 'hear', hearOrder(engine));
+  const gate = await usageGate(db, user, 'hear');
   // Services the admin has turned off for this account are skipped; the device's own recognition then listens.
   if (off.length) {
-    keys = await loadHearKeys(env, db, user.id);
+    keys = await hearKeys(env, db, user);
     order = order.filter((e) => aiAllowed(off, hearOption(e, only?.key && only.entry === e ? only.key : keys!.find((k) => `skey:${k.id}` === e))));
     if (!order.length && only) throw new BrainFail('not on account', 'refused', 0, 'That service isn’t available on your account.');
   }
@@ -159,6 +175,7 @@ export async function hear(env: Env, db: Db, user: { id: string; engine: unknown
   let changed = Object.keys(rest).length !== Object.keys(engine.hearRest ?? {}).length, last: unknown = null;
   try {
     for (const entry of [...ready, ...resting]) {
+      if (!only && gate.blocked(entry)) continue;
       try {
         let text: string;
         if (entry === 'workers') text = await workersStt(env, audio, lang.split('-')[0]!.toLowerCase());
@@ -167,11 +184,12 @@ export async function hear(env: Env, db: Db, user: { id: string; engine: unknown
           if (!k) throw new BrainFail('no server', 'refused', 6 * HOUR, 'Your speech-to-text server is not set up yet.');
           text = await transcribeWithKey(k, audio, lang);
         } else {
-          const k = only?.key ?? (keys ??= await loadHearKeys(env, db, user.id)).find((x) => `skey:${x.id}` === entry);
+          const k = only?.key ?? (keys ??= await hearKeys(env, db, user)).find((x) => `skey:${x.id}` === entry);
           if (!k) throw new BrainFail('key not found', 'refused', 6 * HOUR, 'That key is no longer saved.');
           text = await transcribeWithKey(k, audio, lang);
         }
         if (!only && rest[entry]) { delete rest[entry]; changed = true; }
+        if (!only?.key) await gate.count(entry, wavSeconds(audio));
         return { text, used: entry };
       } catch (e) {
         last = e;
@@ -180,6 +198,7 @@ export async function hear(env: Env, db: Db, user: { id: string; engine: unknown
         if (!only?.key) { rest[entry] = { until: Date.now() + f.restMs, why: f.why }; changed = true; }
       }
     }
+    if (gate.anyBlocked()) throw new BrainFail('included used up', 'limit', 0, gate.message);
     throw last ?? new Error('Nothing could hear that.');
   } finally {
     if (changed && !only?.key) await db.update(users).set({ engine: { ...engine, hearRest: rest } as any }).where(eq(users.id, user.id)).catch(() => undefined);

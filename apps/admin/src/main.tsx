@@ -2,7 +2,7 @@
 import { StrictMode, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api, ApiError, Field, PasswordField, Switch } from '@niko/ui';
-import { AI_OPTION_GROUPS, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
+import { AI_OPTION_GROUPS, AI_PRESETS, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
 import '@niko/ui/src/styles.css';
 import './admin.css';
 
@@ -15,9 +15,10 @@ interface UserRow {
   id: string; name: string; email: string; role: string; status: string; isOwner: boolean; lastActiveAt: string | null;
   access: AccessState; lifetime: boolean; accessUntil: string | null; accessKind: string | null; accessPaidUntil: string | null; accessStartMonths: number; paidMode: Mode | null; keptPrices: { plan: 'monthly' | 'yearly'; cents: number }[] | null; pricesFrom: 'kept' | 'admin' | null; pricesAt: string | null;
   sub: { plan: string | null; status: string | null; periodEnd: string | null; cancelAtEnd: boolean; mode: Mode | null } | null;
+  engineSetup?: { keys: number; order: 'free' | 'fixed' };
   signup: { state: 'verify' | 'pay' | 'waiting'; paid: boolean; mode: Mode | null; priceCents: number | null; months: number | null; removeAt: string | null } | null;
 }
-interface InviteRow { id: string; email: string; role: string; expiresAt: string; access: 'paid' | 'free' | 'life'; priceCents: number | null; months: number | null; paidAt: string | null; stripeMode: Mode | null; codeTries: number; hasCode: boolean }
+interface InviteRow { id: string; email: string; role: string; expiresAt: string; access: 'paid' | 'free' | 'life'; priceCents: number | null; months: number | null; paidAt: string | null; stripeMode: Mode | null; codeTries: number; hasCode: boolean; engineSetup?: { keys: number; order: 'free' | 'fixed' } }
 type Mode = 'test' | 'live';
 type ModeStatus = { ready: boolean; secret: boolean; webhook: boolean; problem: string | null; connectedAt: string | null; account: string | null };
 const testTag = (m: Mode | null | undefined) => (m === 'test' ? ' · test' : '');
@@ -184,6 +185,7 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
         <p className="sub" style={{ fontSize: 12, lineHeight: 1.5 }}>Turning a service off hides it from that person’s screens and the server refuses it, so a key they already saved stops being used. Their keys are kept, not deleted, and work again when you turn the service back on. Every change is written to the audit log.</p>
       </section>
     </div>
+    <KeysLibrary guard={guard} />
   </>;
 }
 
@@ -276,68 +278,91 @@ function GlanceAdmin({ guard }: { guard: (e: unknown) => void }) {
 }
 
 // ---------------------------------------------------------------- limits (how many calendar links an account may keep)
-type LimitsUser = { id: string; name: string; email: string; role: string; status: string; accountLimits: Partial<AccountLimits> };
+type LimitsUser = { id: string; name: string; email: string; role: string; status: string; accountLimits: Partial<AccountLimits>; used?: Record<UsageKind, number>; invite?: boolean };
+type LimitsReply = { defaults: AccountLimits; users: LimitsUser[]; invites: { id: string; email: string; role: string; accountLimits: Partial<AccountLimits> }[]; resets: string };
 function LimitsAdmin({ guard }: { guard: (e: unknown) => void }) {
   const [defaults, setDefaults] = useState<AccountLimits | null>(null);
   const [people, setPeople] = useState<LimitsUser[]>([]);
+  const [resets, setResets] = useState('');
   const [sel, setSel] = useState('all');
   const [draft, setDraft] = useState<Partial<AccountLimits>>({});
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const load = useCallback(async () => {
-    try { const r = await api<{ defaults: AccountLimits; users: LimitsUser[] }>('/admin/limits'); setDefaults(r.defaults); setPeople(r.users); }
-    catch (e) { guard(e); }
+    try {
+      const r = await api<LimitsReply>('/admin/limits');
+      setDefaults(r.defaults); setResets(r.resets);
+      setPeople([...r.users, ...r.invites.map((i) => ({ id: 'inv:' + i.id, name: '', email: i.email, role: i.role, status: 'invited', accountLimits: i.accountLimits, invite: true }))]);
+    } catch (e) { guard(e); }
   }, [guard]);
   useEffect(() => { void load(); }, [load]);
   const person = people.find((p) => p.id === sel) ?? null;
   useEffect(() => { if (defaults) { setDraft(person ? { ...person.accountLimits } : { ...defaults }); setDirty(false); } }, [sel, defaults, people]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!defaults) return null;
-  const cals = draft.calendars ?? defaults.calendars;
-  const changed = !!person && draft.calendars !== undefined && draft.calendars !== defaults.calendars;
-  const setCals = (v: number) => { setNote(null); setDirty(true); setDraft(person && v === defaults.calendars ? {} : { calendars: v }); };
+  type LimitKey = keyof AccountLimits;
+  const valOf = (k: LimitKey) => draft[k] ?? defaults[k];
+  const isChanged = (k: LimitKey) => !!person && draft[k] !== undefined && draft[k] !== defaults[k];
+  const setVal = (k: LimitKey, v: number) => {
+    setNote(null); setDirty(true);
+    const d = { ...draft };
+    if (person && v === defaults[k]) delete d[k]; else d[k] = v;
+    setDraft(d);
+  };
+  const anyChanged = !!person && (Object.keys(defaults) as LimitKey[]).some(isChanged);
   const save = async () => {
     setBusy(true); setNote(null);
     try {
-      if (person) await api(`/admin/limits/users/${person.id}`, { method: 'PUT', body: { limits: draft } });
+      if (person?.invite) await api(`/admin/limits/invites/${person.id.slice(4)}`, { method: 'PUT', body: { limits: draft } });
+      else if (person) await api(`/admin/limits/users/${person.id}`, { method: 'PUT', body: { limits: draft } });
       else await api('/admin/limits/default', { method: 'PUT', body: { limits: draft } });
       await load(); setNote({ ok: true, text: person ? `Saved for ${person.name || person.email}.` : 'Saved. It applies to everyone without their own limit within a minute.' });
     } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
   };
   const count = (p: LimitsUser) => Object.keys(p.accountLimits).length;
+  const resetDay = resets ? new Date(resets).toLocaleDateString(undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' }) : '';
+  const row = (k: LimitKey, name: string, sub: string, options: { v: number; label: string }[], used?: string) => {
+    const changed = isChanged(k);
+    const label = (n: number) => options.find((o) => o.v === n)?.label ?? String(n);
+    return <div key={k} className="ai-row">
+      <span className="ai-txt"><span>{name}</span><span className="sub">{changed ? `Default is ${label(defaults[k]).toLowerCase()}` : sub}{used ? ` · ${used}` : ''}</span></span>
+      {changed && <><span className="chg">Changed</span><button className="lnk" onClick={() => setVal(k, defaults[k])}>Reset</button></>}
+      <label className="sr" htmlFor={`lim-${k}`}>{name}</label>
+      <select id={`lim-${k}`} className="in gl-sel" value={valOf(k)} onChange={(e) => setVal(k, Number(e.target.value))}>
+        {options.map((o) => <option key={o.v} value={o.v}>{o.label}</option>)}
+      </select>
+    </div>;
+  };
   return <>
-    <header><h1>Limits</h1><p className="sub" style={{ fontSize: 15, maxWidth: 860 }}>How much each account may add. Calendar links are downloaded and unpacked every time Niko builds someone’s day, so many of them make it slower.</p></header>
+    <header><h1>Limits</h1><p className="sub" style={{ fontSize: 15, maxWidth: 860 }}>How much each account may add, and how much it can use each month of what’s included: your keys and Niko’s built-in services. People’s own keys are never counted or capped.</p></header>
     {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
     <div className="ai-grid">
       <section className="g card ai-people" aria-label="Applies to">
         <span className="k" style={{ padding: '0 6px' }}>Applies to</span>
         <div className="ai-list">
-          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default' }, ...people.map((p) => ({ id: p.id, name: p.name || p.email, sub: p.email, badge: count(p) ? `${p.accountLimits.calendars} calendars` : 'Default' }))].map((p) => (
+          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default' }, ...people.map((p) => ({ id: p.id, name: p.invite ? 'Invited' : p.name || p.email, sub: p.email, badge: count(p) ? 'Own' : 'Default' }))].map((p) => (
             <button key={p.id} className="who-row" aria-pressed={p.id === sel} onClick={() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; setSel(p.id); setNote(null); }}>
               <span className="who-txt"><b>{p.name}</b><span>{p.sub}</span></span><span className="who-badge">{p.badge}</span>
             </button>
           ))}
         </div>
-        <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>New accounts get the default. These limits apply to admins too.</p>
+        <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>New accounts get the default. An invite’s limits are copied when they join. These limits apply to admins too.</p>
       </section>
       <section className="g card ai-options" aria-label="Limits">
         <div className="ai-head">
-          <div><h2>{person ? person.name || person.email : 'Everyone · default'}</h2>
-            <p className="sub" style={{ fontSize: 13 }}>{person ? (changed ? 'Different from the default.' : 'Follows the default. Change it to set it for this person only.') : 'What every account gets, unless it is changed for that person.'}</p></div>
+          <div><h2>{person ? (person.invite ? `${person.email} · invited` : person.name || person.email) : 'Everyone · default'}</h2>
+            <p className="sub" style={{ fontSize: 13 }}>{person ? (anyChanged ? 'Some limits are different from the default.' : 'Follows the default. Change a limit to set it for this person only.') : 'What every account gets, unless it is changed for that person.'}</p></div>
           <div className="ai-acts">
-            {person && <button className="bt" onClick={() => { setDraft({}); setDirty(true); }} disabled={!changed}>Reset to default</button>}
+            {person && <button className="bt" onClick={() => { setDraft({}); setDirty(true); }} disabled={!anyChanged}>Reset to default</button>}
             <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
           </div>
         </div>
-        <div className="ai-row">
-          <span className="ai-txt"><span>Calendar links</span><span className="sub">{changed ? `Default is ${defaults.calendars}` : 'Private and public iCal calendars, per account'}</span></span>
-          {changed && <><span className="chg">Changed</span><button className="lnk" onClick={() => setCals(defaults.calendars)}>Reset</button></>}
-          <label className="sr" htmlFor="lim-cal">Calendar links: most per account</label>
-          <select id="lim-cal" className="in gl-sel" value={cals} onChange={(e) => setCals(Number(e.target.value))}>
-            {CALENDAR_LIMIT_STEPS.map((n) => <option key={n} value={n}>{n === 1 ? '1 calendar' : `Up to ${n}`}</option>)}
-          </select>
-        </div>
-        <p className="sub" style={{ fontSize: 12, lineHeight: 1.5 }}>Lowering a limit removes nothing: people keep what they have, but only that many are read, and they can’t add more until they are under it. Every change is written to the audit log.</p>
+        {row('calendars', 'Calendar links', 'Private and public iCal calendars, per account', CALENDAR_LIMIT_STEPS.map((n) => ({ v: n, label: n === 1 ? '1 calendar' : `Up to ${n}` })))}
+        <div className="psec-row" style={{ paddingTop: 18 }}><span className="k">Included each month</span>
+          {!person && <button className="lnk" onClick={() => { setNote(null); setDirty(true); setDraft({ ...draft, ...Object.fromEntries(USAGE_KINDS.map((k) => [k, 0])) }); }}>No limit on all</button>}</div>
+        {USAGE_KINDS.map((k) => row(k, USAGE_NAMES[k], k === 'map' ? 'Place searches and routes, OpenStreetMap included' : k === 'hear' ? 'Minutes of speech turned into text' : `Through your keys and Workers AI`,
+          USAGE_STEPS[k].map((n) => ({ v: n, label: stepText(k, n) })), person?.used ? `${person.used[k].toLocaleString()} used this month` : undefined))}
+        <p className="sub" style={{ fontSize: 12, lineHeight: 1.5 }}>Monthly amounts start again on the 1st{resetDay ? ` (next: ${resetDay})` : ''}. At the limit, Niko skips what’s included and uses the person’s own keys; with none, it tells them when it starts again. Lowering a calendar limit removes nothing: only that many are read. Every change is written to the audit log.</p>
       </section>
     </div>
   </>;
@@ -846,8 +871,259 @@ function InviteDialog({ pay, stripeOn, mode, onClose, onSent }: { pay: PaymentSe
 }
 
 /** Everything about one person (or one invite), with what can be done. */
-function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemove, onRevoke, onNewCode, onAudit }: {
-  item: Item; pay: PaymentSettings | null; onClose: () => void; onToggle: (u: UserRow) => void; onPrices: (u: UserRow) => void; onUnlock: (u: UserRow) => void;
+// ---------------------------------------------------------------- set up Niko for one person (or invite)
+// Services the admin provides, per kind and in order; Workers AI on or off; the monthly amounts; and whether the person
+// may reorder. Keys are pasted once into a shared library and can be given to several people; they never come back out.
+type PKey = { id: string; kind: UsageKind; label: string; info: Record<string, string>; users: number; invites: number };
+type SetupReply = { setup: ProvidedSetup; builtins: Record<UsageKind, boolean>; limits: Partial<AccountLimits>; limitDefaults: AccountLimits; usage: Record<UsageKind, { included: number; own: number }> | null; joined: boolean };
+const SETUP_TABS: [UsageKind, string][] = [['brain', 'AI answers'], ['voice', 'Voice'], ['hear', 'Listening'], ['image', 'Pictures'], ['map', 'Maps']];
+const BUILTIN_NAME: Record<UsageKind, string> = { brain: 'Workers AI', voice: 'Workers AI voice', hear: 'Workers AI listening', image: 'Workers AI pictures (FLUX)', map: 'OpenStreetMap' };
+const stepText = (k: UsageKind, n: number) => (n ? `${n.toLocaleString()} ${USAGE_UNITS[k][1]}` : 'No limit');
+const usedText = (k: UsageKind, n: number) => (k === 'hear' ? Math.ceil(n / 60) : n).toLocaleString();
+/** "OpenAI · gpt-4.1-mini": the service's own name, not its id. */
+function serviceName(kind: UsageKind, info: Record<string, string>): string {
+  const list: { id: string; name: string; provider?: string; baseUrl?: string }[] = kind === 'brain' ? AI_PRESETS : kind === 'voice' ? VOICE_PROVIDERS : kind === 'hear' ? HEAR_PROVIDERS : kind === 'image' ? IMAGE_PROVIDERS : MAP_PROVIDERS;
+  const same = (a?: string, b?: string) => !!a && !!b && a.replace(/\/+$/, '').toLowerCase() === b.replace(/\/+$/, '').toLowerCase();
+  const p = (info.baseUrl && list.find((x) => same(x.baseUrl, info.baseUrl))) || list.find((x) => x.id === info.provider || x.provider === info.provider);
+  return [p && p.id !== 'other' ? p.name : info.provider, info.model].filter(Boolean).join(' · ');
+}
+const firstName = (s: string) => (s.includes('@') ? s : s.split(/\s+/)[0] || s);
+
+/** What the admin types for a new key: the service, then that service's own fields. */
+function KeyForm({ kind, value, onChange }: { kind: UsageKind; value: Record<string, string>; onChange: (v: Record<string, string>) => void }) {
+  const set = (k: string, v: string) => onChange({ ...value, [k]: v });
+  const presets: { id: string; name: string; note?: string }[] = kind === 'brain' ? AI_PRESETS : kind === 'voice' ? VOICE_PROVIDERS : kind === 'hear' ? HEAR_PROVIDERS : kind === 'image' ? IMAGE_PROVIDERS : MAP_PROVIDERS;
+  const preset = value.preset || presets[0]!.id;
+  const p = presets.find((x) => x.id === preset) as any;
+  const other = preset === 'other';
+  const models: string[] = p?.models ?? [];
+  const field = (key: string, label: string, opts: { secret?: boolean; placeholder?: string; list?: string[] } = {}) => (
+    <label className="kf" key={key}><span className="k">{label}</span>
+      <input className="in" type={opts.secret ? 'password' : 'text'} autoComplete={opts.secret ? 'new-password' : 'off'} spellCheck={false} value={value[key] ?? ''} placeholder={opts.placeholder} list={opts.list?.length ? `kf-${kind}-${key}` : undefined} onChange={(e) => set(key, e.target.value)} />
+      {opts.list?.length ? <datalist id={`kf-${kind}-${key}`}>{opts.list.map((m) => <option key={m} value={m} />)}</datalist> : null}
+    </label>
+  );
+  return <div className="kform">
+    <label className="kf"><span className="k">Service</span>
+      <select className="in" value={preset} onChange={(e) => onChange({ preset: e.target.value })}>{presets.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
+    {p?.note && <p className="sub small">{p.note}</p>}
+    {kind === 'map' ? (p?.fields as MapField[]).map((f) => field(f.key, f.label + (f.optional ? ' (optional)' : ''), { secret: f.secret, placeholder: f.placeholder }))
+      : <>
+        {other && field('baseUrl', 'Base URL', { placeholder: 'https://…/v1' })}
+        {field('model', kind === 'image' && p?.modelLabel ? p.modelLabel : 'Model', { placeholder: kind === 'brain' ? p?.example || 'model name' : models[0] ?? '', list: models })}
+        {kind === 'voice' && field('voice', 'Voice', { placeholder: p?.voices?.[0]?.id ?? 'voice id', list: (p?.voices ?? []).map((v: { id: string }) => v.id) })}
+        {(kind === 'voice' || kind === 'hear') && p?.provider === 'azure' && field('region', 'Region', { placeholder: 'southeastasia' })}
+        {field('apiKey', 'API key', { secret: true })}
+      </>}
+    {field('label', 'Name (optional)', { placeholder: 'Shown to them as an included service' })}
+  </div>;
+}
+/** The form, as the server expects it for that kind. */
+function keyBody(kind: UsageKind, v: Record<string, string>): Record<string, string> {
+  const t = (k: string) => (v[k] ?? '').trim();
+  if (kind === 'brain') { const p = AI_PRESETS.find((x) => x.id === (v.preset || 'openai'))!; return { baseUrl: p.id === 'other' ? t('baseUrl') : p.baseUrl, model: t('model') || p.example, apiKey: t('apiKey'), label: t('label') }; }
+  if (kind === 'map') { const p = MAP_PROVIDERS.find((x) => x.id === (v.preset || MAP_PROVIDERS[0]!.id))!; return { provider: p.id, ...Object.fromEntries(p.fields.map((f) => [f.key, t(f.key)])), label: t('label') }; }
+  const list: { id: string; provider: string; baseUrl?: string; models?: string[] }[] = kind === 'voice' ? VOICE_PROVIDERS : kind === 'hear' ? HEAR_PROVIDERS : IMAGE_PROVIDERS;
+  const p = list.find((x) => x.id === (v.preset || list[0]!.id))!;
+  return { provider: p.provider, baseUrl: p.id === 'other' ? t('baseUrl') : p.baseUrl ?? '', model: t('model') || p.models?.[0] || '', voice: t('voice'), region: t('region').toLowerCase(), apiKey: t('apiKey'), label: t('label') };
+}
+
+function SetupSheet({ target, onClose, onSaved }: { target: { who: 'user' | 'invite'; id: string; name: string }; onClose: () => void; onSaved: (text: string) => void }) {
+  const first = firstName(target.name);
+  const [data, setData] = useState<SetupReply | null>(null);
+  const [lib, setLib] = useState<PKey[]>([]);
+  const [tab, setTab] = useState<UsageKind | 'caps'>('brain');
+  const [keys, setKeys] = useState<Partial<Record<UsageKind, string[]>>>({});
+  const [order, setOrder] = useState<'free' | 'fixed'>('free');
+  const [builtins, setBuiltins] = useState<Record<UsageKind, boolean> | null>(null);
+  const [caps, setCaps] = useState<Partial<AccountLimits>>({});
+  const [adding, setAdding] = useState<null | { how: 'reuse' | 'new'; reuse: string; form: Record<string, string>; give: string[] }>(null);
+  const [others, setOthers] = useState<{ id: string; label: string; kind: 'user' | 'invite' }[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [addErr, setAddErr] = useState('');
+  const [dirty, setDirty] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const loadLib = useCallback(async () => { const r = await api<{ keys: PKey[] }>('/admin/setup/keys'); setLib(r.keys); }, []);
+  useEffect(() => {
+    (async () => {
+      try {
+        const [r] = await Promise.all([api<SetupReply>(`/admin/setup/${target.who}/${target.id}`), loadLib()]);
+        setData(r); setKeys(r.setup.keys); setOrder(r.setup.order); setBuiltins(r.builtins); setCaps(r.limits);
+      } catch (e) { setErr((e as Error).message); }
+    })();
+  }, [target.who, target.id, loadLib]);
+  const close = useCallback(() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; onClose(); }, [dirty, onClose]);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [close]);
+  useEffect(() => { box.current?.querySelector<HTMLElement>('button')?.focus(); }, [data]);
+  const touch = () => { setDirty(true); setErr(''); };
+  const kindKeys = (k: UsageKind) => keys[k] ?? [];
+  const setKind = (k: UsageKind, l: string[]) => { touch(); setKeys({ ...keys, [k]: l }); };
+  const move = (k: UsageKind, i: number, d: -1 | 1) => { const l = [...kindKeys(k)]; [l[i], l[i + d]] = [l[i + d]!, l[i]!]; setKind(k, l); };
+  const openAdd = async () => {
+    const k = tab as UsageKind;
+    const free = lib.filter((x) => x.kind === k && !kindKeys(k).includes(x.id));
+    setAdding({ how: free.length ? 'reuse' : 'new', reuse: free[0]?.id ?? '', form: {}, give: [] });
+    if (!others.length) {
+      try {
+        const r = await api<ListReply>('/admin/users?per=100');
+        setOthers(r.items.filter((i) => i.id !== target.id).map((i) => ({ id: i.id, kind: i.kind, label: i.kind === 'user' ? `${i.name || i.email}` : `${i.email} · invited` })));
+      } catch { /* the "also give to" list is optional */ }
+    }
+  };
+  const add = async () => {
+    if (!adding) return;
+    const k = tab as UsageKind;
+    setAddErr('');
+    if (kindKeys(k).length >= 6) return setAddErr('Up to 6 included services of one kind.');
+    if (adding.how === 'reuse') { if (adding.reuse) { setKind(k, [adding.reuse, ...kindKeys(k)]); setAdding(null); } return; }
+    setBusy(true);
+    try {
+      const give = { users: adding.give.filter((id) => others.find((o) => o.id === id)?.kind === 'user'), invites: adding.give.filter((id) => others.find((o) => o.id === id)?.kind === 'invite') };
+      const r = await api<{ key: { id: string } }>('/admin/setup/keys', { body: { kind: k, key: keyBody(k, adding.form), give } });
+      await loadLib();
+      setKind(k, [r.key.id, ...kindKeys(k)]); setAdding(null);
+    } catch (e) { setAddErr((e as Error).message); } finally { setBusy(false); }
+  };
+  const save = async () => {
+    setBusy(true); setErr('');
+    try {
+      await api(`/admin/setup/${target.who}/${target.id}`, { method: 'PUT', body: { keys, order, builtins, limits: caps } });
+      setDirty(false); onSaved(target.who === 'user' ? `Saved. ${first} sees it the next time Niko answers.` : `Saved. ${first} starts with this when they join.`);
+    } catch (e) { setErr((e as Error).message); setBusy(false); }
+  };
+  if (!data || !builtins) return <div className="scrim"><div className="dialog" role="dialog" aria-modal="true" aria-label="Set up Niko">{err ? <><p className="err" role="alert">{err}</p><div className="dialog-acts"><button className="bt" onClick={onClose}>Close</button></div></> : <p className="sub">Loading…</p>}</div></div>;
+  const defs = data.limitDefaults;
+  const capOf = (k: UsageKind) => caps[k] ?? defs[k];
+  const count = (k: UsageKind) => kindKeys(k).length + (builtins[k] ? 1 : 0);
+  const k = tab === 'caps' ? null : tab;
+  const libOf = (id: string) => lib.find((x) => x.id === id);
+  const freeLib = k ? lib.filter((x) => x.kind === k && !kindKeys(k).includes(x.id)) : [];
+  const provName = (x: PKey) => serviceName(x.kind, x.info);
+  return (
+    <div className="scrim" onClick={(e) => { if (e.target === e.currentTarget) close(); }}>
+      <div ref={box} className="dialog sheet" role="dialog" aria-modal="true" aria-labelledby="suh">
+        <div className="psec-row" style={{ alignItems: 'flex-start' }}>
+          <div><h2 id="suh">Set up Niko for {first}</h2><p className="sub">{data.joined ? `What ${first} gets included. They can still add their own keys.` : `${target.name} hasn’t joined yet. This is copied to their account when they accept the invite.`}</p></div>
+          <button className="bt x" onClick={close} aria-label="Close">✕</button>
+        </div>
+        <div className="chips" role="tablist" aria-label="Parts of Niko">
+          {SETUP_TABS.map(([t, name]) => <button key={t} role="tab" className="chip" aria-selected={tab === t} aria-pressed={tab === t} onClick={() => { setTab(t); setAdding(null); }}>{name} <b>{count(t)}</b></button>)}
+          <button role="tab" className="chip" aria-selected={tab === 'caps'} aria-pressed={tab === 'caps'} onClick={() => { setTab('caps'); setAdding(null); }}>Usage cap</button>
+        </div>
+        {k && <section aria-label={`${SETUP_TABS.find((t) => t[0] === k)![1]} services`} className="svc">
+          <p className="k">{SETUP_TABS.find((t) => t[0] === k)![1]} · in the order Niko tries them</p>
+          {kindKeys(k).map((id, i) => {
+            const x = libOf(id);
+            return <div key={id} className="srow">
+              <span className="snum">{i + 1}</span>
+              <span className="ai-txt"><span>{x?.label ?? 'Removed key'}</span><span className="sub">{x ? `${provName(x)} · key ending ${x.info.hint || '····'}` : 'No longer kept'}</span></span>
+              <span className="tag own">Your key</span>
+              <button className="bt sm arrow" onClick={() => move(k, i, -1)} disabled={i === 0} aria-label={`Move ${x?.label ?? 'key'} up`}>↑</button>
+              <button className="bt sm arrow" onClick={() => move(k, i, 1)} disabled={i === kindKeys(k).length - 1} aria-label={`Move ${x?.label ?? 'key'} down`}>↓</button>
+              <button className="lnk" onClick={() => setKind(k, kindKeys(k).filter((y) => y !== id))}>Remove</button>
+            </div>;
+          })}
+          <div className="srow">
+            <span className="snum">{kindKeys(k).length + 1}</span>
+            <span className="ai-txt"><span>{BUILTIN_NAME[k]}</span><span className="sub">{k === 'map' ? 'Built in. Always kept as the last resort for places.' : builtins[k] ? 'Built in · counted in the usage cap' : k === 'brain' && !kindKeys('brain').length ? `Removed · ${first} needs an AI key of their own to get answers` : `Removed for ${first}`}</span></span>
+            {k === 'map' ? <span className="tag">Always on</span>
+              : <Switch on={builtins[k]} onChange={() => { touch(); setBuiltins({ ...builtins, [k]: !builtins[k] }); }} label={`${BUILTIN_NAME[k]} for ${first}`} />}
+          </div>
+          <p className="sub small">Then {first}’s own keys{order === 'free' ? `, in whatever order ${first} sets` : ''}. {k === 'voice' ? 'The on-device voice always stays last.' : k === 'hear' ? 'The device’s own recognition always stays last.' : ''}</p>
+          {!adding && kindKeys(k).length < 6 && <button className="bt" style={{ alignSelf: 'flex-start' }} onClick={openAdd}>＋ Add a service with your key</button>}
+          {adding && <div className="addbox">
+            <div role="group" aria-label="Which key" className="segs">
+              <button className="seg" aria-pressed={adding.how === 'reuse'} disabled={!freeLib.length} onClick={() => setAdding({ ...adding, how: 'reuse' })}>A key you’ve added before</button>
+              <button className="seg" aria-pressed={adding.how === 'new'} onClick={() => setAdding({ ...adding, how: 'new' })}>A new key</button>
+            </div>
+            {adding.how === 'reuse' ? <>
+              <div className="ai-list">{freeLib.map((x) => (
+                <button key={x.id} className="who-row" aria-pressed={adding.reuse === x.id} onClick={() => setAdding({ ...adding, reuse: x.id })}>
+                  <span className="who-txt"><b>{x.label}</b><span>{provName(x)} · ending {x.info.hint || '····'}</span></span><span className="who-badge">{x.users + x.invites} {x.users + x.invites === 1 ? 'person' : 'people'}</span>
+                </button>))}</div>
+              <p className="sub small">The same key, shared. Taking it away from {first} later doesn’t affect anyone else; replacing it in Keys you’ve added updates everyone.</p>
+            </> : <>
+              <KeyForm kind={k} value={adding.form} onChange={(form) => setAdding({ ...adding, form })} />
+              <p className="sub small">Kept encrypted. Nobody sees it again, you included. It is only ever sent to that service.</p>
+              {others.length > 0 && <details className="give"><summary>Also give it to{adding.give.length ? ` · ${adding.give.length}` : ''}</summary>
+                <div className="give-list">{others.map((o) => <label key={o.id} className="give-row"><input type="checkbox" checked={adding.give.includes(o.id)} onChange={(e) => setAdding({ ...adding, give: e.target.checked ? [...adding.give, o.id] : adding.give.filter((x) => x !== o.id) })} /><span>{o.label}</span></label>)}</div>
+                <p className="sub small">One paste, saved once. Each person gets it at the top of their list, straight away.</p></details>}
+            </>}
+            {addErr && <p className="err" role="alert">{addErr}</p>}
+            <div className="dialog-acts"><button className="bt" onClick={() => { setAdding(null); setAddErr(''); }}>Cancel</button>
+              <button className="pri" style={{ height: 44, fontSize: 14 }} disabled={busy || (adding.how === 'reuse' && !adding.reuse)} onClick={add}>{adding.how === 'reuse' ? 'Add' : busy ? 'Testing…' : 'Test and add'}</button></div>
+          </div>}
+        </section>}
+        {tab === 'caps' && <section aria-label="Usage cap" className="svc">
+          <p className="sub small">How much {first} can use each month through your keys and Niko’s built-in services. Their own keys are never counted or capped. At the cap, Niko moves on to their own keys; with none, it tells them when it resets.</p>
+          {USAGE_KINDS.map((u) => {
+            const changed = caps[u] !== undefined && caps[u] !== defs[u];
+            return <div key={u} className="ai-row">
+              <span className="ai-txt"><span>{USAGE_NAMES[u]}</span><span className="sub">{changed ? `Default is ${stepText(u, defs[u]).toLowerCase()}` : 'Follows the default'}{data.usage ? ` · ${usedText(u, data.usage[u].included)} used this month` : ''}</span></span>
+              {changed && <><span className="chg">Changed</span><button className="lnk" onClick={() => { touch(); const c = { ...caps }; delete c[u]; setCaps(c); }}>Reset</button></>}
+              <label className="sr" htmlFor={`cap-${u}`}>{USAGE_NAMES[u]} each month</label>
+              <select id={`cap-${u}`} className="in gl-sel" value={capOf(u)} onChange={(e) => { touch(); const v = Number(e.target.value); const c = { ...caps }; if (v === defs[u]) delete c[u]; else c[u] = v; setCaps(c); }}>
+                {USAGE_STEPS[u].map((n) => <option key={n} value={n}>{stepText(u, n)}</option>)}
+              </select>
+            </div>;
+          })}
+          <p className="sub small">The month runs to the 1st (UTC). The same amounts are on the Limits page.</p>
+        </section>}
+        <section className="svc" aria-label={`What ${first} can change`}>
+          <p className="k">What {first} can change</p>
+          <div className="segs col">
+            <button className="seg opt" aria-pressed={order === 'free'} onClick={() => { touch(); setOrder('free'); }}><b>The order, and add their own keys</b><span>Recommended. Your keys stay; {first} can’t see or remove them.</span></button>
+            <button className="seg opt" aria-pressed={order === 'fixed'} onClick={() => { touch(); setOrder('fixed'); }}><b>Only add their own keys</b><span>Your services stay first, in your order; their keys come after.</span></button>
+          </div>
+        </section>
+        {err && <p className="err" role="alert">{err}</p>}
+        <div className="dialog-acts"><button className="bt" onClick={close}>Cancel</button><button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy || !dirty}>{busy && !adding ? 'Saving…' : `Save for ${first}`}</button></div>
+      </div>
+    </div>
+  );
+}
+
+/** The library: every key you've added, who has it, and replacing or removing it for everyone. */
+function KeysLibrary({ guard }: { guard: (e: unknown) => void }) {
+  const [lib, setLib] = useState<PKey[] | null>(null);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [replacing, setReplacing] = useState<{ id: string; apiKey: string } | null>(null);
+  const load = useCallback(async () => { try { setLib((await api<{ keys: PKey[] }>('/admin/setup/keys')).keys); } catch (e) { guard(e); } }, [guard]);
+  useEffect(() => { void load(); }, [load]);
+  if (!lib) return null;
+  const names = Object.fromEntries(SETUP_TABS) as Record<UsageKind, string>;
+  const replace = async () => {
+    if (!replacing) return;
+    try { await api(`/admin/setup/keys/${replacing.id}`, { method: 'PATCH', body: { apiKey: replacing.apiKey } }); setReplacing(null); setNote({ ok: true, text: 'Replaced. Everyone with it uses the new key now.' }); await load(); }
+    catch (e) { setNote({ ok: false, text: (e as Error).message }); }
+  };
+  const remove = async (x: PKey) => {
+    if (!window.confirm(`Remove “${x.label}”? It’s taken away from ${x.users + x.invites} ${x.users + x.invites === 1 ? 'person' : 'people'} straight away.`)) return;
+    try { await api(`/admin/setup/keys/${x.id}`, { method: 'DELETE' }); setNote({ ok: true, text: `“${x.label}” was removed from everyone.` }); await load(); } catch (e) { guard(e); }
+  };
+  return <section className="g card" aria-label="Keys you’ve added" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    <h2 style={{ fontSize: 21, fontWeight: 500 }}>Keys you’ve added</h2>
+    <p className="sub" style={{ fontSize: 13 }}>Give them to people from Users → a person → Set up Niko. Keys are kept encrypted and never shown again.</p>
+    {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
+    {!lib.length && <p className="sub small">None yet.</p>}
+    {lib.map((x) => <div key={x.id} className="ai-row" style={{ flexWrap: 'wrap' }}>
+      <span className="ai-txt"><span>{x.label}</span><span className="sub">{names[x.kind]} · {serviceName(x.kind, x.info)} · ending {x.info.hint || '····'} · {x.users} {x.users === 1 ? 'person' : 'people'}{x.invites ? `, ${x.invites} invited` : ''}</span></span>
+      {replacing?.id === x.id ? <>
+        <label className="sr" htmlFor={`rk-${x.id}`}>New key for {x.label}</label>
+        <input id={`rk-${x.id}`} className="in" style={{ width: 240, height: 44 }} type="password" autoComplete="new-password" placeholder="Paste the new key" value={replacing.apiKey} onChange={(e) => setReplacing({ ...replacing, apiKey: e.target.value })} />
+        <button className="bt sm" onClick={() => setReplacing(null)}>Cancel</button><button className="bt sm fill" disabled={!replacing.apiKey.trim()} onClick={replace}>Test and replace</button>
+      </> : <><button className="lnk" onClick={() => setReplacing({ id: x.id, apiKey: '' })}>Replace key</button><button className="lnk" onClick={() => remove(x)}>Remove</button></>}
+    </div>)}
+  </section>;
+}
+
+function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemove, onRevoke, onNewCode, onAudit, onSetup }: {
+  item: Item; pay: PaymentSettings | null; onClose: () => void; onSetup: (t: { who: 'user' | 'invite'; id: string; name: string }) => void; onToggle: (u: UserRow) => void; onPrices: (u: UserRow) => void; onUnlock: (u: UserRow) => void;
   onRemove: (u: UserRow) => void; onRevoke: (i: InviteRow) => void; onNewCode: (i: InviteRow) => void; onAudit: (id: string) => void;
 }) {
   const [recent, setRecent] = useState<AuditRow[] | null>(null);
@@ -871,6 +1147,9 @@ function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemov
           <span className="person-id"><b>Invited</b><span className="sub ell">{item.email}</span><span className="sub small">{item.role === 'admin' ? 'Admin' : 'Member'} · invited {when(item.createdAt)} · expires {fmtDate(item.expiresAt)}</span></span>
           <button className="bt x" onClick={onClose} aria-label="Close">✕</button></div>
         <div className="psec"><span className="k">Invite</span><span className={'tone-' + (p.tone ?? 'plain')} style={{ fontSize: 15 }}>{p.text}</span></div>
+        <div className="psec"><div className="psec-row"><span className="k">Engine</span><span className={'tag' + (item.engineSetup?.keys ? ' own' : '')}>{item.engineSetup?.keys ? 'Set up' : 'Default'}</span></div>
+          <span style={{ fontSize: 15 }}>{engineLine(item.engineSetup)}</span><span className="sub small">Copied to their account when they join.</span>
+          <button className="bt" style={{ alignSelf: 'flex-start' }} onClick={() => onSetup({ who: 'invite', id: item.id, name: item.email })}>Set up Niko for them</button></div>
         <div className="psec"><span className="k">Actions</span><div className="acts">
           {item.hasCode && item.codeTries >= 5 && <button className="bt" onClick={() => onNewCode(item)}>Send new code</button>}
           <button className="bt" onClick={() => onRevoke(item)}>{item.paidAt ? 'Revoke and refund' : 'Revoke invite'}</button>
@@ -891,6 +1170,9 @@ function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemov
       <div className="psec"><span className="k">Payment</span><span className={'tone-' + (p.tone ?? 'plain')} style={{ fontSize: 15 }}>{p.text}</span><span className="sub small">Status: {statusText(item)}</span></div>
       {payer && pay && <div className="psec"><div className="psec-row"><span className="k">Plan prices</span><span className={'tag' + (item.keptPrices ? ' own' : '')}>{item.keptPrices ? (item.pricesFrom === 'admin' ? 'Own' : `Own · kept${item.pricesAt ? ' ' + fmtDate(item.pricesAt) : ''}`) : 'Default'}</span></div>
         <span style={{ fontSize: 15 }}>{offersLine(item.keptPrices ?? plansOffered(pay)) || 'No plans on'}</span><span className="sub small">What they pay when they next choose a plan.</span></div>}
+      <div className="psec"><div className="psec-row"><span className="k">Engine</span><span className={'tag' + (item.engineSetup?.keys ? ' own' : '')}>{item.engineSetup?.keys ? 'Set up' : 'Default'}</span></div>
+        <span style={{ fontSize: 15 }}>{engineLine(item.engineSetup)}</span>
+        <button className="bt" style={{ alignSelf: 'flex-start' }} onClick={() => onSetup({ who: 'user', id: item.id, name: item.name || item.email })}>Set up Niko for {firstName(item.name || item.email)}</button></div>
       {(payer || unpaid) && <div className="psec"><span className="k">Actions</span><div className="acts">
         {payer && pay && <button className="bt" onClick={() => onPrices(item)}>Change prices</button>}
         {payer && <button className="bt" onClick={() => onUnlock(item)}>Unlock</button>}
@@ -903,6 +1185,7 @@ function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemov
     </aside>
   );
 }
+const engineLine = (e?: { keys: number; order: 'free' | 'fixed' }) => (e?.keys ? `${e.keys} ${e.keys === 1 ? 'service' : 'services'} with your keys · ${e.order === 'fixed' ? 'yours stay first' : 'they can reorder'}` : 'Niko’s built-in services and their own keys.');
 /** "plan_prices.user" → "Plan prices user": readable enough without a table of every action. */
 const actionLabel = (a: string) => { const s = a.replace(/[._]/g, ' '); return s.charAt(0).toUpperCase() + s.slice(1); };
 
@@ -921,6 +1204,7 @@ function PeopleTab({ onSignedOut, onOpenPayments, onAudit }: { onSignedOut: () =
   const [copied, setCopied] = useState(false);
   const [unlocking, setUnlocking] = useState<UserRow | null>(null);
   const [pricing, setPricing] = useState<UserRow | null>(null);
+  const [setting, setSetting] = useState<{ who: 'user' | 'invite'; id: string; name: string } | null>(null);
   const said = (text: string, ok = true, code?: string) => { setNote({ ok, text, code }); setCopied(false); };
   const guard = useCallback((e: unknown) => { if (e instanceof ApiError && e.status === 401) onSignedOut(); else setNote({ ok: false, text: (e as Error).message }); }, [onSignedOut]);
   const load = useCallback(async () => {
@@ -1015,7 +1299,8 @@ function PeopleTab({ onSignedOut, onOpenPayments, onAudit }: { onSignedOut: () =
       {data && <Pager page={data.page} pages={data.pages} total={data.total} per={data.per} pers={[10, 25, 50, 100]} onPage={setPage} onPer={setPer} />}
     </section>
     <p className="sub" style={{ fontSize: 13 }}>Paid sign-ups stay off until you switch them on; their paid time starts then. Unpaid sign-ups are removed after 7 days. Prices are fixed when the invite is sent. Card details go to Stripe, never to Niko. Every change here is written to the audit log.</p>
-    {selItem && <PersonPanel item={selItem} pay={pay} onClose={close} onToggle={toggle} onPrices={setPricing} onUnlock={setUnlocking} onRemove={remove} onRevoke={revoke} onNewCode={newCode} onAudit={onAudit} />}
+    {selItem && <PersonPanel item={selItem} pay={pay} onClose={close} onToggle={toggle} onPrices={setPricing} onUnlock={setUnlocking} onRemove={remove} onRevoke={revoke} onNewCode={newCode} onAudit={onAudit} onSetup={setSetting} />}
+    {setting && <SetupSheet target={setting} onClose={() => setSetting(null)} onSaved={async (text) => { setSetting(null); await after(text); }} />}
     {inviting && <InviteDialog pay={pay} stripeOn={data?.stripe ?? false} mode={data?.stripeMode ?? 'test'} onClose={() => setInviting(false)} onSent={async (text, ok, code) => { setInviting(false); said(text, ok, code); setShow('all'); setQ(''); await load(); }} />}
     {pricing && pay && <PricesDialog user={pricing} defaults={plansOffered(pay)} onClose={() => setPricing(null)} onDone={async (text) => { setPricing(null); await after(text); }} />}
     {unlocking && <UnlockDialog user={unlocking} onClose={() => setUnlocking(null)} onDone={async (text) => { setUnlocking(null); await after(text); }} />}

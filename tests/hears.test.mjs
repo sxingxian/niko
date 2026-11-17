@@ -1,6 +1,6 @@
 // Speech in: each service is called the way it expects, uploads are checked, and the order switches on failure.
 import assert from 'node:assert/strict';
-import { transcribeWithKey, audioProblem, hear, workersStt } from '../apps/api/src/hears.ts';
+import { transcribeWithKey, audioProblem, hear, workersStt, wavSeconds } from '../apps/api/src/hears.ts';
 import { store, fakeDb } from './brains-stubs.mjs';
 
 let pass = 0;
@@ -81,5 +81,11 @@ await ok('your own speech-to-text server: the saved address with /v1, whisper-1 
   store.creds = { 'self-hosted-hear': { baseUrl: 'https://whisper.example.com/v1', apiKey: 'S', model: 'Systran/faster-whisper-small' } };
   await hear({}, fakeDb, { id: 'u', engine: { hears: ['self-hosted'] } }, wav, 'en');
   assert.equal(last.url, 'https://whisper.example.com/v1/audio/transcriptions'); assert.equal(last.init.headers.authorization, 'Bearer S'); assert.equal(last.init.body.get('model'), 'Systran/faster-whisper-small');
+});
+await ok('a recording’s length is read from its WAV header, so listening is counted in seconds', async () => {
+  const w = new Uint8Array(44 + 16000 * 2 * 3); new TextEncoder().encodeInto('RIFF', w); new TextEncoder().encodeInto('WAVE', w.subarray(8));
+  const v = new DataView(w.buffer); v.setUint16(22, 1, true); v.setUint32(24, 16000, true); v.setUint16(34, 16, true);
+  assert.equal(wavSeconds(w), 3);
+  assert.equal(wavSeconds(new Uint8Array(10)), 0);
 });
 console.log(`${pass} speech-in checks passed`);

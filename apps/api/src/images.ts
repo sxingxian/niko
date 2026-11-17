@@ -16,6 +16,8 @@ import type { Env } from './env';
 import { BrainFail, providerMessage } from './brains';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
+import { arranged, withProvided } from './provided';
+import { usageGate } from './usage';
 
 export interface ImageKey extends ImageKeyInfo { apiKey: string }
 export interface Picture { bytes: Uint8Array; type: string }
@@ -52,7 +54,11 @@ export async function saveImageKeys(env: Env, db: Db, userId: string, keys: Imag
   const secret = { keys: keys.map(({ id, label, provider, model, baseUrl, apiKey }) => ({ id, label, provider, model, baseUrl, apiKey })) };
   await db.insert(connections).values({ id: crypto.randomUUID(), userId, provider: 'image-keys', secretEnc: await seal(env.ENCRYPTION_KEY, secret), meta: { label: `${keys.length} image key${keys.length === 1 ? '' : 's'}` } });
 }
-export const imageKeyInfo = (k: ImageKey): ImageKeyInfo => ({ id: k.id, label: k.label, provider: k.provider, model: k.model, baseUrl: k.baseUrl });
+export const imageKeyInfo = (k: ImageKey & { provided?: boolean }): ImageKeyInfo => ({ id: k.id, label: k.label, provider: k.provider, model: k.model, baseUrl: k.baseUrl, ...(k.provided ? { provided: true } : {}) });
+/** This person's own keys with the ones the admin provides added (for using and listing, never for saving). */
+export async function imageKeys(env: Env, db: Db, user: { id: string; provided?: unknown }): Promise<(ImageKey & { provided?: boolean })[]> {
+  return withProvided<ImageKey>(env, db, user, 'image', await loadImageKeys(env, db, user.id));
+}
 export function defaultImageLabel(k: { provider: ImageProvider; baseUrl: string }): string {
   if (k.provider !== 'openai') return { google: 'Google Gemini', stability: 'Stability AI', fal: 'fal', replicate: 'Replicate', bfl: 'Black Forest Labs', ideogram: 'Ideogram' }[k.provider];
   try {
@@ -345,14 +351,15 @@ export interface Painted extends Picture { used: ImageSource; label: string; ms:
  * rest; a picture ends it. A service that declines the request is not rested: the next one is asked instead.
  * `only` tries one service (the Engine screen's Test), with an unsaved key where one is given.
  */
-export async function paint(env: Env, db: Db, user: { id: string; engine: unknown }, prompt: string, shape: ImageShape, only?: { entry: ImageSource; key?: ImageKey }, off: readonly string[] = [], asked = ''): Promise<Painted> {
+export async function paint(env: Env, db: Db, user: { id: string; engine: unknown; provided?: unknown; accountLimits?: unknown }, prompt: string, shape: ImageShape, only?: { entry: ImageSource; key?: ImageKey }, off: readonly string[] = [], asked = ''): Promise<Painted> {
   const engine = (user.engine ?? {}) as EnginePrefs;
   let keys: ImageKey[] | null = null;
-  let order = only ? [only.entry] : imageOrder(engine);
+  let order = only ? [only.entry] : arranged(user, 'image', imageOrder(engine));
+  const gate = await usageGate(db, user, 'image');
   // Services the admin has turned off for this account are skipped; with pictures off altogether, none is asked.
   if (off.includes('sec:images')) throw new BrainFail('not on account', 'refused', 0, 'Pictures aren’t available on your account.');
   if (off.length) {
-    keys = await loadImageKeys(env, db, user.id);
+    keys = await imageKeys(env, db, user);
     order = order.filter((e) => aiAllowed(off, imageOption(e, only?.key && only.entry === e ? only.key : keys!.find((k) => `ikey:${k.id}` === e))));
     if (!order.length && only) throw new BrainFail('not on account', 'refused', 0, 'That service isn’t available on your account.');
   }
@@ -365,6 +372,7 @@ export async function paint(env: Env, db: Db, user: { id: string; engine: unknow
   const declined: string[] = [];
   try {
     for (const entry of [...ready, ...resting]) {
+      if (!only && gate.blocked(entry)) continue;
       const t0 = Date.now();
       let label = 'Cloudflare';
       try {
@@ -376,12 +384,13 @@ export async function paint(env: Env, db: Db, user: { id: string; engine: unknow
           if (!k) throw new BrainFail('no server', 'refused', 6 * HOUR, 'Your image server is not set up yet.');
           pic = await paintWithKey(k, prompt, shape);
         } else {
-          const k = only?.key ?? (keys ??= await loadImageKeys(env, db, user.id)).find((x) => `ikey:${x.id}` === entry);
+          const k = only?.key ?? (keys ??= await imageKeys(env, db, user)).find((x) => `ikey:${x.id}` === entry);
           if (!k) throw new BrainFail('key not found', 'refused', 6 * HOUR, 'That key is no longer saved.');
           label = k.label || defaultImageLabel(k);
           pic = await paintWithKey(k, prompt, shape);
         }
         if (!only && rest[entry]) { delete rest[entry]; changed = true; }
+        if (!only?.key) await gate.count(entry);
         return { ...pic, used: entry, label, ms: Date.now() - t0 };
       } catch (e) {
         if (e instanceof Declined) { declined.push(`${label}${e.detail ? `: ${e.detail}` : ''}`); console.warn(`image ${entry} declined the request`); continue; }
@@ -393,6 +402,7 @@ export async function paint(env: Env, db: Db, user: { id: string; engine: unknow
     }
     // Every service that answered declined it: that is the answer, rather than whatever else went wrong.
     if (declined.length) throw new Declined(declined.join(' · ').slice(0, 400));
+    if (gate.anyBlocked()) throw new BrainFail('included used up', 'limit', 0, gate.message);
     throw last ?? new Error('No image service could make that picture.');
   } finally {
     if (changed && !only?.key) await db.update(users).set({ engine: { ...engine, imageRest: rest } as any }).where(eq(users.id, user.id)).catch(() => undefined);

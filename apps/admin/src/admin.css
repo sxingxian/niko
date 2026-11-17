@@ -265,3 +265,35 @@ body { background: #07090d; }
   .who { flex-direction: row; align-items: center; justify-content: space-between; margin-top: 0; padding: 8px 6px 0; }
   .who .nv.line { height: 36px; padding: 0 14px; }
 }
+
+/* Set up Niko for a person */
+.dialog.sheet { width: min(760px, 100%); }
+.sheet .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.sheet .chip[aria-pressed='true'] { background: #fff; color: #07090d; border-color: #fff; }
+.svc { display: flex; flex-direction: column; gap: 8px; }
+.srow { display: flex; align-items: center; gap: 10px; min-height: 60px; padding: 8px 12px; border-radius: 16px; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.1); }
+.snum { width: 26px; height: 26px; flex: none; border-radius: 50%; border: 1px solid rgba(255,255,255,.3); display: inline-flex; align-items: center; justify-content: center; font: 500 12px 'JetBrains Mono', monospace; }
+.bt.arrow { min-width: 40px; width: 40px; padding: 0; }
+.addbox { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 18px; border: 1px dashed rgba(255,255,255,.3); }
+.kform { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+.kform > .sub { grid-column: 1 / -1; }
+.kf { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.kf .in { height: 44px; font-size: 15px; }
+.give summary { cursor: pointer; font-size: 14px; padding: 8px 0; }
+.give-list { display: flex; flex-direction: column; max-height: 180px; overflow-y: auto; gap: 2px; }
+.give-row { display: flex; align-items: center; gap: 10px; min-height: 40px; font-size: 14px; cursor: pointer; }
+.give-row input { width: 18px; height: 18px; accent-color: #9fdcf3; }
+.segs.col { flex-direction: column; }
+.seg.opt { height: auto; min-height: 56px; padding: 10px 18px; border-radius: 18px; text-align: left; display: flex; flex-direction: column; gap: 2px; }
+.seg.opt span { font-size: 13px; font-weight: 400; opacity: .75; }
+@media (max-width: 620px) {
+  .kform { grid-template-columns: 1fr; }
+  .srow { flex-wrap: wrap; }
+  .srow .ai-txt { flex-basis: calc(100% - 40px); }
+}
+@media (max-width: 620px) {
+  .sheet .ai-row { flex-wrap: wrap; padding: 8px 0; }
+  .sheet .ai-row .ai-txt { flex-basis: 100%; }
+  .sheet .ai-row .gl-sel { flex: 1; max-width: none; }
+  .dialog.sheet { padding: 22px 18px; }
+}

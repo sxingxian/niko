@@ -7,6 +7,8 @@ import { aiAllowed, aiProviderOf, brainOption, brainOrder, MAX_AI_KEYS, NOT_CHAT
 import type { Env } from './env';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
+import { arranged, providedFor } from './provided';
+import { usageGate } from './usage';
 
 export type Msg = { role: string; content: string };
 interface AiKey extends AiKeyInfo { apiKey: string }
@@ -162,7 +164,13 @@ export async function saveKeys(env: Env, db: Db, userId: string, keys: AiKey[]):
   await db.insert(connections).values({ id: crypto.randomUUID(), userId, provider: 'custom-ai', secretEnc: await seal(env.ENCRYPTION_KEY, secret), meta: { label: `${keys.length} key${keys.length === 1 ? '' : 's'}` } });
 }
 
-export const keyInfo = (k: AiKey): AiKeyInfo => ({ id: k.id, label: k.label, provider: k.provider, baseUrl: k.baseUrl, model: k.model });
+export const keyInfo = (k: AiKey & { provided?: boolean }): AiKeyInfo => ({ id: k.id, label: k.label, provider: k.provider, baseUrl: k.baseUrl, model: k.model, ...(k.provided ? { provided: true } : {}) });
+/** A person's own AI keys with the ones the admin provides added (for answering and listing, never for saving). */
+export async function brainKeys(env: Env, db: Db, user: { id: string; provided?: unknown }): Promise<AiKey[]> {
+  const own = await loadKeys(env, db, user.id);
+  const extra = await providedFor<Omit<AiKey, 'id' | 'label'>>(env, db, user, 'brain');
+  return [...own, ...extra.map((k) => ({ id: k.id, label: k.label, baseUrl: String(k.baseUrl ?? ''), model: String(k.model ?? ''), apiKey: String(k.apiKey ?? ''), provider: aiProviderOf(k.baseUrl), provided: true } as AiKey))];
+}
 
 // ---------------------------------------------------------------- running a brain, and the order
 async function runEntry(env: Env, db: Db, userId: string, entry: BrainEntry, size: EnginePrefs['model'], msgs: Msg[], keys: () => Promise<AiKey[]>): Promise<string> {
@@ -178,9 +186,9 @@ async function runEntry(env: Env, db: Db, userId: string, entry: BrainEntry, siz
 }
 
 /** Tries one brain on its own (the Engine screen's Test button). A success ends its rest. */
-export async function testEntry(env: Env, db: Db, user: { id: string; engine: unknown }, entry: BrainEntry, size: EnginePrefs['model']): Promise<number> {
+export async function testEntry(env: Env, db: Db, user: { id: string; engine: unknown; provided?: unknown }, entry: BrainEntry, size: EnginePrefs['model']): Promise<number> {
   const t0 = Date.now();
-  await runEntry(env, db, user.id, entry, size, [{ role: 'system', content: 'Reply with the single word: ready' }, { role: 'user', content: 'Are you there?' }], () => loadKeys(env, db, user.id));
+  await runEntry(env, db, user.id, entry, size, [{ role: 'system', content: 'Reply with the single word: ready' }, { role: 'user', content: 'Are you there?' }], () => brainKeys(env, db, user));
   const engine = (user.engine ?? {}) as EnginePrefs;
   if (engine.rest?.[entry]) { const rest = { ...engine.rest }; delete rest[entry]; await db.update(users).set({ engine: { ...engine, rest } as any }).where(eq(users.id, user.id)); }
   return Date.now() - t0;
@@ -191,11 +199,13 @@ export async function testEntry(env: Env, db: Db, user: { id: string; engine: un
  * available, and tried last otherwise (a limit may have reset early). Each failure sets that brain's rest; an
  * answer ends it. Returns the reply and which brain gave it.
  */
-export async function think(env: Env, db: Db, user: { id: string; engine: unknown }, msgs: Msg[], off: readonly string[] = []): Promise<{ reply: string; used: BrainEntry; first: BrainEntry }> {
+export async function think(env: Env, db: Db, user: { id: string; engine: unknown; provided?: unknown; accountLimits?: unknown }, msgs: Msg[], off: readonly string[] = []): Promise<{ reply: string; used: BrainEntry; first: BrainEntry }> {
   const engine = (user.engine ?? {}) as EnginePrefs;
   let keyList: Promise<AiKey[]> | null = null;
-  const keys = () => (keyList ??= loadKeys(env, db, user.id));
-  let order = brainOrder(engine);
+  const keys = () => (keyList ??= brainKeys(env, db, user));
+  // The admin's services come first when the admin fixed the order; included services stop at the month's amount.
+  let order = arranged(user, 'brain', brainOrder(engine));
+  const gate = await usageGate(db, user, 'brain');
   // Brains the admin has turned off for this account are skipped (and kept in the order for when they come back).
   if (off.length) { const ks = await keys(); order = order.filter((b) => aiAllowed(off, brainOption(b, ks.find((k) => `key:${k.id}` === b)?.baseUrl))); }
   if (!order.length) {
@@ -211,9 +221,11 @@ export async function think(env: Env, db: Db, user: { id: string; engine: unknow
   let last: unknown = null;
   try {
     for (const entry of [...ready, ...resting]) {
+      if (gate.blocked(entry)) continue;
       try {
         const reply = await runEntry(env, db, user.id, entry, engine.model, msgs, keys);
         if (rest[entry]) { delete rest[entry]; changed = true; }
+        await gate.count(entry);
         return { reply, used: entry, first: order[0]! };
       } catch (e) {
         last = e;
@@ -224,6 +236,7 @@ export async function think(env: Env, db: Db, user: { id: string; engine: unknow
         console.warn(`brain ${entry} failed (${f.why}): ${f.message.slice(0, 200)}`);
       }
     }
+    if (gate.anyBlocked()) throw new BrainFail('included used up', 'limit', 0, gate.message);
     throw last ?? new Error('No brain answered.');
   } finally {
     if (changed) await db.update(users).set({ engine: { ...engine, rest } as any }).where(eq(users.id, user.id)).catch(() => undefined);

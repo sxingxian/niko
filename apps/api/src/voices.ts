@@ -8,6 +8,7 @@ import type { Env } from './env';
 import { BrainFail, providerMessage } from './brains';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
+import { withProvided } from './provided';
 
 export interface VoiceKey extends VoiceKeyInfo { apiKey: string }
 export const TTS_MAX_BYTES = 8 * 1024 * 1024;
@@ -42,7 +43,11 @@ export async function saveVoiceKeys(env: Env, db: Db, userId: string, keys: Voic
   await db.insert(connections).values({ id: crypto.randomUUID(), userId, provider: 'voice-keys', secretEnc: await seal(env.ENCRYPTION_KEY, secret), meta: { label: `${keys.length} voice key${keys.length === 1 ? '' : 's'}` } });
 }
 
-export const voiceKeyInfo = (k: VoiceKey): VoiceKeyInfo => ({ id: k.id, label: k.label, provider: k.provider, voice: k.voice, model: k.model, baseUrl: k.baseUrl, region: k.region });
+export const voiceKeyInfo = (k: VoiceKey & { provided?: boolean }): VoiceKeyInfo => ({ id: k.id, label: k.label, provider: k.provider, voice: k.voice, model: k.model, baseUrl: k.baseUrl, region: k.region, ...(k.provided ? { provided: true } : {}) });
+/** This person's own keys with the ones the admin provides added (for using and listing, never for saving). */
+export async function voiceKeys(env: Env, db: Db, user: { id: string; provided?: unknown }): Promise<(VoiceKey & { provided?: boolean })[]> {
+  return withProvided<VoiceKey>(env, db, user, 'voice', await loadVoiceKeys(env, db, user.id));
+}
 export function defaultVoiceLabel(k: { provider: VoiceProvider; baseUrl: string }): string {
   if (k.provider !== 'openai') return { elevenlabs: 'ElevenLabs', google: 'Google Cloud', azure: 'Microsoft Azure', deepgram: 'Deepgram', cartesia: 'Cartesia', fishaudio: 'Fish Audio' }[k.provider];
   try { const h = new URL(k.baseUrl).hostname.replace(/^api\./, ''); return h === 'openai.com' ? 'OpenAI' : h === 'groq.com' ? 'Groq' : h; } catch { return 'OpenAI-compatible'; }
