@@ -166,7 +166,7 @@ export function Home() {
     <div className={'home' + (open ? ' open' : '') + (closing && !card ? ' closing' : '') + (pic ? ' picture' : '') + (mapv ? ' mapping' : '') + (locked ? ' locked' : '')}>
       <div className="bg" />
       <div className="stage">
-        <ParticleCore size="var(--s)" mode={n.mode} pad={wide ? 220 : 0} shift={wide && open ? -200 : 0} spot="home" />
+        <ParticleCore size="var(--s)" mode={n.mode} pad={wide ? 220 : 0} shift={wide && open ? -200 : 0} spot="home" design={n.me?.design} />
         {/* Locked: a tap anywhere on the core shows the code entry. */}
         {locked && !n.lockAsk && <button className="lock-tap" onClick={() => n.requestUnlock()} aria-label="Unlock Niko" />}
         <div className={'caption ' + caption} key={caption}>
@@ -586,7 +586,7 @@ export function Workspace() {
             <circle cx="300" cy="300" r="262" fill="none" stroke="rgba(255,255,255,.18)" strokeWidth="4" />
             <circle cx="300" cy="300" r="262" fill="none" stroke="#fff" strokeWidth="4" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={counting ? C * (1 - send.left / SEND_COUNTDOWN_SECONDS) : C} style={{ transition: 'stroke-dashoffset 1s linear' }} />
           </svg>
-          <ParticleCore size="86.8%" mode={n.mode} particles={1000} spot="ws" ring />
+          <ParticleCore size="86.8%" mode={n.mode} particles={1000} spot="ws" ring design={n.me?.design} />
           {counting && <div className="num" role="status">{send.left}</div>}
         </div>
         <div className="status"><span className="k accent" role="status">{n.label}</span><span>{n.line}</span></div>

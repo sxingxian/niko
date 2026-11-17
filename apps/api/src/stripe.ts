@@ -64,7 +64,8 @@ export function formEncode(params: Record<string, unknown>): string {
 export async function stripe<T = any>(env: StripeEnv, method: 'GET' | 'POST' | 'DELETE', path: string, params: Record<string, unknown> = {}, idempotencyKey?: string): Promise<T> {
   if (!env.STRIPE_SECRET_KEY) throw new StripeError(NOT_READY, 503);
   const body = formEncode(params);
-  const url = 'https://api.stripe.com/v1' + path + (method === 'GET' && body ? `?${body}` : '');
+  // GET and DELETE carry their parameters in the address (Stripe reads DELETE's there); POST in the body.
+  const url = 'https://api.stripe.com/v1' + path + (method !== 'POST' && body ? `?${body}` : '');
   const res = await fetch(url, {
     method,
     headers: {
@@ -120,16 +121,18 @@ export async function verifyStripeSignature(secret: string, header: string | und
 
 /** The end of a subscription's current period. Newer Stripe versions keep it on the subscription's item. */
 export function periodEnd(sub: any): Date | null {
-  const s = Number(sub?.current_period_end ?? sub?.items?.data?.[0]?.current_period_end);
+  const s = Number(sub?.current_period_end ?? planItem(sub)?.current_period_end);
   return Number.isFinite(s) && s > 0 ? new Date(s * 1000) : null;
 }
 /** The plan a subscription is on, from the metadata Niko set, or from its price's interval. */
 export function planOf(sub: any): 'monthly' | 'yearly' | null {
   const m = sub?.metadata?.plan;
   if (m === 'monthly' || m === 'yearly') return m;
-  const i = sub?.items?.data?.[0]?.price?.recurring?.interval;
+  const i = planItem(sub)?.price?.recurring?.interval;
   return i === 'month' ? 'monthly' : i === 'year' ? 'yearly' : null;
 }
+/** The plan's own item on a subscription: not the Niko Pro add-on Niko may have added beside it. */
+const planItem = (sub: any) => (sub?.items?.data ?? []).find((i: any) => i?.metadata?.niko !== 'pro') ?? sub?.items?.data?.[0];
 /** Which subscription an invoice is for (the field moved in newer Stripe versions). */
 export function invoiceSubscription(inv: any): string | null {
   const s = inv?.subscription ?? inv?.parent?.subscription_details?.subscription ?? inv?.lines?.data?.[0]?.subscription;

@@ -10,6 +10,7 @@ import { FLOW_SECONDS, FlowLayer, LEAVE_MS } from './flow';
 import { Forgot, Invite, Reset, SignIn, SignUp } from './pages/Auth';
 import { PlanGate } from './pages/Plan';
 import { Home, Workspace } from './pages/Core';
+import { Designs } from './pages/Designs';
 import { Account, Appearance, Connections, Engine, SettingsLayout, Voice } from './pages/Settings';
 
 function Private({ children }: { children: ReactNode }) {
@@ -107,6 +108,7 @@ function Screens() {
         <Route path="/reset" element={<Public><Reset /></Public>} />
         <Route path="/" element={<Private><Home /></Private>} />
         {['/inbox', '/calendar', '/notes'].map((p) => <Route key={p} path={p} element={<Private><Workspace /></Private>} />)}
+        <Route path="/niko" element={<Private><Designs /></Private>} />
         <Route element={<Private><SettingsLayout /></Private>}>
           <Route path="/appearance" element={<Appearance />} />
           <Route path="/voice" element={<Voice />} />

@@ -81,7 +81,7 @@ globalThis.fetch = async (input, init = {}) => {
   }
   if (u.hostname !== 'api.stripe.com') throw new Error('unexpected fetch ' + u);
   const method = init.method ?? 'GET';
-  const params = new URLSearchParams(method === 'GET' ? u.search.slice(1) : init.body ?? '');
+  const params = new URLSearchParams(method !== 'POST' ? u.search.slice(1) : init.body ?? '');
   const path = u.pathname.replace(/^\/v1/, '');
   const call = { method, path, p: Object.fromEntries(params), auth: init.headers?.authorization };
   stripeCalls.push(call);
@@ -117,6 +117,20 @@ globalThis.fetch = async (input, init = {}) => {
   }
   if (method === 'POST' && path === '/billing_portal/configurations') return Response.json({ id: `bpc_${call.mode}` });
   if (method === 'POST' && path === '/products') return Response.json({ id: `prod_${call.mode}_${call.p['metadata[niko]']}` });
+  // Niko Pro: an item added to (or taken off) the plan's subscription. A sub marked declines refuses, as Stripe does
+  // with payment_behavior=error_if_incomplete when the card can't pay.
+  if (method === 'POST' && path === '/subscription_items') {
+    const sub = subs.get(call.p.subscription);
+    if (!sub) return Response.json({ error: { message: 'No such subscription' } }, { status: 404 });
+    if (sub.declines) return Response.json({ error: { message: 'Your card was declined.', code: 'card_declined' } }, { status: 402 });
+    const item = { id: `si_pro_${++seq}`, metadata: { niko: call.p['metadata[niko]'] }, price: { unit_amount: Number(call.p['price_data[unit_amount]']), product: call.p['price_data[product]'], recurring: { interval: call.p['price_data[recurring][interval]'] } } };
+    sub.items.data.unshift(item);
+    return Response.json(item);
+  }
+  if (method === 'DELETE' && (m = path.match(/^\/subscription_items\/(si_\w+)$/))) {
+    for (const sub of subs.values()) if (sub.items?.data) sub.items.data = sub.items.data.filter((i) => i.id !== m[1]);
+    return Response.json({ id: m[1], deleted: true });
+  }
   throw new Error(`unexpected Stripe call ${method} ${path}`);
 };
 
@@ -1140,6 +1154,203 @@ await ok('included services: the admin’s key is kept sealed, given through an 
   const log = JSON.stringify(await q("select action, detail from audit_log where action like 'provided-key.%' or action like 'setup.%'"));
   assert.ok(log.includes('provided-key.added') && log.includes('setup.invite') && log.includes('provided-key.removed') && !log.includes(ADMIN_KEY), 'audited without the key');
 });
+
+// ---------------------------------------------------------------- designs
+// Choose your Niko: the admin's offer, one-time unlocks, the bundle (with credit), pro-rated new designs for bundle
+// owners (including designs switched off and on again), retired designs kept by owners, gifts, and the Niko Pro add-on.
+const member = async (email, extra = {}) => {
+  const [u] = await q(`insert into users (email, name, role, status, lifetime, access_until, access_kind) values ($1, $2, 'member', 'active', false, now() + interval '200 days', 'paid') returning id`, [email, email.split('@')[0]]);
+  for (const [k, v] of Object.entries(extra)) await q(`update users set ${k} = $2 where id = $1`, [u.id, v]);
+  const token = randomBytes(24).toString('hex');
+  await q(`insert into sessions (user_id, token_hash, kind, expires_at) values ($1, $2, 'app', now() + interval '1 hour')`, [u.id, createHash('sha256').update(token).digest('hex')]);
+  const b = new Browser(); b.jar.set('__Host-niko', token); b.id = u.id;
+  return b;
+};
+let payMode = 'test';
+const paidSession = (id, over = {}) => ({ ...sessions.get(id), payment_status: 'paid', status: 'complete', ...over });
+const designPay = async (b, what, design) => {
+  const r = await b.post('/designs/checkout', { what, design });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const id = r.data.url.split('/').pop();
+  assert.equal(await webhook('checkout.session.completed', paidSession(id), { secret: made[payMode] }), 200);
+  return id;
+};
+const owns = async (id) => (await q('select design, source, cents from design_owned where user_id = $1 order by design', [id])).map((r) => `${r.design}:${r.source}${r.cents ? ':' + r.cents : ''}`);
+const view = async (b) => (await b.get('/designs')).data;
+const find = (v, id) => v.designs.find((d) => d.id === id);
+const designsBase = (over = {}) => ({
+  designs: { prism: { on: true, paid: true, cents: 400 }, ribbon: { on: true, paid: true, cents: 600 }, flux: { on: true, paid: true, cents: 500 }, aurora: { on: true, paid: false }, ...over },
+  bundleCents: 1000, credit: true, rate: 'saving', percent: 30, pro: { on: true, monthly: 300, yearly: 3000 },
+});
+let dana, eli, fay;
+
+await ok('designs: nothing offered until the admin says; prices are checked before saving', async () => {
+  payMode = (await admin.get('/admin/payments')).data.mode;
+  dana = await member('dana@example.com');
+  let v = await view(dana);
+  assert.deepEqual(v.designs.map((d) => d.id), ['nebula']); assert.equal(v.current, 'nebula');
+  assert.equal((await dana.get('/me')).data.design, 'nebula');
+  let r = await admin.put('/admin/designs', { settings: { designs: { prism: { on: true, paid: true } } } });
+  assert.equal(r.status, 400); assert.match(r.data.error, /Prism a price/);
+  r = await admin.put('/admin/designs', { settings: { ...designsBase(), bundleCents: 2000 } });
+  assert.equal(r.status, 400); assert.match(r.data.error, /bundle should cost less/);
+  r = await admin.put('/admin/designs', { settings: { ...designsBase(), designs: { ...designsBase().designs, prism: { on: true, paid: true, cents: 400, everOn: false, wasOff: true } } } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.settings.designs.prism.wasOff, false, 'the admin can’t set the server’s own record');
+  assert.equal(r.data.settings.designs.prism.everOn, true);
+  r = await admin.get('/admin/designs');
+  assert.equal(r.data.designs.length, 20);
+});
+
+await ok('designs: a person sees offered designs with prices; locked ones can’t be used; included ones can', async () => {
+  const v = await view(dana);
+  assert.deepEqual(v.designs.map((d) => d.id), ['nebula', 'prism', 'ribbon', 'flux', 'aurora']);
+  assert.equal(find(v, 'prism').state, 'locked'); assert.equal(find(v, 'prism').cents, 400);
+  assert.equal(find(v, 'aurora').state, 'included');
+  assert.deepEqual(v.bundle, { count: 3, cents: 1000 });
+  assert.equal(v.pro.offered, false, 'no Niko Pro during pay-once time');
+  assert.equal((await dana.post('/designs/use', { design: 'prism' })).status, 403);
+  assert.equal((await dana.post('/designs/use', { design: 'not-a-design' })).status, 400);
+  assert.equal((await dana.post('/designs/use', { design: 'aurora' })).status, 200);
+  assert.equal((await dana.get('/me')).data.design, 'aurora');
+  // A settings save can't set the design (only /designs/use can, after its checks).
+  const me = (await dana.get('/me')).data;
+  await dana.patch('/me', { appearance: { ...me.appearance, design: 'prism' } });
+  assert.equal((await user('dana@example.com')).appearance.design, 'aurora');
+});
+
+await ok('designs: one design unlocks once Stripe confirms the amount Niko asked for; resent events count once', async () => {
+  const r = await dana.post('/designs/checkout', { what: 'one', design: 'prism' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const id = r.data.url.split('/').pop();
+  const call = stripeCalls.filter((c) => c.path === '/checkout/sessions').at(-1);
+  assert.equal(call.p['line_items[0][price_data][unit_amount]'], '400');
+  assert.equal(call.p['metadata[kind]'], 'design');
+  assert.match(call.p.success_url, /\/niko\?design=\{CHECKOUT_SESSION_ID\}$/);
+  // Unpaid, a different amount, or another account's id: nothing unlocks.
+  assert.equal(await webhook('checkout.session.completed', sessions.get(id), { secret: made[payMode] }), 200);
+  assert.equal(await webhook('checkout.session.completed', paidSession(id, { amount_total: 1 }), { secret: made[payMode] }), 200);
+  assert.equal(await webhook('checkout.session.completed', paidSession(id, { metadata: { ...sessions.get(id).metadata, user_id: ownerId } }), { secret: made[payMode] }), 200);
+  assert.deepEqual(await owns(dana.id), []);
+  assert.equal(await webhook('checkout.session.completed', paidSession(id), { secret: made[payMode] }), 200);
+  assert.equal(await webhook('checkout.session.completed', paidSession(id), { secret: made[payMode] }), 200);
+  assert.deepEqual(await owns(dana.id), ['prism:single:400']);
+  const st = await dana.get(`/designs/status?session=${id}`);
+  assert.equal(st.data.paid, true); assert.deepEqual(st.data.bought, { kind: 'one', designs: ['prism'] });
+  assert.equal(find(st.data, 'prism').state, 'owned');
+  assert.equal((await dana.post('/designs/use', { design: 'prism' })).status, 200);
+  // Something a screen invents is refused: buying what's owned, an unknown design, or a price for bundle owners.
+  assert.equal((await dana.post('/designs/checkout', { what: 'one', design: 'prism' })).status, 400);
+  assert.equal((await dana.post('/designs/checkout', { what: 'topup', design: 'ribbon' })).status, 400);
+  assert.equal((await dana.post('/designs/checkout', { what: 'free' })).status, 400);
+});
+
+await ok('designs: the bundle counts what was already paid, and covers what is offered that day', async () => {
+  let v = await view(dana);
+  assert.deepEqual(v.bundle, { count: 2, cents: 600 }, 'SGD 10 less the SGD 4 already paid');
+  await designPay(dana, 'all');
+  assert.deepEqual(await owns(dana.id), ['flux:bundle', 'prism:single:400', 'ribbon:bundle']);
+  assert.ok((await user('dana@example.com')).design_bundle_at);
+  v = await view(dana);
+  assert.equal(v.bundleOwner, true); assert.equal(v.bundle, null);
+});
+
+await ok('designs: new designs are pro-rated for bundle owners; switched off, owners keep them; switched back on, they’re new', async () => {
+  eli = await member('eli@example.com');
+  // A new design (Vortex) and Flux switched off.
+  let r = await admin.put('/admin/designs', { settings: designsBase({ vortex: { on: true, paid: true, cents: 800 }, flux: { on: false, paid: true, cents: 500 } }) });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.settings.designs.flux.wasOff, true);
+  let v = await view(dana);
+  assert.equal(find(v, 'flux').state, 'owned'); assert.equal(find(v, 'flux').retired, true, 'kept, marked retired');
+  // Saving: 1 - 1000 / (400 + 600 + 800) = 44.4% off Vortex's SGD 8.
+  assert.equal(find(v, 'vortex').fresh, true); assert.equal(find(v, 'vortex').cents, 444); assert.equal(find(v, 'vortex').full, 800);
+  v = await view(eli);
+  assert.equal(find(v, 'flux'), undefined, 'hidden from people who don’t own it');
+  assert.equal(find(v, 'vortex').cents, 800, 'full price for everyone else');
+  assert.deepEqual(v.bundle, { count: 3, cents: 1000 });
+  // Fay buys the bundle while Flux is off: it isn't in her bundle.
+  fay = await member('fay@example.com');
+  await designPay(fay, 'all');
+  assert.deepEqual(await owns(fay.id), ['prism:bundle', 'ribbon:bundle', 'vortex:bundle']);
+  r = await admin.put('/admin/designs', { settings: designsBase({ vortex: { on: true, paid: true, cents: 800 }, flux: { on: true, paid: true, cents: 500 } }) });
+  assert.equal(r.data.settings.designs.flux.wasOff, true, 'remembered: it came back');
+  v = await view(fay);
+  assert.equal(find(v, 'flux').fresh, true); assert.equal(find(v, 'flux').back, true);
+  assert.equal(find(v, 'flux').cents, Math.round(500 * (1000 / 2300)), 'pro-rated with the bundle’s saving');
+  assert.equal(find(await view(dana), 'flux').state, 'owned', 'Dana bought it before: still hers');
+  // A set percentage off, and the top-up paid for.
+  r = await admin.put('/admin/designs', { settings: { ...designsBase({ vortex: { on: true, paid: true, cents: 800 }, flux: { on: true, paid: true, cents: 500 } }), rate: 'percent', percent: 30 } });
+  assert.equal(find(await view(fay), 'flux').cents, 350);
+  await designPay(fay, 'topup', 'flux');
+  assert.ok((await owns(fay.id)).includes('flux:topup'));
+  const co = (await q(`select cents from design_checkouts where user_id = $1 and kind = 'topup'`, [fay.id]))[0];
+  assert.equal(co.cents, 350);
+});
+
+await ok('designs: Niko Pro only on an active plan, charged to that plan; off again, designs not bought go back to Nebula', async () => {
+  assert.equal((await dana.post('/designs/pro')).status, 400, 'pay-once time');
+  // A plan chosen during pay-once time is trialing until that time ends: still no Niko Pro.
+  await q(`update users set sub_id = 'sub_eli', sub_status = 'trialing', sub_plan = 'monthly', sub_mode = $2 where id = $1`, [eli.id, payMode]);
+  assert.equal((await view(eli)).pro.offered, false);
+  const end = Math.floor(Date.now() / 1000) + 20 * 86400;
+  subs.set('sub_eli', { id: 'sub_eli', status: 'active', customer: 'cus_eli', metadata: { user_id: eli.id, plan: 'monthly' }, current_period_end: end, items: { data: [{ id: 'si_eli_plan', current_period_end: end, price: { recurring: { interval: 'month' } } }] } });
+  assert.equal(await webhook('customer.subscription.updated', subs.get('sub_eli'), { secret: made[payMode] }), 200);
+  let v = await view(eli);
+  assert.equal(v.pro.offered, true); assert.equal(v.pro.cents, 300); assert.equal(v.pro.plan, 'monthly');
+  // The card can't pay: nothing is added.
+  subs.get('sub_eli').declines = true;
+  let r = await eli.post('/designs/pro');
+  assert.equal(r.status, 402); assert.match(r.data.error, /nothing was added/);
+  assert.equal((await user('eli@example.com')).pro_on, false);
+  subs.get('sub_eli').declines = false;
+  r = await eli.post('/designs/pro');
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const add = stripeCalls.filter((c) => c.path === '/subscription_items').at(-1);
+  assert.equal(add.p.subscription, 'sub_eli'); assert.equal(add.p['price_data[unit_amount]'], '300'); assert.equal(add.p['price_data[recurring][interval]'], 'month');
+  assert.equal(add.p.proration_behavior, 'always_invoice'); assert.equal(add.p.payment_behavior, 'error_if_incomplete');
+  assert.equal(r.data.pro.active, true); assert.equal(find(r.data, 'vortex').state, 'pro');
+  assert.equal((await eli.post('/designs/use', { design: 'vortex' })).status, 200);
+  // Stripe's own updates keep it in step; the plan is still read from the plan's item, not the add-on's.
+  assert.equal(await webhook('customer.subscription.updated', subs.get('sub_eli'), { secret: made[payMode] }), 200);
+  let u = await user('eli@example.com');
+  assert.equal(u.pro_on, true); assert.equal(u.sub_plan, 'monthly'); sameDay(u.sub_period_end, new Date(end * 1000));
+  assert.equal((await eli.post('/designs/pro')).status, 409);
+  // Removed: unused time is credited; Vortex wasn't bought, so Nebula comes back.
+  r = await eli.del('/designs/pro');
+  assert.equal(r.status, 200);
+  const del = stripeCalls.filter((c) => c.method === 'DELETE' && c.path.startsWith('/subscription_items/')).at(-1);
+  assert.equal(del.p.proration_behavior, 'create_prorations');
+  assert.equal((await eli.get('/me')).data.design, 'nebula');
+  assert.equal(await webhook('customer.subscription.updated', subs.get('sub_eli'), { secret: made[payMode] }), 200);
+  assert.equal((await user('eli@example.com')).pro_on, false);
+  // Ending the plan ends the add-on too.
+  await eli.post('/designs/pro');
+  assert.equal(await webhook('customer.subscription.deleted', { ...subs.get('sub_eli'), status: 'canceled' }, { secret: made[payMode] }), 200);
+  u = await user('eli@example.com');
+  assert.equal(u.pro_on, false);
+});
+
+await ok('designs: admins give a design (even one not offered) and can take back only gifts; admins have every design', async () => {
+  let r = await admin.post(`/admin/users/${eli.id}/designs`, { design: 'swarm' });
+  assert.equal(r.status, 200);
+  assert.equal((await admin.post(`/admin/users/${eli.id}/designs`, { design: 'swarm' })).status, 409);
+  let v = await view(eli);
+  assert.equal(find(v, 'swarm').state, 'owned'); assert.equal(find(v, 'swarm').retired, true);
+  assert.equal((await eli.post('/designs/use', { design: 'swarm' })).status, 200);
+  assert.equal((await admin.del(`/admin/users/${dana.id}/designs/prism`)).status, 400, 'paid designs stay theirs');
+  assert.equal((await admin.del(`/admin/users/${eli.id}/designs/swarm`)).status, 200);
+  assert.equal((await eli.get('/me')).data.design, 'nebula');
+  r = await admin.get(`/admin/users/${dana.id}/designs`);
+  assert.equal(r.data.owned.length, 3); assert.ok(r.data.bundle);
+  v = await view(owner);
+  assert.equal(v.designs.length, 20); assert.ok(v.designs.every((d) => d.state !== 'locked'));
+  assert.equal((await owner.post('/designs/use', { design: 'iris' })).status, 200);
+  assert.equal((await owner.post('/designs/checkout', { what: 'one', design: 'prism' })).status, 400);
+  const log = JSON.stringify(await q(`select action from audit_log where action like '%design%'`));
+  assert.ok(['payment.design', 'design.checkout', 'design.pro_on', 'design.pro_off', 'admin.designs', 'admin.design_gift', 'admin.design_ungift'].every((a) => log.includes(a)));
+});
+
 
 await sqlc.end();
 await closePools();

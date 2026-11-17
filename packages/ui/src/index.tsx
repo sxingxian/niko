@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { spots, startCore, startRing, type CoreHandle, type CoreMode } from './core';
+import { currentHue, spots, startCore, startRing, type CoreHandle, type CoreMode } from './core';
+import { runDesign } from './designs';
 
 export * from './core';
+
+/** Starts the chosen design on a canvas: Nebula is the original core (startCore); the others come from designs.js and
+ * behave the same way (states, voice level, sideways shift, the shared hue). */
+export function startDesign(canvas: HTMLCanvasElement, design: string | undefined, opts: { particles?: number; mode?: CoreMode } = {}): CoreHandle {
+  return !design || design === 'nebula' ? startCore(canvas, opts) : runDesign(canvas, design, currentHue, { mode: opts.mode });
+}
 
 /** The app is served at /app on niko.sxingxian.com and at the root of nikoapp.midnightpoetry.studio. */
 export const appBase = () => (location.hostname.startsWith('nikoapp.') ? '' : '/app');
@@ -67,6 +74,7 @@ const PATHS: Record<string, string> = {
   image: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM3 16l5-5 4 4 3-3 6 6M15.5 9.5a1.5 1.5 0 1 0 0-.01',
   pin: 'M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21zM12 12.2a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z',
   globe: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z',
+  info: 'M12 3a9 9 0 1 1 0 18a9 9 0 0 1 0-18zM12 8h.01M11 12h1v4h1',
   car: 'M5 16h14v-4l-2-5H7l-2 5v4zM5 16v2.5M19 16v2.5M5 12h14M8 14h.01M16 14h.01',
   train: 'M7 3h10a2 2 0 0 1 2 2v9a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V5a2 2 0 0 1 2-2zM5 10h14M9 14h.01M15 14h.01M8 17l-2 4M16 17l2 4',
   walk: 'M13 5.5a1.5 1.5 0 1 0 0-.01M10 21l2-6 3 3v3M9 12l2-4 4 2 2 3M12 15l-1-4M9 12l-2 1',
@@ -89,19 +97,20 @@ export function Switch({ on, onChange, label, disabled }: { on: boolean; onChang
 /** The live particle sphere. `shift` slides it sideways (used when panels open). */
 /** The particle sphere. `pad` widens the canvas on both sides so particles can drift sideways (`shift`) without being cut off.
  * `spot` names it for the screen-to-screen transition. */
-export function ParticleCore({ size, mode = 'idle', shift = 0, particles, style, pad = 0, spot, ring }: { size: number | string; mode?: CoreMode; shift?: number; particles?: number; style?: React.CSSProperties; pad?: number; spot?: string; ring?: boolean }) {
+export function ParticleCore({ size, mode = 'idle', shift = 0, particles, style, pad = 0, spot, ring, design }: { size: number | string; mode?: CoreMode; shift?: number; particles?: number; style?: React.CSSProperties; pad?: number; spot?: string; ring?: boolean; design?: string }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const ringRef = useRef<HTMLCanvasElement>(null);
   const handle = useRef<CoreHandle | null>(null);
   useEffect(() => {
     if (!ref.current) return;
-    const core = startCore(ref.current, { particles, mode });
+    const core = startDesign(ref.current, design, { particles, mode });
+    if (shift) core.setShift(shift);
     handle.current = core;
     // The ring of ticks (workspace only) reads the core's state each frame, so the two move together.
     const r = ring && ringRef.current ? startRing(ringRef.current, core) : null;
     return () => { r?.stop(); core.stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [particles]);
+  }, [particles, design]);
   useEffect(() => { handle.current?.setMode(mode); }, [mode]);
   useEffect(() => { handle.current?.setShift(shift); }, [shift]);
   useEffect(() => {
@@ -113,6 +122,27 @@ export function ParticleCore({ size, mode = 'idle', shift = 0, particles, style,
   const w = pad ? `calc(${typeof size === 'number' ? size + 'px' : size} + ${2 * pad}px)` : size;
   const core = <canvas ref={ref} data-core="1" role="img" aria-label="Niko particle core" style={{ width: w, height: size, display: 'block', flex: 'none', ...style }} />;
   return ring ? <><canvas ref={ringRef} className="ring" aria-hidden="true" />{core}</> : core;
+}
+
+/** A live preview of a design (picker tiles and the large preview). Animates only while on screen; off screen it
+ * stops, so a grid of many designs stays light on phones. */
+export function DesignPreview({ design, mode = 'idle', particles, className, label }: { design: string; mode?: CoreMode; particles?: number; className?: string; label?: string }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const handle = useRef<CoreHandle | null>(null);
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const start = () => { if (!handle.current) handle.current = startDesign(el, design, { particles, mode: modeRef.current }); };
+    const stop = () => { handle.current?.stop(); handle.current = null; };
+    if (typeof IntersectionObserver === 'undefined') { start(); return stop; }
+    const io = new IntersectionObserver(([e]) => (e?.isIntersecting ? start() : stop()), { rootMargin: '80px' });
+    io.observe(el);
+    return () => { io.disconnect(); stop(); };
+  }, [design, particles]);
+  useEffect(() => { handle.current?.setMode(mode); }, [mode]);
+  return <canvas ref={ref} className={className} {...(label ? { role: 'img', 'aria-label': label } : { 'aria-hidden': true })} style={{ display: 'block', width: '100%', height: '100%' }} />;
 }
 
 export function PasswordField({ label, value, onChange, autoComplete, meter }: { label: string; value: string; onChange: (v: string) => void; autoComplete: string; meter?: boolean }) {

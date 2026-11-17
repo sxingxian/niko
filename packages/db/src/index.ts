@@ -1,6 +1,6 @@
 import { neon } from '@neondatabase/serverless';
 import { drizzle } from 'drizzle-orm/neon-http';
-import { bigint, bigserial, boolean, integer, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, bigserial, boolean, integer, jsonb, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 const ts = (name: string) => timestamp(name, { withTimezone: true });
 
@@ -48,6 +48,10 @@ export const users = pgTable('users', {
   subCancelAtEnd: boolean('sub_cancel_at_end').notNull().default(false),
   subMode: text('sub_mode'),
   remindedFor: ts('reminded_for'),
+  // ---- designs (see migration 0013)
+  designBundleAt: ts('design_bundle_at'),
+  proItem: text('pro_item'),
+  proOn: boolean('pro_on').notNull().default(false),
   createdAt: ts('created_at').notNull().defaultNow(),
   lastActiveAt: ts('last_active_at'),
 });
@@ -278,4 +282,27 @@ export const usageCounts = pgTable('usage_counts', {
   kind: text('kind').notNull(),
   entry: text('entry').notNull(),
   n: integer('n').notNull().default(0),
+});
+
+/** Designs an account owns: bought, in a bundle, added later, or given by an admin. Kept when a design is retired. */
+export const designOwned = pgTable('design_owned', {
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  design: text('design').notNull(),
+  source: text('source').notNull(),
+  cents: integer('cents'),
+  checkoutId: text('checkout_id'),
+  mode: text('mode'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+}, (t) => [primaryKey({ columns: [t.userId, t.design] })]);
+
+/** Each design Checkout, with what it covers and costs as the server fixed it. */
+export const designCheckouts = pgTable('design_checkouts', {
+  id: text('id').primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull(),
+  designs: text('designs').array().notNull(),
+  cents: integer('cents').notNull(),
+  mode: text('mode').notNull(),
+  paidAt: ts('paid_at'),
+  createdAt: ts('created_at').notNull().defaultNow(),
 });
