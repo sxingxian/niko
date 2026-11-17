@@ -193,6 +193,8 @@ await ok('the brain’s map tag, and what can be said on a map', () => {
   assert.deepEqual(mapCommand('by train'), { mode: 'transit' }); assert.deepEqual(mapCommand('show me walking instead'), { mode: 'walk' });
   assert.deepEqual(mapCommand('drive me there'), { mode: 'drive' }); assert.deepEqual(mapCommand('Niko, by bike please'), { mode: 'cycle' });
   assert.deepEqual(mapCommand('close the map'), { close: true });
+  assert.deepEqual(mapCommand('How about opening the steps?'), { steps: true }); assert.deepEqual(mapCommand('show me the directions'), { steps: true });
+  assert.deepEqual(mapCommand('hide the steps'), { steps: false });
   assert.equal(mapCommand('how do I get to the zoo by train'), null);
   assert.equal(countryCommand("I'm in Korea"), 'KR'); assert.equal(countryCommand('I am in Japan now'), 'JP'); assert.equal(countryCommand('use worldwide'), 'ww');
   assert.equal(countryCommand('switch the country to the UK'), 'GB'); assert.equal(countryCommand("I'm in a meeting"), null); assert.equal(countryCommand("I'm in Paris"), null);

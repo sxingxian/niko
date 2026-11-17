@@ -259,8 +259,11 @@ const MODE_WORDS: [Exclude<MapHow, 'place'>, string][] = [
   ['cycle', 'bikes?|bicycle|cycling|cycle|biking'],
 ];
 /** On a map: "by train", "walking instead", "drive me there", "by bike", "close the map". */
-export function mapCommand(raw: string): { mode: Exclude<MapHow, 'place'> } | { close: true } | null {
-  const t = cleanCommand(raw);
+export function mapCommand(raw: string): { mode: Exclude<MapHow, 'place'> } | { close: true } | { steps: boolean } | null {
+  const t = cleanCommand(raw).replace(/^(?:how about|what about|maybe|let's|lets)\s+/, '');
+  const steps = '(?:the )?(?:steps|directions|turn by turn(?: directions)?|route steps|instructions)';
+  if (new RegExp(`^(?:open|opening|show|showing|see|expand|read|list)(?: me)? ${steps}$|^${steps}$`).test(t)) return { steps: true };
+  if (new RegExp(`^(?:close|closing|hide|hiding|collapse) ${steps}$`).test(t)) return { steps: false };
   if (/^(?:close|hide|dismiss|put away)(?: (?:it|this|that|the map|the route|the directions|map))?$/.test(t)) return { close: true };
   for (const [mode, words] of MODE_WORDS) {
     const re = new RegExp(`^(?:(?:show me|switch to|change to|change it to|go|use|try|what about|how about|and|let's go|i'll go|i'll take|take|get there|make it|instead)\\s+)*(?:(?:by|on|with|via|using|in)\\s+)?(?:the |a )?(?:${words})(?:\\s+(?:instead|there|route|directions|it|then|way|mode))*$`);

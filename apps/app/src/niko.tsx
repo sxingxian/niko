@@ -491,8 +491,11 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     } catch (e: any) {
       if (mine !== askId.current) return;
       if (e?.data?.brief) setBrief(e.data.brief);
-      setReply(e.message); setMode('idle'); setLabel('Problem'); setLine(`${e.message} Say “try again” to ask once more.`);
-      setResumable({ canContinue: false });
+      setReply(e.message); setResumable({ canContinue: false });
+      // Said aloud, and then Niko keeps listening for a few seconds (as after any answer), so "try again" works
+      // without saying "Niko" first. Before, it only showed the problem and stopped listening.
+      if (wantRec.current) say('I couldn’t get an answer just now. Say “try again” to ask once more.');
+      else { setMode('idle'); setLabel('Problem'); setLine(`${e.message} Say “try again” to ask once more.`); }
     }
   };
   askRef.current = (t: string) => { void ask(t); };
@@ -649,7 +652,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         // Recognisers often spell the name differently in their first guess, so check every alternative.
         const alts: string[] = Array.from({ length: res.length }, (_, k) => String(res[k]?.transcript ?? '').trim());
         // Niko's own last line, heard late through the speaker: never a question.
-        if (res.isFinal && Date.now() < lastSaid.current.until && alts[0] && isEcho(alts[0], lastSaid.current.text) && !alts.some((a) => matchWake(a)?.command)) continue;
+        // (Except the words Niko asks for, such as “try again”, which are in its own line by design.)
+        if (res.isFinal && Date.now() < lastSaid.current.until && alts[0] && isEcho(alts[0], lastSaid.current.text) && !alts.some((a) => matchWake(a)?.command) && !resumeIntent(alts[0])) continue;
         const hit = alts.map(matchWake).find(Boolean);
         if (!res.isFinal) {
           if (hit && !active.current) { setMode('listening'); setLabel('Listening'); setLine('Go ahead.'); }

@@ -137,21 +137,27 @@ export function Home() {
     if (n.reply) {
       setClosing(false);
       setShown((s) => ({ reply: n.reply!, chat: n.brief?.chats[0] ?? null, id: (s?.id ?? 0) + (s?.reply === n.reply ? 0 : 1) }));
-      if (wide) setCaption('aside');
       return;
     }
     if (!shown) return;
     setClosing(true);
-    if (wide) setCaption((c) => (c === 'aside' ? 'back' : c));
     const t = window.setTimeout(() => { setClosing(false); setShown(null); }, 900);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [n.reply, wide]);
   const submit = (e: FormEvent) => { e.preventDefault(); const t = text; setText(''); setTyping(false); void n.ask(t); };
   const cards = shown ? (shown.chat ? 2 : 1) : 0;
-  // The caption moves aside for a picture too.
   const card = !!pic || !!mapv;
-  useEffect(() => { if (wide && card && !n.reply) setCaption('aside'); else if (wide && !card && !n.reply && !shown) setCaption((c) => (c === 'aside' ? 'back' : c)); }, [card]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The caption always sits under the core: aside exactly when the core moves aside (an answer, a picture or a map is
+  // open on a wide screen), back when it returns. Before, a new question asked over a map or picture sent the caption
+  // back while the core stayed aside.
+  const aside = wide && open;
+  const wasAside = useRef(false);
+  useEffect(() => {
+    if (aside === wasAside.current) return;
+    wasAside.current = aside;
+    setCaption(aside ? 'aside' : wide ? 'back' : '');
+  }, [aside, wide]);
   return (
     <div className={'home' + (open ? ' open' : '') + (closing && !card ? ' closing' : '') + (pic ? ' picture' : '') + (mapv ? ' mapping' : '')}>
       <div className="bg" />

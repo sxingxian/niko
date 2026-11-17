@@ -119,6 +119,7 @@ function whyLine(v: MapView, r: MapResult, chosen: string): string {
 export function MapCard({ v, tabbable }: { v: MapView; tabbable?: boolean }) {
   const n = useNiko();
   const [picker, setPicker] = useState(false);
+  const [steps, setSteps] = useState(false);
   const tab = tabbable ? 0 : -1;
   const r = v.result;
   const lists = Object.keys(n.me?.engine.mapCountries ?? {}).filter((cc) => n.me?.engine.mapCountries?.[cc]?.length).sort();
@@ -129,6 +130,13 @@ export function MapCard({ v, tabbable }: { v: MapView; tabbable?: boolean }) {
       const c = mapCommand(phrase);
       if (!c) return false;
       if ('close' in c) { n.closeMap(); n.carryOn(); return true; }
+      if ('steps' in c) {
+        const has = !!v.result?.route?.steps.length;
+        setSteps(c.steps && has);
+        n.setStatus('Heard', !has ? 'There are no steps for this map.' : c.steps ? 'Here are the steps.' : 'Steps hidden.', 'speaking');
+        window.setTimeout(n.carryOn, 1200);
+        return true;
+      }
       n.setMapMode(c.mode);
       n.setStatus('Heard', `${MAP_MODE_NAMES[c.mode]}: finding the way.`, 'speaking');
       window.setTimeout(n.carryOn, 1200);
@@ -203,7 +211,7 @@ export function MapCard({ v, tabbable }: { v: MapView; tabbable?: boolean }) {
           </div>
         )}
         {r?.route && r.route.steps.length > 0 && (
-          <details className="map-steps">
+          <details className="map-steps" open={steps} onToggle={(e) => setSteps((e.target as HTMLDetailsElement).open)}>
             <summary tabIndex={tab}>Steps ({r.route.steps.length})</summary>
             <ol>{r.route.steps.map((s, i) => <li key={i}><span>{s.text}</span>{s.meters ? <span className="map-small">{distanceText(s.meters)}</span> : null}</li>)}</ol>
           </details>
