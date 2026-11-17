@@ -878,3 +878,75 @@ button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; 
   .inc-m .small { grid-column: 1 / -1; }
   .inc-big b { font-size: 20px; }
 }
+
+/* ---------------------------------------------------------------- Choose your Niko (designs) */
+.dz { position: relative; z-index: 1; min-height: 100%; display: flex; flex-direction: column; }
+.dz-top { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 30px clamp(16px, 3vw, 36px) 20px; }
+.dz-brand { display: flex; align-items: center; gap: 14px; }
+.dz-x { width: 44px; height: 44px; box-shadow: none; }
+.dz-test { margin: -8px clamp(16px, 3vw, 36px) 8px; color: #ffcf9a; }
+.dz-err { margin: 120px auto; }
+.dz-main { flex: 1; display: flex; flex-wrap: wrap; gap: 24px; padding: 0 clamp(16px, 3vw, 36px) 36px; width: 100%; max-width: 1440px; margin: 0 auto; }
+.dz-stage { flex: 999 1 520px; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 12px 8px 28px; }
+.dz-core { width: min(560px, 100%); aspect-ratio: 1 / 1; }
+.dz-cap { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; margin-top: -40px; padding: 0 12px; }
+.dz-cap h1 { font-size: 44px; line-height: 1.05; font-weight: 500; letter-spacing: -.01em; }
+.dz-cap .sub { max-width: 420px; }
+.dz-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dz-tag { padding: 4px 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,.3); color: #e6eaf1; font-size: 11px; }
+.dz-note { display: flex; align-items: center; gap: 8px; font: 400 14px/1.4 system-ui, sans-serif; max-width: 420px; }
+.dz-pills { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.dz-pills .map-opt { height: 44px; padding: 0 16px; font-size: 14px; font-weight: 500; }
+.dz-side { flex: 1 1 500px; min-width: 0; align-self: flex-start; display: flex; flex-direction: column; gap: 14px; padding: 20px; border-radius: 28px;
+  background: rgba(16,20,30,.82); border: 1px solid rgba(255,255,255,.2); box-shadow: inset 0 1px 0 rgba(255,255,255,.1), 0 24px 60px rgba(0,0,0,.35); }
+.dz-head { display: flex; flex-direction: column; gap: 6px; padding: 4px 4px 6px; }
+.dz-head h2 { font-size: 26px; line-height: 1.25; font-weight: 500; letter-spacing: -.01em; }
+.dz-grid { margin: 0; padding: 0; border: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.dz-opt { position: relative; display: block; cursor: pointer; min-width: 0; }
+.dz-opt input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
+.dz-opt input:focus-visible + .dz-card { outline: 2px solid #fff; outline-offset: 2px; }
+.dz-card { display: flex; flex-direction: column; gap: 6px; padding: 6px 6px 10px; border-radius: 18px; border: 1px solid transparent; transition: background-color .2s ease, border-color .2s ease, transform .2s cubic-bezier(.2,.8,.2,1); }
+.dz-opt:hover .dz-card { background: rgba(255,255,255,.1); }
+.dz-opt:active .dz-card { transform: scale(.985); }
+.dz-card.on { background: rgba(255,255,255,.14); border-color: hsl(var(--h) 100% 75% / .6); }
+.dz-thumb { display: block; width: 100%; aspect-ratio: 1 / 1; border-radius: 12px; background: rgba(0,0,0,.3); overflow: hidden; }
+.dz-name { padding: 0 4px; font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dz-meta { padding: 0 4px; display: flex; align-items: center; gap: 5px; min-height: 14px; font: 500 10px 'JetBrains Mono', monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); overflow: hidden; white-space: nowrap; }
+.dz-meta span { overflow: hidden; text-overflow: ellipsis; }
+.dz-meta svg { flex: none; }
+.dz-acts { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.dz-acts .pri { width: 100%; }
+.dz-sec { height: 48px; border-radius: 999px; border: 1px solid rgba(255,255,255,.22); background: rgba(0,0,0,.2); color: #e6eaf1; font-size: 15px; font-weight: 500; cursor: pointer; }
+.dz-plain { height: 48px; border: 0; background: transparent; color: #e6eaf1; font-size: 15px; font-weight: 500; cursor: pointer; border-radius: 999px; }
+.dz-plain:hover, .dz-sec:hover { background: rgba(255,255,255,.14); }
+.dz-link { min-height: 44px; border: 0; background: transparent; color: #e6eaf1; cursor: pointer; font-size: 14px; font-weight: 500; text-decoration: underline; text-underline-offset: 4px; }
+.dz-pro { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.12); }
+.dz-pro .dz-link { align-self: flex-start; padding: 0; }
+.dz-veil { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(3,5,9,.62); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.dz-sheet { width: min(480px, 100%); max-height: calc(100vh - 32px); overflow: auto; display: flex; flex-direction: column; gap: 18px; padding: 24px; background: rgba(16,20,30,.94); animation: dzIn .32s cubic-bezier(.2,.8,.2,1) both; }
+@keyframes dzIn { from { opacity: 0; transform: translateY(14px) scale(.98); } to { opacity: 1; transform: none; } }
+.dz-sheet-head { display: flex; align-items: center; gap: 16px; }
+.dz-sheet-head .ib { width: 44px; height: 44px; align-self: flex-start; box-shadow: none; flex: none; }
+.dz-sheet-thumb { width: 96px; height: 96px; flex: none; border-radius: 20px; background: rgba(0,0,0,.35); overflow: hidden; }
+.dz-sheet-t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.dz-sheet-t h3 { font-size: 26px; line-height: 1.2; font-weight: 500; letter-spacing: -.01em; }
+.dz-plans { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 8px; }
+.dz-plan { position: relative; display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 18px; border: 1px solid rgba(255,255,255,.16); cursor: pointer; }
+.dz-plan.on { border-color: hsl(var(--h) 100% 75% / .6); background: rgba(255,255,255,.1); }
+.dz-plan input { width: 20px; height: 20px; margin: 0; flex: none; accent-color: hsl(var(--h) 100% 75%); }
+.dz-plan:focus-within { outline: 2px solid #fff; outline-offset: 2px; }
+.dz-plan-t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dz-plan-t b { font-weight: 500; font-size: 16px; }
+.dz-plan-t .k { font-size: 11px; }
+.dz-plan-t .sub { font-size: 13px; }
+.dz-plan-p { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; white-space: nowrap; }
+.dz-plan-p b { font-weight: 500; }
+.dz-plan-p s { font-size: 12px; }
+.dz-bul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; font: 400 14px/1.4 system-ui, sans-serif; color: #e6eaf1; }
+.dz-bul li { display: flex; gap: 10px; align-items: flex-start; }
+.dz-bul svg { flex: none; color: hsl(var(--h) 100% 75%); }
+.dz-secure { display: flex; align-items: center; justify-content: center; gap: 8px; text-align: center; font-size: 13px; }
+.set-niko { display: flex; align-items: center; gap: 16px; }
+.set-niko-thumb { width: 72px; height: 72px; flex: none; border-radius: 16px; background: rgba(0,0,0,.3); overflow: hidden; }
+@media (max-width: 900px) { .dz-cap h1 { font-size: 34px; } .dz-cap { margin-top: -24px; } .dz-side { padding: 16px; } }
+@media (prefers-reduced-motion: reduce) { .dz-card, .dz-sheet { transition: none; animation: none; } }

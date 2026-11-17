@@ -1,7 +1,8 @@
 // Niko admin portal: sign-in with a second factor, then users and registration.
 import { StrictMode, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, ApiError, Field, PasswordField, Switch } from '@niko/ui';
+import { api, ApiError, DesignPreview, Field, PasswordField, Switch } from '@niko/ui';
+import { DESIGNS, designInfo, type DesignInfo } from '@niko/shared';
 import { AI_OPTION_GROUPS, AI_PRESETS, aiAllowed, BUILTIN_TOKEN, hearPresetOf, imagePresetOf, presetOf, providedIds, voicePresetOf, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
 import '@niko/ui/src/styles.css';
 import './admin.css';
@@ -1295,6 +1296,193 @@ function KeysLibrary({ guard }: { guard: (e: unknown) => void }) {
 }
 
 type SetupTarget = { who: 'user' | 'invite'; id: string; name: string };
+// ---------------------------------------------------------------- designs
+// Which Niko designs people can choose, and what they cost. Switching a design off hides it from people who don't own
+// it (whoever bought it keeps it); switching it back on makes it new for bundle owners who don't have it.
+type DesignRow = { on: boolean; paid: boolean; cents: number | null; everOn: boolean; wasOff: boolean };
+type DesignCfg = { designs: Record<string, DesignRow>; bundleCents: number | null; credit: boolean; rate: 'saving' | 'percent'; percent: number; pro: { on: boolean; monthly: number | null; yearly: number | null } };
+function DesignsAdmin({ guard }: { guard: (e: unknown) => void }) {
+  const [saved, setSaved] = useState<DesignCfg | null>(null);
+  const [d, setD] = useState<DesignCfg | null>(null);
+  const [prices, setPrices] = useState<Record<string, string>>({});
+  const [bundle, setBundle] = useState('');
+  const [pct, setPct] = useState('30');
+  const [proM, setProM] = useState('');
+  const [proY, setProY] = useState('');
+  const [list, setList] = useState<DesignInfo[]>([]);
+  const [owners, setOwners] = useState<Record<string, number>>({});
+  const [counts, setCounts] = useState<{ bundles: number; pro: number } | null>(null);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const take = (s: DesignCfg) => {
+    setSaved(s); setD(s);
+    setPrices(Object.fromEntries(Object.entries(s.designs).map(([id, e]) => [id, centsText(e.cents)])));
+    setBundle(centsText(s.bundleCents)); setPct(String(s.percent)); setProM(centsText(s.pro.monthly)); setProY(centsText(s.pro.yearly));
+  };
+  useEffect(() => {
+    api<{ settings: DesignCfg; designs: DesignInfo[]; owners: Record<string, number>; bundles: number; pro: number }>('/admin/designs')
+      .then((r) => { take(r.settings); setList(r.designs); setOwners(r.owners); setCounts({ bundles: r.bundles, pro: r.pro }); }).catch(guard);
+  }, [guard]);
+  if (!d || !saved) return null;
+  const row = (id: string, p: Partial<DesignRow>) => { setD({ ...d, designs: { ...d.designs, [id]: { ...d.designs[id]!, ...p } } }); setNote(null); };
+  // The draft as it would be saved: typed prices read as cents.
+  const draft: DesignCfg = {
+    ...d, bundleCents: toCents(bundle), percent: Math.max(0, Math.min(90, parseInt(pct, 10) || 0)),
+    pro: { ...d.pro, monthly: toCents(proM), yearly: toCents(proY) },
+    designs: Object.fromEntries(Object.entries(d.designs).map(([id, e]) => [id, { ...e, cents: toCents(prices[id] ?? '') }])),
+  };
+  const offered = list.filter((x) => x.id !== 'nebula' && draft.designs[x.id]?.on && draft.designs[x.id]!.paid);
+  const missing = offered.filter((x) => !draft.designs[x.id]!.cents).length;
+  const sum = offered.reduce((n, x) => n + (draft.designs[x.id]!.cents ?? 0), 0);
+  const b = draft.bundleCents;
+  const ratio = !missing && b && sum > b ? b / sum : null;
+  const bundleNote = !offered.length ? 'No paid designs are offered, so the bundle is hidden.'
+    : missing ? `Covers the ${offered.length} paid designs offered today. Give every paid design a price to see the saving.`
+    : !b ? `Covers the ${offered.length} paid designs offered today, ${money(sum)} if bought one by one.`
+    : b >= sum ? `The bundle should cost less than the ${money(sum)} the designs cost one by one.`
+    : `Covers the ${offered.length} paid designs offered today, ${money(sum)} one by one. People save ${Math.round((1 - ratio!) * 100)}%.`;
+  const off = d.rate === 'saving' ? (ratio == null ? null : 1 - ratio) : draft.percent / 100;
+  const EX = 400;
+  const rateNote = off == null ? 'Bundle owners get the same saving as the bundle. Set the bundle price to see an example.'
+    : `Example: a new design at ${money(EX)} costs bundle owners ${money(Math.max(50, Math.round(EX * (1 - off))))} (${Math.round(off * 100)}% off). Everyone else pays full price.`;
+  const status = (id: string) => {
+    const e = draft.designs[id]!, was = saved.designs[id]!;
+    const priceBit = !e.paid ? 'included' : e.cents ? `${money(e.cents)} once` : 'needs a price';
+    const own = owners[id] ? ` · ${owners[id]} own it` : '';
+    if (!e.on) return { text: was.on || e.everOn ? `Not offered · anyone who bought it keeps it${own}` : 'New · not offered yet', hi: false };
+    if (e.wasOff || (!was.on && was.everOn)) return { text: `Back as a new design · ${priceBit}`, hi: true };
+    if (!was.everOn) return { text: `New · ${priceBit}`, hi: true };
+    return { text: `Offered · ${priceBit}${own}`, hi: false };
+  };
+  const save = async () => {
+    setNote(null);
+    const bad = (v: string) => v.trim() !== '' && toCents(v) === null;
+    if (Object.values(prices).some(bad) || bad(bundle) || bad(proM) || bad(proY)) return setNote({ ok: false, text: 'Prices are in Singapore dollars, at least 0.50, like 4 or 4.50.' });
+    setBusy(true);
+    try {
+      const r = await api<{ settings: DesignCfg }>('/admin/designs', { method: 'PUT', body: { settings: draft } });
+      take(r.settings);
+      setNote({ ok: true, text: 'Saved. New purchases use these prices; anyone who already unlocked keeps what they have.' });
+    } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
+  };
+  const proLine = [draft.pro.monthly ? `+${money(draft.pro.monthly)} a month` : '+SGD [MONTHLY]', draft.pro.yearly ? `+${money(draft.pro.yearly)} a year` : '+SGD [YEARLY]'].join(' or ');
+  const see = [
+    { name: 'Nebula', note: 'Included for everyone.', price: 'Included' },
+    { name: 'One design', note: 'Pay once, keep it.', price: offered.length ? 'Price above' : '—' },
+    { name: 'All designs', note: `Every paid design offered today.${d.credit ? ' Less what they already paid.' : ''}`, price: b ? money(b) : 'SGD [BUNDLE]' },
+    { name: 'New design, bundle owners', note: 'Pro-rated, one payment.', price: off == null ? 'SGD [PRO-RATED]' : `${Math.round(off * 100)}% off` },
+    { name: 'Niko Pro add-on', note: d.pro.on ? 'On top of their plan, once pay-once time ends. Every design, new ones included.' : 'Not offered.', price: d.pro.on ? proLine : '—' },
+  ];
+  return <>
+    <header><h1>Designs</h1><p className="sub" style={{ fontSize: 15 }}>Which Niko designs people can choose, and what they cost. Prices in Singapore dollars{counts ? ` · ${counts.bundles} with the bundle · ${counts.pro} on Niko Pro` : ''}.</p></header>
+    {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
+    <div className="pay-grid">
+      <section className="g card" aria-label="Design prices">
+        <div><span className="k">Design prices</span>
+          <p className="sub" style={{ marginTop: 6 }}>Switch a design on to offer it. Paid designs are a one-time unlock, kept on every device, even after a design is switched off.</p></div>
+        <div className="pay-block">
+          <b className="pay-h">1 · Each design</b>
+          <div className="dz-rows">
+            {list.map((x) => {
+              const fixed = x.id === 'nebula', e = draft.designs[x.id], st = fixed ? null : status(x.id);
+              return (
+                <div key={x.id} className="dz-arow">
+                  <Switch on={fixed || !!e?.on} onChange={(v) => row(x.id, { on: v })} label={`Offer ${x.name}`} disabled={fixed} />
+                  <span className="dz-amini"><DesignPreview design={x.id} particles={x.id === 'nebula' ? 300 : undefined} /></span>
+                  <span className="pay-txt"><span>{x.name}</span><span className={'sub small' + (st?.hi ? ' dz-hi' : '')}>{fixed ? 'Everyone has it' : st!.text}</span></span>
+                  {fixed ? <span className="sub small">Always included · the default</span> : (
+                    <div className="pay-line">
+                      <div role="group" aria-label={`${x.name}: included or paid`} className="segs">
+                        <button className="seg" aria-pressed={!e!.paid} disabled={!e!.on} onClick={() => row(x.id, { paid: false })}>Included</button>
+                        <button className="seg" aria-pressed={e!.paid} disabled={!e!.on} onClick={() => row(x.id, { paid: true })}>Paid</button>
+                      </div>
+                      <label className={'price' + (e!.on && e!.paid ? '' : ' dim')}><span className="k">SGD</span><span className="sr">{x.name} price in Singapore dollars</span>
+                        <input className="in" inputMode="decimal" placeholder="Amount" value={prices[x.id] ?? ''} disabled={!e!.on || !e!.paid} onChange={(ev) => { setPrices({ ...prices, [x.id]: ev.target.value }); setNote(null); }} style={{ width: 110 }} /></label>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div className="pay-block">
+          <b className="pay-h">2 · All designs bundle</b>
+          <div className="pay-line">
+            <label className="price"><span className="k">SGD</span><span className="sr">Bundle price in Singapore dollars</span><input className="in" inputMode="decimal" placeholder="Amount" value={bundle} onChange={(ev) => { setBundle(ev.target.value); setNote(null); }} /></label>
+            <span>once, for every paid design offered today</span>
+          </div>
+          <p className={'sub small' + (b && sum && !missing && b >= sum ? ' err' : '')}>{bundleNote}</p>
+          <div className="pay-row">
+            <Switch on={d.credit} onChange={(v) => { setD({ ...d, credit: v }); setNote(null); }} label="Count designs someone already bought toward the bundle" />
+            <span className="pay-txt"><span>Count designs someone already bought</span><span className="sub small">{d.credit ? 'Someone who owns a few designs pays the bundle price minus what they paid for them.' : 'Everyone pays the full bundle price, whatever they already own.'}</span></span>
+          </div>
+        </div>
+        <div className="pay-block">
+          <b className="pay-h">3 · When a new design arrives</b>
+          <p className="sub small">The bundle covers what was offered when someone bought it. Bundle owners can add each new design for a pro-rated amount.</p>
+          <div role="group" aria-label="How the pro-rated amount is worked out" className="segs">
+            <button className="seg" aria-pressed={d.rate === 'saving'} onClick={() => { setD({ ...d, rate: 'saving' }); setNote(null); }}>Bundle’s saving</button>
+            <button className="seg" aria-pressed={d.rate === 'percent'} onClick={() => { setD({ ...d, rate: 'percent' }); setNote(null); }}>Set percentage off</button>
+          </div>
+          {d.rate === 'percent' && <div className="pay-line"><label><span className="sr">Percentage off for bundle owners</span><input className="in num" inputMode="numeric" value={pct} onChange={(ev) => { setPct(ev.target.value.replace(/\D/g, '').slice(0, 2)); setNote(null); }} /></label><span>% off each new design’s price</span></div>}
+          <p className="sub small">{rateNote}</p>
+        </div>
+        <div className="pay-block">
+          <b className="pay-h">4 · Switching a design off, or back on</b>
+          <div className="dz-rule"><span className="k">Off</span><span className="pay-txt"><span>It stops being offered</span><span className="sub small">Hidden from people who don’t own it and left out of the bundle. Everyone who bought it, on its own or in a bundle, keeps using it.</span></span></div>
+          <div className="dz-rule"><span className="k dz-hi">On</span><span className="pay-txt"><span>It comes back as a new design</span><span className="sub small">People who own it keep it. Bundle owners who don’t have it can add it at the pro-rated amount, and it joins the bundle for new buyers.</span></span></div>
+        </div>
+        <div className="pay-acts"><button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save design prices'}</button><span className="sub small">Anyone who already unlocked a design keeps it. New prices apply to new purchases.</span></div>
+      </section>
+      <div className="pay-side">
+        <section className="g card" aria-label="Niko Pro">
+          <div className="card-head"><span className="k">Niko Pro · add-on</span><Switch on={d.pro.on} onChange={(v) => { setD({ ...d, pro: { ...d.pro, on: v } }); setNote(null); }} label="Offer the Niko Pro add-on" /></div>
+          <p className="sub">Added on top of someone’s monthly or yearly plan: every design offered, new ones included, while the add-on is on.</p>
+          <div className="pay-row"><span className="pay-name" style={{ width: 140 }}>On monthly plans</span><label className={'price' + (d.pro.on ? '' : ' dim')}><span className="k">SGD</span><span className="sr">Add-on price for monthly plans, in Singapore dollars</span><input className="in" inputMode="decimal" placeholder="Amount" value={proM} disabled={!d.pro.on} onChange={(ev) => { setProM(ev.target.value); setNote(null); }} /></label><span className="sub">extra a month</span></div>
+          <div className="pay-row"><span className="pay-name" style={{ width: 140 }}>On yearly plans</span><label className={'price' + (d.pro.on ? '' : ' dim')}><span className="k">SGD</span><span className="sr">Add-on price for yearly plans, in Singapore dollars</span><input className="in" inputMode="decimal" placeholder="Amount" value={proY} disabled={!d.pro.on} onChange={(ev) => { setProY(ev.target.value); setNote(null); }} /></label><span className="sub">extra a year</span></div>
+          <ul className="dz-list sub small">
+            <li>Not offered during pay-once time. It appears once someone is on a monthly or yearly plan.</li>
+            <li>Joins their plan’s Stripe subscription, so both renew and bill together. Adding it mid-period charges only the rest of that period.</li>
+            <li>If the add-on or their plan ends: designs bought once stay; the rest go back to Nebula.</li>
+          </ul>
+        </section>
+        <section className="g card" aria-label="What people see">
+          <span className="k">What people see</span>
+          <ol className="dz-see">{see.map((x) => <li key={x.name}><span className="pay-txt"><span>{x.name}</span><span className="sub small">{x.note}</span></span><b>{x.price}</b></li>)}</ol>
+          <p className="sub small">To give one person a design with no payment, go to Users → the person → Designs.</p>
+        </section>
+      </div>
+    </div>
+  </>;
+}
+
+/** One person's designs in Users: what they own and how, and gifts (a design with no payment). Only gifts can be
+ * taken back; anything paid for stays theirs. */
+function PersonDesigns({ id, isAdmin }: { id: string; isAdmin: boolean }) {
+  const [r, setR] = useState<{ owned: { design: string; source: string }[]; bundle: string | null; pro: boolean } | null>(null);
+  const [give, setGive] = useState('');
+  const [msg, setMsg] = useState('');
+  const load = () => api<{ owned: { design: string; source: string }[]; bundle: string | null; pro: boolean }>(`/admin/users/${id}/designs`).then(setR).catch(() => setR({ owned: [], bundle: null, pro: false }));
+  useEffect(() => { setR(null); setMsg(''); void load(); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (isAdmin) return <div className="psec"><span className="k">Designs</span><span className="sub small">Admins have every design.</span></div>;
+  if (!r) return <div className="psec"><span className="k">Designs</span><span className="sub small">Loading…</span></div>;
+  const how: Record<string, string> = { single: 'Bought', bundle: 'In bundle', topup: 'Added later', gift: 'Given by you' };
+  const owned = new Set(r.owned.map((o) => o.design));
+  const left = DESIGNS.filter((x) => x.id !== 'nebula' && !owned.has(x.id));
+  const act = async (p: Promise<unknown>) => { setMsg(''); try { await p; await load(); setGive(''); } catch (e) { setMsg((e as Error).message); } };
+  return (
+    <div className="psec"><span className="k">Designs</span>
+      <span className="sub small">{[r.bundle ? `All designs bundle since ${fmtDate(r.bundle)}` : '', r.pro ? 'Niko Pro is on' : ''].filter(Boolean).join(' · ') || 'Nebula, plus anything included.'}</span>
+      {r.owned.length > 0 && <ul className="recent">{r.owned.map((o) => <li key={o.design}><span>{designInfo(o.design).name}</span><span className="sub small">{how[o.source] ?? o.source}{o.source === 'gift' && <> · <button className="lnk" style={{ padding: 0, minHeight: 0 }} onClick={() => act(api(`/admin/users/${id}/designs/${o.design}`, { method: 'DELETE' }))}>Take back</button></>}</span></li>)}</ul>}
+      {left.length > 0 && <div className="pay-line">
+        <label><span className="sr">Design to give</span><select className="in sel" value={give} onChange={(e) => setGive(e.target.value)}><option value="">Choose a design</option>{left.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
+        <button className="bt" disabled={!give} onClick={() => act(api(`/admin/users/${id}/designs`, { body: { design: give } }))}>Give</button>
+      </div>}
+      {msg && <span className="err small" role="alert">{msg}</span>}
+    </div>
+  );
+}
+
 function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemove, onRevoke, onNewCode, onAudit, onSetup, onCopy, copyFrom }: {
   item: Item; pay: PaymentSettings | null; onClose: () => void; onSetup: (t: SetupTarget, tab?: UsageKind | 'caps') => void;
   onCopy: (t: SetupTarget, fromId: string, fromName: string, fromWho: 'user' | 'invite') => void; copyFrom: { id: string; label: string; kind: 'user' | 'invite' }[]; onToggle: (u: UserRow) => void; onPrices: (u: UserRow) => void; onUnlock: (u: UserRow) => void;
@@ -1343,6 +1531,7 @@ function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemov
       {payer && pay && <div className="psec"><div className="psec-row"><span className="k">Plan prices</span><span className={'tag' + (item.keptPrices ? ' own' : '')}>{item.keptPrices ? (item.pricesFrom === 'admin' ? 'Own' : `Own · kept${item.pricesAt ? ' ' + fmtDate(item.pricesAt) : ''}`) : 'Default'}</span></div>
         <span style={{ fontSize: 15 }}>{offersLine(item.keptPrices ?? plansOffered(pay)) || 'No plans on'}</span><span className="sub small">What they pay when they next choose a plan.</span></div>}
       <EngineCard who="user" id={item.id} name={item.name || item.email} onSetup={(tab) => onSetup({ who: 'user', id: item.id, name: item.name || item.email }, tab)} onCopy={(fid, fname, fwho) => onCopy({ who: 'user', id: item.id, name: item.name || item.email }, fid, fname, fwho)} copyFrom={copyFrom.filter((o) => o.id !== item.id)} />
+      {!unpaid && <PersonDesigns id={item.id} isAdmin={item.role === 'admin'} />}
       {(payer || unpaid) && <div className="psec"><span className="k">Actions</span><div className="acts">
         {payer && pay && <button className="bt" onClick={() => onPrices(item)}>Change prices</button>}
         {payer && <button className="bt" onClick={() => onUnlock(item)}>Unlock</button>}
@@ -1524,7 +1713,7 @@ function AuditTab({ guard, person, onPerson }: { guard: (e: unknown) => void; pe
 }
 
 function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?: { name: string; email: string } | null }) {
-  const [tab, setTab] = useState<'users' | 'payments' | 'ai' | 'keys' | 'glance' | 'limits' | 'security' | 'audit'>('users');
+  const [tab, setTab] = useState<'users' | 'payments' | 'designs' | 'ai' | 'keys' | 'glance' | 'limits' | 'security' | 'audit'>('users');
   const [me, setMe] = useState<{ name: string; email: string } | null>(initialMe ?? null);
   const [auditFor, setAuditFor] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -1546,6 +1735,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
         <nav aria-label="Admin sections">
           <button className="nv" aria-current={tab === 'users' ? 'page' : undefined} onClick={() => setTab('users')}>Users</button>
           <button className="nv" aria-current={tab === 'payments' ? 'page' : undefined} onClick={() => setTab('payments')}>Payments</button>
+          <button className="nv" aria-current={tab === 'designs' ? 'page' : undefined} onClick={() => setTab('designs')}>Designs</button>
           <button className="nv" aria-current={tab === 'ai' ? 'page' : undefined} onClick={() => setTab('ai')}>AI options</button>
           <button className="nv" aria-current={tab === 'keys' ? 'page' : undefined} onClick={() => setTab('keys')}>Included keys</button>
           <button className="nv" aria-current={tab === 'glance' ? 'page' : undefined} onClick={() => setTab('glance')}>New items</button>
@@ -1557,7 +1747,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
       </aside>
       <main key={tab} className="hud-in">
         {tab === 'users' ? <PeopleTab onSignedOut={onSignedOut} onOpenPayments={() => setTab('payments')} onAudit={(id) => { setAuditFor(id); setTab('audit'); }} />
- : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'keys' ? <KeysLibrary guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'security' ? <>
+ : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'designs' ? <DesignsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'keys' ? <KeysLibrary guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'security' ? <>
           <header><h1>Security</h1><p className="sub" style={{ fontSize: 15 }}>Your own admin sign-in: authenticator app and recovery codes.</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
           <div className="two">

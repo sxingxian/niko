@@ -1,6 +1,6 @@
 import { and, desc, eq, gt, ilike, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
-import { appSettings, auditLog, invites, recoveryCodes, sessions, signups, users, type Db } from '@niko/db';
+import { appSettings, auditLog, designOwned, invites, recoveryCodes, sessions, signups, users, type Db } from '@niko/db';
 import { accessState, accountLimits, cleanProvided, providedIds, USAGE_KINDS, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
 import { connectInfo, connectStripe, dateLabel, forgetPayments, forgetStripeMode, inviteCodeHash, keysOf, makeInviteCode, paymentSettings, PAYMENTS_KEY, payNow, plansLine, secretsFor, STRIPE_MODE_KEY, stripeMode } from '../billing';
 import { isMode, keysFor, modeStatus, stripe, StripeError, stripeReady } from '../stripe';
@@ -16,6 +16,8 @@ import { audit, clientIp, endSession, requireAdmin, requireAdminPassword, startS
 import { findUser, registrationMode } from './auth';
 import { includedByUser, nextReset } from '../usage';
 import { setup } from './setup';
+import { DEFAULT_DESIGN, DESIGNS, designInfo, designSettingsProblem, isDesign, nextDesignSettings } from '@niko/shared';
+import { DESIGNS_KEY, designSettings, forgetDesigns } from '../designs';
 
 export const admin = new Hono<AppEnv>();
 admin.route('/setup', setup);
@@ -580,6 +582,64 @@ const changedKeys = (a: Record<string, boolean>, b: Record<string, boolean>) => 
 
 // The audit log, newest first, one page at a time. Search matches the action or its details; a person narrows it to
 // what they did and what was done to their account.
+// ---------------------------------------------------------------- designs
+// The admin's design offer. Who owns what is never changed by these settings: switching a design off hides it from
+// people who don't own it, and everyone who bought it keeps it. Switching it back on makes it new for bundle owners.
+admin.get('/designs', requireAdmin, async (c) => {
+  const db = c.get('db');
+  const owners = await db.select({ design: designOwned.design, n: sql<number>`count(*)::int` }).from(designOwned).groupBy(designOwned.design);
+  const bundles = Number((await db.select({ n: sql<number>`count(*)::int` }).from(users).where(isNotNull(users.designBundleAt)))[0]?.n ?? 0);
+  const pro = Number((await db.select({ n: sql<number>`count(*)::int` }).from(users).where(eq(users.proOn, true)))[0]?.n ?? 0);
+  return c.json({ settings: await designSettings(db, true), designs: DESIGNS, owners: Object.fromEntries(owners.map((o) => [o.design, o.n])), bundles, pro });
+});
+admin.put('/designs', requireAdmin, async (c) => {
+  const b = await c.req.json<{ settings?: unknown }>().catch(() => ({} as { settings?: unknown }));
+  const db = c.get('db');
+  const before = await designSettings(db, true);
+  const next = nextDesignSettings(before, b.settings);
+  const problem = designSettingsProblem(next);
+  if (problem) return c.json({ error: problem }, 400);
+  await db.insert(appSettings).values({ key: DESIGNS_KEY, value: next }).onConflictDoUpdate({ target: appSettings.key, set: { value: next } });
+  forgetDesigns();
+  const off = Object.keys(next.designs).filter((id) => before.designs[id]?.on && !next.designs[id]!.on).map((id) => designInfo(id).name);
+  const back = Object.keys(next.designs).filter((id) => !before.designs[id]?.on && next.designs[id]!.on).map((id) => designInfo(id).name);
+  await audit(c, 'admin.designs', { offered: Object.keys(next.designs).filter((id) => next.designs[id]!.on).length, switchedOff: off, switchedOn: back, bundle: money(next.bundleCents), pro: next.pro.on });
+  return c.json({ settings: next });
+});
+// One person's designs: what they own and how, and gifts (a design with no payment).
+admin.get('/users/:id/designs', requireAdmin, async (c) => {
+  const db = c.get('db');
+  const id = c.req.param('id');
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return c.json({ error: 'Not found.' }, 404);
+  const u = (await db.select({ id: users.id, bundle: users.designBundleAt, pro: users.proOn }).from(users).where(eq(users.id, id)).limit(1))[0];
+  if (!u) return c.json({ error: 'Not found.' }, 404);
+  const owned = await db.select({ design: designOwned.design, source: designOwned.source, createdAt: designOwned.createdAt }).from(designOwned).where(eq(designOwned.userId, id));
+  return c.json({ owned, bundle: u.bundle, pro: u.pro });
+});
+admin.post('/users/:id/designs', requireAdmin, async (c) => {
+  const b = await c.req.json<{ design?: string }>().catch(() => ({} as { design?: string }));
+  const db = c.get('db');
+  const id = c.req.param('id');
+  if (!/^[0-9a-f-]{36}$/i.test(id) || !isDesign(b.design) || b.design === DEFAULT_DESIGN) return c.json({ error: 'Choose a design to give.' }, 400);
+  const u = (await db.select({ id: users.id, email: users.email }).from(users).where(eq(users.id, id)).limit(1))[0];
+  if (!u) return c.json({ error: 'Not found.' }, 404);
+  const added = await db.insert(designOwned).values({ userId: id, design: b.design, source: 'gift' }).onConflictDoNothing().returning({ d: designOwned.design });
+  if (!added.length) return c.json({ error: 'They already have that design.' }, 409);
+  await audit(c, 'admin.design_gift', { target: u.email, design: designInfo(b.design).name });
+  return c.json({ ok: true });
+});
+admin.delete('/users/:id/designs/:design', requireAdmin, async (c) => {
+  const db = c.get('db');
+  const id = c.req.param('id'), design = c.req.param('design');
+  if (!/^[0-9a-f-]{36}$/i.test(id) || !isDesign(design)) return c.json({ error: 'Not found.' }, 404);
+  // Only gifts can be taken back: anything paid for stays theirs.
+  const gone = await db.delete(designOwned).where(and(eq(designOwned.userId, id), eq(designOwned.design, design), eq(designOwned.source, 'gift'))).returning({ d: designOwned.design });
+  if (!gone.length) return c.json({ error: 'Only designs you gave can be taken back. Paid designs stay theirs.' }, 400);
+  const u = (await db.select({ email: users.email }).from(users).where(eq(users.id, id)).limit(1))[0];
+  await audit(c, 'admin.design_ungift', { target: u?.email, design: designInfo(design).name });
+  return c.json({ ok: true });
+});
+
 admin.get('/audit', requireAdmin, async (c) => {
   const db = c.get('db');
   const per = PER_PAGE.includes(Number(c.req.query('per'))) ? Number(c.req.query('per')) : 50;

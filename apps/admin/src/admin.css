@@ -417,3 +417,16 @@ body { background: #07090d; }
 }
 .setup .svc.blocked { opacity: .55; }
 .off-line { font-size: 13px; line-height: 1.5; padding: 10px 14px; border-radius: 14px; border: 1px dashed rgba(255,255,255,.22); }
+
+/* Designs: each design's row, the switching rules, and the summary. */
+.dz-rows { display: flex; flex-direction: column; }
+.dz-arow { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,.08); }
+.dz-arow .pay-txt { flex: 1 1 140px; }
+.dz-amini { width: 44px; height: 44px; flex: none; border-radius: 10px; background: rgba(0,0,0,.35); overflow: hidden; }
+.dz-hi { color: #7fe3ff !important; }
+.dz-rule { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 16px; border: 1px solid rgba(255,255,255,.25); }
+.dz-rule > .k { width: 32px; flex: none; padding-top: 2px; }
+.dz-list { margin: 0; padding: 0 0 0 18px; display: flex; flex-direction: column; gap: 6px; }
+.dz-see { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.dz-see li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: start; }
+.dz-see b { font-weight: 600; font-size: 16px; text-align: right; max-width: 220px; }

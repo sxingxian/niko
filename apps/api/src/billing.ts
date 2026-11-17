@@ -8,6 +8,7 @@ import {
 import { ALLOWED_HOSTS, type Env } from './env';
 import { randomChars, seal, sha256, unseal } from './lib/crypto';
 import { esc, sendEmail } from './lib/email';
+import { applyDesignSession, applyPro } from './designs';
 import { idOf, invoiceSubscription, isMode, keysFor, periodEnd, planOf, stripe, StripeError, stripeReady, type StripeEnv, type StripeMode, type StripeSecrets } from './stripe';
 
 export const PAYMENTS_KEY = 'payments';
@@ -106,10 +107,12 @@ export async function connectStripe(env: Env, db: Db, mode: StripeMode, origin: 
 
 /** A Checkout line item with the price from Niko. The product is Niko's own, made in Stripe the first time it is needed,
  * so Stripe's product list stays short; if it can't be made, the name is sent with the price instead. */
-export async function priceLine(env: Env, db: Db, mode: StripeMode, keys: StripeEnv, cents: number, what: { months: number } | { plan: Plan }) {
-  const key = 'plan' in what ? `plan-${what.plan}` : `access-${what.months}`;
-  const name = 'plan' in what ? (what.plan === 'monthly' ? 'Niko · monthly plan' : 'Niko · yearly plan') : `Niko · ${lengthLabel(what.months)} of access`;
-  const recurring = 'plan' in what ? { recurring: { interval: what.plan === 'monthly' ? 'month' : 'year' } } : {};
+export type PriceWhat = { months: number } | { plan: Plan } | { proPlan: Plan } | { item: string; name: string };
+export async function priceLine(env: Env, db: Db, mode: StripeMode, keys: StripeEnv, cents: number, what: PriceWhat) {
+  const key = 'plan' in what ? `plan-${what.plan}` : 'proPlan' in what ? 'design-pro' : 'item' in what ? what.item : `access-${what.months}`;
+  const name = 'plan' in what ? (what.plan === 'monthly' ? 'Niko · monthly plan' : 'Niko · yearly plan') : 'proPlan' in what ? 'Niko Pro · every design' : 'item' in what ? what.name : `Niko · ${lengthLabel(what.months)} of access`;
+  const every = 'plan' in what ? what.plan : 'proPlan' in what ? what.proPlan : null;
+  const recurring = every ? { recurring: { interval: every === 'monthly' ? 'month' : 'year' } } : {};
   let product = (await connectInfo(db))[mode]?.products?.[key];
   if (!product) {
     try {
@@ -119,7 +122,7 @@ export async function priceLine(env: Env, db: Db, mode: StripeMode, keys: Stripe
       await saveConnect(db, mode, { products: { ...info[mode]?.products, [key]: product } });
     } catch { product = undefined; }
   }
-  return { quantity: 1, price_data: { currency: 'sgd', unit_amount: cents, ...recurring, ...(product ? { product } : { product_data: { name } }) } };
+  return { quantity: 1, price_data: { currency: 'sgd', unit_amount: cents, ...recurring, ...(product ? { product } : { product_data: { name } }) } as { currency: string; unit_amount: number; product?: string; product_data?: { name: string }; recurring?: { interval: string } } };
 }
 /** An account's Stripe customer in a mode, and the update that sets it. */
 export const customerIn = (u: { stripeCustomerTest: string | null; stripeCustomerLive: string | null }, mode: StripeMode) => (mode === 'live' ? u.stripeCustomerLive : u.stripeCustomerTest);
@@ -201,6 +204,8 @@ export async function applySubscription(db: Db, sub: any, mode: StripeMode): Pro
     subId: sub.id, subStatus: String(sub.status ?? ''), subPlan: planOf(sub), subPeriodEnd: periodEnd(sub), subCancelAtEnd: !!sub.cancel_at_period_end, subMode: mode,
     ...setCustomer(mode, idOf(sub.customer)),
   }).where(eq(users.id, u.id));
+  // Niko Pro rides on the plan's subscription: it's on exactly while that subscription carries Niko's add-on item.
+  await applyPro(db, u.id, sub);
   return u.id;
 }
 
@@ -210,7 +215,8 @@ export async function syncCheckout(env: Env, db: Db, id: string, mode: StripeMod
   const keys = keysFor(env, mode);
   if (!/^cs_[A-Za-z0-9_]{3,250}$/.test(id) || !keys.STRIPE_SECRET_KEY) return null;
   const s = await stripe(keys, 'GET', `/checkout/sessions/${id}`, { expand: ['subscription'] });
-  if (s.mode === 'payment') await applyPaidSession(env, db, s, mode);
+  if (s.mode === 'payment' && s.metadata?.kind === 'design') await applyDesignSession(db, s, mode);
+  else if (s.mode === 'payment') await applyPaidSession(env, db, s, mode);
   else if (s.mode === 'subscription' && s.status === 'complete' && s.subscription) {
     const sub = typeof s.subscription === 'string' ? await stripe(keys, 'GET', `/subscriptions/${s.subscription}`) : s.subscription;
     await applySubscription(db, sub, mode);
@@ -229,7 +235,8 @@ export async function handleStripeEvent(env: Env, db: Db, event: any, mode: Stri
     switch (event.type) {
       case 'checkout.session.completed':
       case 'checkout.session.async_payment_succeeded':
-        if (o?.mode === 'payment') await applyPaidSession(env, db, o, mode);
+        if (o?.mode === 'payment' && o.metadata?.kind === 'design') await applyDesignSession(db, o, mode);
+        else if (o?.mode === 'payment') await applyPaidSession(env, db, o, mode);
         else if (o?.mode === 'subscription' && o.subscription) await applySubscription(db, await stripe(keys, 'GET', `/subscriptions/${idOf(o.subscription)}`), mode);
         break;
       case 'customer.subscription.created':
