@@ -179,3 +179,40 @@ export function greatCircleMeters(a: { lat: number; lng: number }, b: { lat: num
 }
 /** A rough flying time: about 830 km/h in the air, plus half an hour for take-off, climb and landing. An estimate only. */
 export const flightSeconds = (meters: number) => Math.round((meters / 1000 / 830) * 3600 + 30 * 60);
+
+// ---------------------------------------------------------------- a place named by its country
+const COUNTRY_ALIASES: Record<string, string> = {
+  usa: 'US', 'u.s.': 'US', 'u.s.a.': 'US', us: 'US', america: 'US', 'united states of america': 'US', uk: 'GB', 'u.k.': 'GB', britain: 'GB', 'great britain': 'GB', england: 'GB', scotland: 'GB', wales: 'GB',
+  korea: 'KR', 'south korea': 'KR', 'republic of korea': 'KR', 'north korea': 'KP', holland: 'NL', 'the netherlands': 'NL', uae: 'AE', 'the uae': 'AE', emirates: 'AE', 'hong kong': 'HK', macau: 'MO', macao: 'MO',
+  taiwan: 'TW', 'mainland china': 'CN', prc: 'CN', russia: 'RU', vietnam: 'VN', 'viet nam': 'VN', laos: 'LA', burma: 'MM', 'czech republic': 'CZ', czechia: 'CZ', turkey: 'TR', 'türkiye': 'TR', 'ivory coast': 'CI', 'the philippines': 'PH',
+};
+let countryNames: Map<string, string> | null = null;
+function countryTable(): Map<string, string> {
+  if (countryNames) return countryNames;
+  countryNames = new Map(Object.entries(COUNTRY_ALIASES));
+  try {
+    const dn = new Intl.DisplayNames(['en'], { type: 'region' });
+    const A = 65;
+    for (let i = 0; i < 26; i++) for (let j = 0; j < 26; j++) {
+      const cc = String.fromCharCode(A + i, A + j), name = dn.of(cc);
+      if (name && name !== cc && !/unknown/i.test(name)) countryNames.set(name.toLowerCase(), cc);
+    }
+  } catch { /* no Intl region names: the aliases still work */ }
+  return countryNames;
+}
+/** The country a place is named by: the whole of it ("Japan"), or its last part ("Tokyo, Japan", "Osaka Japan").
+ * A place in one country is then never looked up with a service that covers only another country. */
+export function countryNamed(q: string): string | null {
+  const t = q.toLowerCase().replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  const table = countryTable();
+  if (table.has(t)) return table.get(t)!;
+  const last = t.includes(',') ? t.slice(t.lastIndexOf(',') + 1).trim() : '';
+  if (last && table.has(last)) return table.get(last)!;
+  // "Osaka Japan": the last one to three words.
+  const w = t.split(' ');
+  for (let k = Math.min(3, w.length - 1); k >= 1; k--) { const tail = w.slice(-k).join(' '); if (table.has(tail) && tail.length > 3) return table.get(tail)!; }
+  return null;
+}
+/** Only the country itself ("Japan", not "Tokyo, Japan"). */
+export const isCountryName = (q: string) => countryTable().has(q.toLowerCase().replace(/\s+/g, ' ').trim());

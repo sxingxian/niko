@@ -13,7 +13,9 @@ const LIFE_MS = 30_000;
 const IDLE_PAUSE_MS = 30 * 60_000; // no checks after 30 minutes without anyone using Niko
 const ICON: Record<GlanceItem['kind'], string> = { mail: 'mail', chat: 'mail', invite: 'calendar', reminder: 'calendar', note: 'note' };
 const LABEL: Record<GlanceItem['kind'], string> = { mail: 'New email', chat: 'New message', invite: 'New on your calendar', reminder: 'Starting soon', note: 'Note changed' };
-const said = (it: GlanceItem) => ({ mail: `New email from ${it.title}.`, chat: `New message from ${it.title}.`, invite: `New on your calendar: ${it.title}.`, reminder: `${it.title} starts soon.`, note: `${it.title} was changed.` })[it.kind];
+/** Arrived while locked, showing only who it is from: the rest is sealed until the code is in. */
+const sealedItem = (it: GlanceItem) => !!it.sealed;
+const said = (it: GlanceItem) => sealedItem(it) ? (it.kind === 'mail' ? `New email from ${it.title}.` : it.kind === 'chat' ? `New message from ${it.title}.` : `${LABEL[it.kind]}.`) : ({ mail: `New email from ${it.title}.`, chat: `New message from ${it.title}.`, invite: `New on your calendar: ${it.title}.`, reminder: `${it.title} starts soon.`, note: `${it.title} was changed.` })[it.kind];
 
 type Card = { it: GlanceItem; start: number; used: number; held: boolean; heldAt: number; leaving: boolean; entered: boolean };
 
@@ -30,7 +32,8 @@ export function GlanceStack({ wide }: { wide: boolean }) {
   const n = useNiko();
   const prefs = cleanGlancePrefs(n.me?.appearance.glance);
   const limits = n.me?.glanceLimits ?? GLANCE_LIMIT_DEFAULTS;
-  const enabled = prefs.on && limits.allowed && GLANCE_PARTS.some((p) => glanceEvery(prefs, limits, p) > 0);
+  // Locked: shown only when the person chose to see new items on the locked screen.
+  const enabled = prefs.on && limits.allowed && GLANCE_PARTS.some((p) => glanceEvery(prefs, limits, p) > 0) && !(n.locked && n.me?.lock?.showNew === 'off');
   const [cards, setCards] = useState<Card[]>([]);
   const [, setTick] = useState(0);
   const queue = useRef<GlanceItem[]>([]);
@@ -77,8 +80,10 @@ export function GlanceStack({ wide }: { wide: boolean }) {
       if (document.visibilityState === 'visible' && Date.now() - lastActive.current < IDLE_PAUSE_MS) {
         running = true;
         try {
-          const r = await api<{ items: GlanceItem[]; waitMs?: number; off?: boolean }>('/glance', { body: { tz: new Date().getTimezoneOffset() } });
+          const r = await api<{ items: GlanceItem[]; waitMs?: number; off?: boolean; locked?: boolean }>('/glance', { body: { tz: new Date().getTimezoneOffset() } });
           if (r.off) stop = true;
+          // Locked from somewhere else (another tab, the time ran out): this screen locks too.
+          if (r.locked && !nRef.current.locked) window.dispatchEvent(new Event('niko:locked'));
           const known = new Set([...queue.current.map((x) => x.key), ...cardsRef.current.map((c) => c.it.key)]);
           queue.current.push(...(r.items ?? []).filter((x) => !known.has(x.key)));
           wait = Math.max(45_000, r.waitMs ?? 60_000);
@@ -95,6 +100,22 @@ export function GlanceStack({ wide }: { wide: boolean }) {
     timer = window.setTimeout(run, 2500);
     return () => { stop = true; window.clearTimeout(timer); window.removeEventListener('pointerdown', active); window.removeEventListener('keydown', active); document.removeEventListener('visibilitychange', shown); };
   }, [enabled]);
+  // Locking takes every card off the screen (what was showing may say more than the locked screen should).
+  // Unlocking opens the sealed ones in place, so they read in full for the time they have left.
+  const wasLocked = useRef(n.locked);
+  useEffect(() => {
+    if (n.locked === wasLocked.current) return;
+    wasLocked.current = n.locked;
+    if (n.locked) { queue.current = []; setCards([]); return; }
+    const sealed = [...cardsRef.current.map((c) => c.it), ...queue.current].filter(sealedItem);
+    if (!sealed.length) return;
+    void api<{ items: ({ title: string; line: string; open: string } | null)[] }>('/glance/reveal', { body: { sealed: sealed.map((x) => x.sealed) } }).then((r) => {
+      const full = new Map(sealed.map((x, i) => [x.key, r.items[i]]));
+      const fix = (it: GlanceItem): GlanceItem => { const v = full.get(it.key); return v ? { ...it, ...v, sealed: undefined } : it; };
+      queue.current = queue.current.map(fix);
+      setCards((cs) => cs.map((c) => ({ ...c, it: fix(c.it) })));
+    }).catch(() => undefined);
+  }, [n.locked]); // eslint-disable-line react-hooks/exhaustive-deps
   // Anything said to Niko counts as being here.
   useEffect(() => { if (n.mode !== 'idle') lastActive.current = Date.now(); }, [n.mode]);
 
@@ -113,7 +134,8 @@ export function GlanceStack({ wide }: { wide: boolean }) {
         window.setTimeout(() => setCards((cs) => cs.map((c) => (c.it.key === it.key ? { ...c, entered: true } : c))), 30);
         window.setTimeout(() => burst(it.key), 60);
         const p = cleanGlancePrefs(nRef.current.me?.appearance.glance);
-        if (p.aloud && first) nRef.current.say(said(it));
+        if (nRef.current.lockAsk) { /* the code entry is showing: the card arrives quietly */ }
+        else if (p.aloud && first) nRef.current.say(said(it));
         else if (first) { nRef.current.setStatus('New', said(it)); window.setTimeout(() => { if (nRef.current.label === 'New') nRef.current.rest(); }, 4500); }
       }
       // Time is up (time held, or while Niko is busy, does not count).
@@ -136,9 +158,27 @@ export function GlanceStack({ wide }: { wide: boolean }) {
     if (!on && c.held) return { ...c, held: false, used: c.used - (Date.now() - c.heldAt) };
     return c;
   }));
+  /** Opens an item, first opening its sealed copy when it came in while locked. */
+  const openFull = async (it: GlanceItem) => {
+    let full = it;
+    if (sealedItem(it)) {
+      const r = await api<{ items: ({ title: string; line: string; open: string } | null)[] }>('/glance/reveal', { body: { sealed: [it.sealed] } }).catch(() => null);
+      const v = r?.items[0];
+      if (!v) { nRef.current.setStatus('Problem', 'That item can’t be opened from here any more. Find it in Inbox, Calendar or Notes.'); return; }
+      full = { ...it, ...v };
+    }
+    nRef.current.openItem(full.view, full.open);
+  };
   const act = (c: Card, what: 'open' | 'reply' | 'dismiss') => {
     leave(c.it.key);
-    if (what !== 'dismiss') n.openItem(c.it.view, c.it.open);
+    if (what === 'dismiss') return;
+    const it = c.it;
+    if (!n.locked) { void openFull(it); return; }
+    // Locked: the code first, then it opens.
+    const first = it.title.split(/\s+/)[0] ?? it.title;
+    const reason = what === 'reply' ? `Enter your code to reply to ${it.title}.`
+      : it.kind === 'mail' ? `Enter your code to open ${first}’s email.` : it.kind === 'chat' ? `Enter your code to open the message from ${it.title}.` : 'Enter your code to open it.';
+    n.requestUnlock(reason, () => void openFull(it));
   };
   // Voice: "open it", "reply", "dismiss" act on the newest card on show.
   useEffect(() => {
@@ -209,7 +249,7 @@ export function GlanceStack({ wide }: { wide: boolean }) {
               <span className="glance-meta"><span className="k">{LABEL[c.it.kind]} · {c.it.source}</span><span>{ago < 5 ? 'now' : `${ago} s ago`} · {c.held ? 'Paused' : `${Math.ceil(left / 1000)} s`}</span></span>
               <button className="ib" aria-label="Dismiss" onClick={() => act(c, 'dismiss')}><Icon name="x" size={18} /></button>
             </div>
-            <button className="glance-open" onClick={() => act(c, 'open')} aria-label={`Open ${c.it.title}`}><b className="glance-title">{c.it.title}</b><span className="glance-line">{c.it.line}</span></button>
+            <button className="glance-open" onClick={() => act(c, 'open')} aria-label={`Open ${c.it.title}`}><b className="glance-title">{c.it.title}</b>{sealedItem(c.it) ? <span className="glance-line glance-locked">Unlock to read</span> : <span className="glance-line">{c.it.line}</span>}</button>
             <div className="glance-acts">
               <button className="pri" onClick={() => act(c, 'open')}>Open</button>
               {c.it.canReply && <button className="sec" onClick={() => act(c, 'reply')}>Reply</button>}
@@ -219,7 +259,7 @@ export function GlanceStack({ wide }: { wide: boolean }) {
         );
       })}
       {waiting > 0 && cards.length > 0 && (wide || !panelsOpen) && <p className="glance-more">+{waiting} more waiting · they appear as these go</p>}
-      {cards.length > 0 && wide && !panelsOpen && <p className="glance-hint">Say “open it”, “reply” or “dismiss”. Hover to keep it.</p>}
+      {cards.length > 0 && wide && !panelsOpen && <p className="glance-hint">{n.locked ? 'Open and Reply ask for your code first.' : 'Say “open it”, “reply” or “dismiss”. Hover to keep it.'}</p>}
     </aside>
     {createPortal(<canvas ref={fx} className="sparks" aria-hidden="true" />, document.body)}
   </>;

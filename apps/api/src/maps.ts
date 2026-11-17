@@ -9,6 +9,7 @@ import { connections, users, type Db } from '@niko/db';
 import {
   aiAllowed, mapsOn, bdToGcj, flightSeconds, greatCircle, greatCircleMeters, type MapAskMode, gcjToBd, gcjToWgs, mapChain, mapCountryLists, mapHandoff, mapOption, mapPreset, mapSkipped, MAX_MAP_KEYS, wgsToGcj,
   type BrainRest, type EnginePrefs, type MapKeyInfo, type MapMode, type MapPlace, type MapProvider, type MapResult, type MapRoute, type MapSource, type MapStep,
+  countryNamed, isCountryName,
 } from '@niko/shared';
 import type { Env } from './env';
 import { BrainFail, providerMessage } from './brains';
@@ -165,8 +166,10 @@ async function oneMapToken(k: MapKey): Promise<string> {
 // ---------------------------------------------------------------- finding a place
 type Near = { lat: number; lng: number } | null;
 /** Photon (OpenStreetMap data, komoot's public server), used lightly: one search per request, near the person. */
-async function osmFind(q: string, near: Near): Promise<MapPlace> {
-  const d = await getJson(`https://photon.komoot.io/api/?q=${enc(q)}&limit=1&lang=en${near ? `&lat=${near.lat.toFixed(3)}&lon=${near.lng.toFixed(3)}` : ''}`);
+async function osmFind(q: string, near: Near, wide = false): Promise<MapPlace> {
+  // wide: a flight's ends, or a whole country: towns, regions and countries (and airports by name), anywhere.
+  const layers = wide ? '&layer=city&layer=state&layer=country&layer=county&layer=district&layer=locality&layer=other' : '';
+  const d = await getJson(`https://photon.komoot.io/api/?q=${enc(q)}&limit=1&lang=en${layers}${near ? `&lat=${near.lat.toFixed(3)}&lon=${near.lng.toFixed(3)}` : ''}`);
   const f = d?.features?.[0];
   if (!f) throw new NotFound();
   const p = f.properties ?? {};
@@ -464,11 +467,27 @@ export async function findRoute(env: Env, db: Db, user: { id: string; engine: un
       if (why) { skipped.add(`${e.label}: ${why}`); return false; }
       return e.provider === 'osm' || mapPreset(e.provider)!.places;
     });
-    const near = ask.here;
+    // A flight's ends are found anywhere: with the Everywhere services, not nudged towards where the person is, and
+    // never with a service that covers one country only (OneMap found a shop called "Japan Home" for "Japan").
+    const fly = ask.mode === 'fly';
+    const near = fly ? null : ask.here;
+    const wideList = ordered(entries(null)).filter((e) => (e.provider === 'osm' || mapPreset(e.provider)!.places) && !(e.provider !== 'osm' && mapPreset(e.provider)!.only));
     const find = async (q: string, around: Near): Promise<{ p: MapPlace; e: Entry } | null> => {
-      for (const e of placeList) {
-        try { const p = e.provider === 'osm' ? await osmFind(q, around) : await findWith(e.key!, q, around); worked(e); return { p, e }; }
-        catch (err) { if (err instanceof NotFound) continue; failed(e, err); }
+      // A place named by its country ("Japan", "Tokyo, Japan") skips services that only cover another country, and
+      // a result outside that country is not taken.
+      const inCc = countryNamed(q), whole = isCountryName(q);
+      const list = (fly || whole ? wideList : placeList).filter((e) => {
+        const only = e.provider === 'osm' ? undefined : mapPreset(e.provider)!.only;
+        if (inCc && only && !only.includes(inCc)) { skipped.add(`${e.label}: ${q} is outside ${only.join(', ')}`); return false; }
+        return true;
+      });
+      for (const e of list) {
+        try {
+          const p = e.provider === 'osm' ? await osmFind(q, whole ? null : around, fly || whole) : await findWith(e.key!, q, whole ? null : around);
+          worked(e);
+          if (inCc) { const at = await countryOf(p.lng, p.lat); if (at && at !== inCc) continue; }
+          return { p, e };
+        } catch (err) { if (err instanceof NotFound) continue; failed(e, err); }
       }
       return null;
     };

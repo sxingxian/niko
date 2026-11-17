@@ -420,6 +420,9 @@ export interface Me {
   glanceLimits?: GlanceLimits;
   /** Whether this account may use Niko now (paid time, a plan, lifetime or admin), and the plans it can choose. */
   access?: AccessInfo;
+  /** The screen lock's settings (never the code), and whether this sign-in is locked now. */
+  lock?: LockInfo;
+  locked?: boolean;
 }
 
 /** Whether a message is about the weather. Only then is the device's location asked for and sent. */
@@ -550,4 +553,20 @@ export function glanceEvery(prefs: GlancePrefs, limits: GlanceLimits, part: Glan
 export interface GlanceItem {
   key: string; kind: 'mail' | 'chat' | 'invite' | 'reminder' | 'note'; title: string; line: string; source: string; at: number;
   /** Where it opens, and the title to open it by. */ view: 'inbox' | 'calendar' | 'notes'; open: string; canReply?: boolean;
+  /** Arrived while locked: the full item, sealed by the server and opened by /glance/reveal after unlocking. */ sealed?: string;
+}
+
+// ---------------------------------------------------------------- screen lock
+/** After how many minutes without use Niko locks. */
+export const LOCK_MINUTES = [1, 2, 5, 10, 15, 30, 60] as const;
+export type LockShowNew = 'off' | 'who' | 'full';
+/** What the app knows about the lock (never the code). */
+export interface LockInfo { on: boolean; mins: number; showNew: LockShowNew; passkey: boolean; setAt?: string }
+/** A code that is easy to guess: one digit repeated, or digits in a row up or down. */
+export function weakLockCode(code: string): boolean {
+  if (!/^\d{6}$/.test(code)) return true;
+  if (/^(\d)\1{5}$/.test(code)) return true;
+  const d = [...code].map(Number);
+  const up = d.every((x, i) => i === 0 || x === (d[i - 1]! + 1) % 10), down = d.every((x, i) => i === 0 || x === (d[i - 1]! + 9) % 10);
+  return up || down || ['121212', '112233', '123123', '000123', '696969', '159753'].includes(code);
 }

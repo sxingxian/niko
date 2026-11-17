@@ -28,6 +28,8 @@ export const users = pgTable('users', {
   /** 'kept' (kept when the default changed for new people only) or 'admin' (set for this person), and when. */
   planPricesFrom: text('plan_prices_from'),
   planPricesAt: ts('plan_prices_at'),
+  /** Screen lock settings, with the code as a peppered bcrypt hash. */
+  screenLock: jsonb('screen_lock'),
   // ---- access and payments (see migration 0007)
   lifetime: boolean('lifetime').notNull().default(false),
   accessUntil: ts('access_until'),
@@ -58,6 +60,10 @@ export const sessions = pgTable('sessions', {
   expiresAt: ts('expires_at').notNull(),
   ip: text('ip'),
   userAgent: text('user_agent'),
+  /** Screen lock, per sign-in: locked now, last in use (sent by the app while someone uses it), wrong codes. */
+  locked: boolean('locked').notNull().default(false),
+  seenAt: ts('seen_at'),
+  lockFails: integer('lock_fails').notNull().default(0),
 });
 
 export const invites = pgTable('invites', {

@@ -856,6 +856,94 @@ await ok('a slow calendar never holds up an answer: Niko answers within the wait
   } finally { env.AI.run = run; slowCal.on = false; Date.now = realNow; }
 });
 
+await ok('screen lock: set with the password, kept by the server, new items only as who, five wrong codes sign out', async () => {
+  const PWJ = 'a brand new long passphrase 42';
+  const b = new Browser();
+  assert.equal((await b.post('/auth/sign-in', { email: 'jun@example.com', password: PWJ })).status, 200);
+  let r = await b.get('/lock');
+  assert.equal(r.status, 200); assert.equal(r.data.on, false); assert.equal(r.data.locked, false);
+  assert.equal((await b.post('/lock/now')).status, 400, 'nothing to lock while it is off');
+  r = await b.put('/lock', { code: '482916' });
+  assert.equal(r.status, 400, 'a code needs the password');
+  r = await b.put('/lock', { code: '482916', password: 'wrong password here' });
+  assert.equal(r.status, 400); assert.match(r.data.error, /password/);
+  r = await b.put('/lock', { code: '123456', password: PWJ });
+  assert.equal(r.status, 400); assert.match(r.data.error, /easy to guess/);
+  r = await b.put('/lock', { code: '12a456', password: PWJ });
+  assert.equal(r.status, 400);
+  r = await b.put('/lock', { code: '482916', password: PWJ, mins: 5, showNew: 'who' });
+  assert.equal(r.status, 200, JSON.stringify(r.data)); assert.equal(r.data.on, true); assert.equal(r.data.mins, 5);
+  assert.ok(!('hash' in r.data), 'the hash never leaves the server');
+  const row = await user('jun@example.com');
+  assert.match(row.screen_lock.hash, /^\$2[aby]\$10\$/); assert.ok(!JSON.stringify(row.screen_lock).includes('482916'), 'the code is not stored');
+  const log = JSON.stringify(await q("select action, detail from audit_log where action like 'lock.%'"));
+  assert.ok(log.includes('lock.code_set') && !log.includes('482916'), 'audited without the code');
+  // The time and what shows change without the password.
+  r = await b.put('/lock', { mins: 10 }); assert.equal(r.status, 200); assert.equal(r.data.mins, 10);
+  assert.equal((await b.get('/me')).data.lock.on, true);
+
+  // New items on Home are on, so something arrives while locked.
+  r = await b.patch('/me', { appearance: { glance: { on: true, events: 5, mail: 5, chats: 5, notes: 5, remind: 0 } } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  // Already checked ten minutes ago, so the calendar's event now counts as new.
+  await q("insert into glance_state (user_id, checked, seen, upcoming) values ($1, $2, '{}', '[]') on conflict (user_id) do update set checked = excluded.checked, seen = '{}'", [(await user('jun@example.com')).id, JSON.stringify({ events: Date.now() - 600_000 })]);
+  r = await b.post('/lock/now'); assert.equal(r.status, 200);
+  r = await b.get('/me');
+  assert.equal(r.status, 200); assert.equal(r.data.locked, true); assert.equal(r.data.email, '', 'who the account is stays hidden'); assert.equal(r.data.name, null);
+  for (const [m, p, body] of [['POST', '/chat', { message: 'hi', tz: 0 }], ['GET', '/calendars'], ['GET', '/me/passkeys'], ['POST', '/glance/reveal', { sealed: [] }], ['PATCH', '/me', { name: 'x' }], ['GET', '/billing/status']]) {
+    r = await b.call(m, p, body);
+    assert.equal(r.status, 423, `${m} ${p} is shut while locked (${r.status})`); assert.equal(r.data.locked, true);
+  }
+  r = await b.post('/glance', { tz: 0 });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.ok(r.data.items.length >= 1, 'the calendar item arrived: ' + JSON.stringify(r.data));
+  assert.ok(!JSON.stringify(r.data).includes('Dentist'), 'only who it is from, nothing of what it says');
+  const sealed = r.data.items.map((i) => i.sealed);
+  assert.ok(sealed.every(Boolean));
+  // Its settings can't be changed while locked, not even with the password: unlock first.
+  assert.equal((await b.put('/lock', { on: false, password: PWJ })).status, 423);
+
+  // Wrong codes count down; the right one unlocks and resets the count.
+  r = await b.post('/lock/unlock', { code: '000001' });
+  assert.equal(r.status, 400); assert.equal(r.data.left, 4);
+  r = await b.post('/lock/unlock', { code: '482916' });
+  assert.equal(r.status, 200); assert.equal(r.data.locked, false);
+  assert.equal((await b.get('/calendars')).status, 200, 'open again');
+  r = await b.post('/glance/reveal', { sealed: [...sealed, 'v1.bad.bad'] });
+  assert.equal(r.status, 200); assert.ok(r.data.items[0].title.includes('Dentist'), 'opened in full after unlocking'); assert.equal(r.data.items.at(-1), null);
+  // Someone else's sealed items open to nothing.
+  const other = new Browser();
+  assert.equal((await other.post('/auth/sign-in', { email: 'lee@example.com', password: PW })).status, 200);
+  r = await other.post('/glance/reveal', { sealed });
+  assert.ok(r.status !== 200 || r.data.items.every((x) => x === null), 'not for another account');
+
+  // Idle: no use reported for longer than the lock's time locks this sign-in on its next request.
+  await q("update sessions set seen_at = now() - interval '11 minutes' where user_id = $1", [row.id]);
+  assert.equal((await b.get('/calendars')).status, 423, 'locked after being left alone');
+  assert.equal((await b.post('/lock/unlock', { code: '482916' })).status, 200);
+  r = await b.post('/lock/seen'); assert.equal(r.status, 200);
+  // The app's idle timer doesn't lock a sign-in that was just used (in another tab); it does once it has been left.
+  r = await b.post('/lock/now', { idle: true }); assert.equal(r.data.locked, false);
+  await q("update sessions set seen_at = now() - interval '9 minutes 50 seconds' where user_id = $1", [row.id]);
+  r = await b.post('/lock/now', { idle: true }); assert.equal(r.data.locked, true);
+  assert.equal((await b.post('/lock/unlock', { code: '482916' })).status, 200);
+
+  // Five wrong codes end the sign-in.
+  await b.post('/lock/now');
+  for (let i = 1; i <= 4; i++) assert.equal((await b.post('/lock/unlock', { code: '111112' })).data.left, 5 - i);
+  r = await b.post('/lock/unlock', { code: '111112' });
+  assert.equal(r.status, 401); assert.equal(r.data.signedOut, true);
+  assert.equal((await b.get('/me')).status, 401, 'signed out');
+  assert.ok(JSON.stringify(await q("select action from audit_log where action = 'lock.signed_out'")).includes('signed_out'));
+
+  // Signing in again starts unlocked; turning the lock off with the password clears the code.
+  assert.equal((await b.post('/auth/sign-in', { email: 'jun@example.com', password: PWJ })).status, 200);
+  assert.equal((await b.get('/calendars')).status, 200);
+  r = await b.put('/lock', { on: false, password: PWJ });
+  assert.equal(r.status, 200); assert.equal(r.data.on, false);
+  assert.ok(!(await user('jun@example.com')).screen_lock.hash, 'the code is gone');
+});
+
 await sqlc.end();
 await closePools();
 try { run('pg_ctl', ['-D', join(dir, 'data'), '-m', 'immediate', 'stop']); } catch { /* already stopping */ }

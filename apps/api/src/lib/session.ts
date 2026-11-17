@@ -4,6 +4,7 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { auditLog, authAttempts, sessions, users } from '@niko/db';
 import type { AppEnv } from '../env';
 import { randomToken, sha256 } from './crypto';
+import { lockOf, openWhileLocked } from '../lock';
 
 const APP_COOKIE = '__Host-niko';
 const ADMIN_COOKIE = '__Host-niko_admin';
@@ -75,6 +76,19 @@ export const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   c.set('user', row.u);
   c.set('sessionId', row.s.id);
   c.executionCtx.waitUntil(c.get('db').update(users).set({ lastActiveAt: new Date() }).where(eq(users.id, row.u.id)).then(() => undefined));
+  // Screen lock: locked when the app says so, or when nobody has used this sign-in for longer than the lock's time
+  // (the app reports use; background requests such as new-item checks don't count).
+  const lk = lockOf(row.u);
+  if (lk) {
+    let locked = row.s.locked;
+    const db = c.get('db');
+    if (!locked && row.s.seenAt && Date.now() - row.s.seenAt.getTime() > lk.mins * 60_000 + 20_000) {
+      locked = true;
+      await db.update(sessions).set({ locked: true }).where(eq(sessions.id, row.s.id));
+    } else if (!row.s.seenAt) c.executionCtx.waitUntil(db.update(sessions).set({ seenAt: new Date() }).where(eq(sessions.id, row.s.id)).then(() => undefined));
+    c.set('locked', locked);
+    if (locked && !openWhileLocked(c.req.method, c.req.path)) return c.json({ error: 'Niko is locked. Enter your code to carry on.', locked: true }, 423);
+  }
   await next();
 };
 

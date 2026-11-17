@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { countryOf, decodeFlexible, decodePolyline, findRoute, findWith, mapKeyProblem, routeWith } from '../apps/api/src/maps.ts';
 import { mapsOn } from '../packages/shared/src/index.ts';
-import { greatCircle, greatCircleMeters, flightSeconds } from '../packages/shared/src/maps.ts';
+import { greatCircle, greatCircleMeters, flightSeconds, countryNamed, isCountryName } from '../packages/shared/src/maps.ts';
 import { fullscreenCommand } from '../apps/app/src/speech.ts';
 import { bdToGcj, gcjToBd, gcjToWgs, mapChain, mapHandoff, mapSkipped, wgsToGcj } from '../packages/shared/src/maps.ts';
 import { countryCommand, countryFromName, mapCommand, takeMapTag } from '../apps/app/src/speech.ts';
@@ -221,6 +221,43 @@ await ok('flights: a great-circle line that never jumps the 180° meridian, its 
   assert.match(none.noRoute, /where the flight is from/);
   assert.equal(takeMapTag('Here it is. [[map:fly|Haneda Airport, Tokyo|Changi Airport]]').map.how, 'fly');
   assert.deepEqual(mapCommand('by plane'), { mode: 'fly' }); assert.deepEqual(mapCommand('show me the flight path'), { mode: 'fly' });
+});
+await ok('a flight to a country, from Singapore with OneMap first: found anywhere, never as a shop in Singapore', async () => {
+  calls = []; store.engineWrites = [];
+  store.creds['map-keys'] = { keys: [key('o', 'onemap', { email: 'me@example.com', password: 'PASSWORD-1', apiKey: '' }), key('g', 'google')] };
+  // OneMap matches any word against Singapore's buildings ("Japan Home", "Singapore Chinese Girls' School").
+  reply = (url, init) => url.includes('getToken') ? Response.json({ access_token: 'TOKEN-1', expiry_timestamp: String(Math.floor(Date.now() / 1000) + 3600) })
+    : url.includes('elastic/search') ? Response.json({ results: [{ SEARCHVAL: 'JAPAN HOME BUANGKOK SQUARE MALL', ADDRESS: '991 BUANGKOK LINK', LATITUDE: '1.3832', LONGITUDE: '103.8794' }] })
+    : url.includes('places') ? Response.json({ places: [JSON.parse(init.body).textQuery === 'Japan' ? { displayName: { text: 'Japan' }, formattedAddress: 'Japan', location: { latitude: 36.2, longitude: 138.25 } } : { displayName: { text: 'Singapore' }, formattedAddress: 'Singapore', location: { latitude: 1.3521, longitude: 103.8198 } }] })
+    : new Response('no', { status: 500 });
+  const u = user({ maps: ['mkey:g', 'osm'], mapCountries: { SG: ['mkey:o'] } });
+  const r = await findRoute(env, fakeDb, u, { to: 'Japan', from: 'Singapore', mode: 'fly', here: SG, country: 'auto' });
+  assert.equal(r.to.name, 'Japan'); assert.equal(r.from.name, 'Singapore'); assert.equal(r.route?.mode, 'fly', JSON.stringify(r.noRoute));
+  assert.ok(r.route.meters > 4_500_000, 'Singapore to Japan is thousands of kilometres');
+  assert.ok(!calls.some((c) => c.url.includes('elastic/search')), 'OneMap (Singapore only) is not asked about a flight');
+  const places = calls.filter((c) => c.url.includes('places'));
+  assert.ok(places.every((c) => !JSON.parse(c.init.body).locationBias), 'a flight is not nudged towards where you are');
+  // Driving to "Tokyo, Japan" from Singapore: OneMap is skipped for a place in another country.
+  calls = [];
+  reply = (url, init) => url.includes('places') ? Response.json({ places: [{ displayName: { text: 'Tokyo' }, formattedAddress: 'Tokyo, Japan', location: { latitude: 35.68, longitude: 139.69 } }] })
+    : url.includes('routes') ? Response.json({ routes: [] }) : new Response('no', { status: 500 });
+  const d = await findRoute(env, fakeDb, u, { to: 'Tokyo, Japan', mode: 'drive', here: SG, country: 'auto' });
+  assert.equal(d.to.name, 'Tokyo'); assert.ok(!calls.some((c) => c.url.includes('elastic/search')));
+  assert.ok(d.skipped.some((x) => /OneMap/.test(x)));
+  // A result outside the country named is not taken: the next service is asked.
+  calls = [];
+  reply = (url, init) => url.includes('places') ? Response.json({ places: [{ displayName: { text: 'Japan Home' }, formattedAddress: 'Singapore', location: { latitude: 1.38, longitude: 103.88 } }] })
+    : url.startsWith('https://photon') ? Response.json({ features: [{ properties: { name: 'Japan', type: 'country' }, geometry: { coordinates: [139.0, 36.0] } }] }) : new Response('no', { status: 500 });
+  const c2 = await findRoute(env, fakeDb, u, { to: 'Japan', mode: 'place', here: SG, country: 'auto' });
+  assert.equal(c2.to.name, 'Japan'); assert.equal(c2.source.label.includes('OpenStreetMap') || c2.source.id === 'osm', true);
+  assert.ok(calls.find((c) => c.url.startsWith('https://photon')).url.includes('layer=country') && !calls.find((c) => c.url.startsWith('https://photon')).url.includes('lat='));
+  store.creds['map-keys'] = null;
+});
+await ok('a place named by its country', () => {
+  assert.equal(countryNamed('Japan'), 'JP'); assert.equal(countryNamed('Tokyo, Japan'), 'JP'); assert.equal(countryNamed('Osaka Japan'), 'JP');
+  assert.equal(countryNamed('South Korea'), 'KR'); assert.equal(countryNamed('the UK'), null); assert.equal(countryNamed('UK'), 'GB'); assert.equal(countryNamed('Singapore'), 'SG');
+  assert.equal(countryNamed('Changi Airport'), null); assert.equal(countryNamed('Japan Home'), null); assert.equal(countryNamed('Marina Bay Sands'), null);
+  assert.equal(isCountryName('Japan'), true); assert.equal(isCountryName('Tokyo, Japan'), false);
 });
 await ok('full screen by voice', () => {
   assert.equal(fullscreenCommand('Niko, go full screen'), 'enter'); assert.equal(fullscreenCommand('fullscreen please'), 'enter');

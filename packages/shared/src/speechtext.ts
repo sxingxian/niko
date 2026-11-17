@@ -27,6 +27,12 @@ export function plainText(text: string): string {
   return text.split(TAG).map((part) => (TAG.test(part) ? part : clean(part))).join('').trim();
 }
 
+/** Text with none of the app's [[…]] tags left in it: for a draft or a message (which is never acted on), and for
+ * whatever the app shows after taking the tags it knows. A tag the app doesn't act on is never shown either. */
+export function stripTags(text: string): string {
+  return text.replace(/[ \t]*\[\[[^\]\n]*\]\][ \t]*/g, (m) => (/^\s|\s$/.test(m) ? ' ' : '')).replace(/ +([.,!?;:])/g, '$1').replace(/[ \t]+\n/g, '\n').replace(/ {2,}/g, ' ').trim();
+}
+
 /** What the voice says: no symbols read out as words ("asterisk", "slash", "hash"), and ranges and units said
  * the way a person would ("23 to 30 degrees"). */
 export function speakable(text: string): string {

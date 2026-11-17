@@ -22,7 +22,11 @@ export async function api<T = any>(path: string, init: { method?: string; body?:
     body: init.form ?? (init.body ? JSON.stringify(init.body) : undefined),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(data?.error ?? 'Something went wrong.', res.status, data);
+  if (!res.ok) {
+    // The server keeps the screen lock: any refused call tells the app to show the lock.
+    if (res.status === 423 && data?.locked && typeof window !== 'undefined') window.dispatchEvent(new Event('niko:locked'));
+    throw new ApiError(data?.error ?? 'Something went wrong.', res.status, data);
+  }
   return data as T;
 }
 

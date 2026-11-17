@@ -15,6 +15,7 @@ import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, PAGE_SIZES
 import { api, Field, Icon, PasswordField, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
 import { MapSettings, type MapLists } from './MapSettings';
+import { ScreenLock } from './ScreenLock';
 import { captureSupported, captureUtterance, transcribe, type Capture } from '../listen';
 
 function useMedia(q: string) {
@@ -1704,6 +1705,7 @@ export function Account() {
           </dialog>
         </section>
         <BillingCard />
+        <ScreenLock key={keys.length} onNote={setNote} />
         <section className="set-card" aria-label="Passkeys">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}><span className="k">Passkeys</span><span className="hint">For signing in only</span></div>
           {keys.length === 0 && <p className="sub">No passkeys yet.</p>}

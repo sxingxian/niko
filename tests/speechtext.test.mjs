@@ -1,6 +1,6 @@
 // Answers are spoken: no Markdown on screen, no symbols read out by the voice, and the app's tags left alone.
 import assert from 'node:assert/strict';
-import { plainText, speakable } from '../packages/shared/src/speechtext.ts';
+import { plainText, speakable, stripTags } from '../packages/shared/src/speechtext.ts';
 const ok = async (name, fn) => { try { await fn(); console.log('PASS', name); } catch (e) { console.log('FAIL', name, e?.stack ?? e?.message); process.exitCode = 1; } };
 await ok('Markdown comes off the answer; tags stay', () => {
   assert.equal(plainText('Got it. Set a home place in **Connections**—that’s where forecasts come from.'), 'Got it. Set a home place in Connections—that’s where forecasts come from.');
@@ -16,4 +16,10 @@ await ok('the voice says words, not symbols', () => {
   assert.equal(speakable('Here it is 🌧️ #weather [[map:fly|Tokyo]]'), 'Here it is weather');
   assert.equal(speakable('Read more at https://example.com/x'), 'Read more at the link');
   assert.equal(speakable('Tea/coffee at 10/12'), 'Tea or coffee at 10/12');
+});
+await ok('no app tag is ever left in a draft or shown', () => {
+  assert.equal(stripTags('Ah, that makes sense. Sounds like a solid start to the month! [[page:next]]'), 'Ah, that makes sense. Sounds like a solid start to the month!');
+  assert.equal(stripTags('Sure [[scroll:down]] thing.'), 'Sure thing.');
+  assert.equal(stripTags('Here [[map:fly|Japan|Singapore]].\nNext line [[unknown:x]]'), 'Here.\nNext line');
+  assert.equal(stripTags('No tags here.'), 'No tags here.');
 });

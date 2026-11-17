@@ -24,6 +24,8 @@ export interface Vars {
   db: Db;
   user: User;
   sessionId: string;
+  /** This sign-in is behind the screen lock (only the lock's own routes answer). */
+  locked?: boolean;
   site: Site;
 }
 

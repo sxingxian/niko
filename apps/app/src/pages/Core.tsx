@@ -1,7 +1,7 @@
 // Home (the adaptive core) and the workspace (inbox, calendar, notes with the docked core and countdown).
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
-import { aiAllowed, PAGE_SIZES, SEND_COUNTDOWN_SECONDS, voiceName, voiceOption, voiceOrder, type Me } from '@niko/shared';
+import { aiAllowed, stripTags, PAGE_SIZES, SEND_COUNTDOWN_SECONDS, voiceName, voiceOption, voiceOrder, type Me } from '@niko/shared';
 /** The first voice this account may use (the admin may have turned some off); the device voice if none. */
 const firstVoice = (m: Me | null | undefined) => { const off = m?.aiOff ?? []; return off.includes('sec:voices') ? 'device' : voiceOrder(m?.engine).find((v) => v.startsWith('vkey:') || aiAllowed(off, voiceOption(v))) ?? 'device'; };
 import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
@@ -14,6 +14,7 @@ import { WeatherCard } from './Weather';
 import type { WeatherCard as WxCard } from '@niko/shared';
 import { GlanceStack } from './Glance';
 import { toggleFullscreen, useFullscreen } from '../fullscreen';
+import { LockEntry } from './Lock';
 import type { Brief, BriefPart, DocBlock, EventDetail, EventItem, MailDetail, NoteDetail, NoteItem } from '@niko/shared';
 
 // The mockups' rail: Home, Inbox, Calendar, Notes, Connections. Settings (appearance, engine, account) sit behind the last button.
@@ -154,6 +155,7 @@ export function Home() {
   // open on a wide screen), back when it returns. Before, a new question asked over a map or picture sent the caption
   // back while the core stayed aside.
   const aside = wide && open;
+  const locked = n.locked;
   const wasAside = useRef(false);
   useEffect(() => {
     if (aside === wasAside.current) return;
@@ -161,30 +163,36 @@ export function Home() {
     setCaption(aside ? 'aside' : wide ? 'back' : '');
   }, [aside, wide]);
   return (
-    <div className={'home' + (open ? ' open' : '') + (closing && !card ? ' closing' : '') + (pic ? ' picture' : '') + (mapv ? ' mapping' : '')}>
+    <div className={'home' + (open ? ' open' : '') + (closing && !card ? ' closing' : '') + (pic ? ' picture' : '') + (mapv ? ' mapping' : '') + (locked ? ' locked' : '')}>
       <div className="bg" />
       <div className="stage">
         <ParticleCore size="var(--s)" mode={n.mode} pad={wide ? 220 : 0} shift={wide && open ? -200 : 0} spot="home" />
+        {/* Locked: a tap anywhere on the core shows the code entry. */}
+        {locked && !n.lockAsk && <button className="lock-tap" onClick={() => n.requestUnlock()} aria-label="Unlock Niko" />}
         <div className={'caption ' + caption} key={caption}>
           <span className="k accent" role="status">{n.label}</span>
-          <p>{n.line}</p>
-          {n.voiceProblem && <Link to="/voice" className="voice-note">Your first voice could not speak, so the next one in your list was used. {n.voiceProblem}</Link>}
-          <ResumeRow />
+          {locked && n.lockAsk ? <LockEntry /> : <>
+            <p>{n.line}</p>
+            {!locked && n.voiceProblem && <Link to="/voice" className="voice-note">Your first voice could not speak, so the next one in your list was used. {n.voiceProblem}</Link>}
+            {!locked && <ResumeRow />}
+          </>}
         </div>
       </div>
       <div className="top">
         <div className="left">
-          <button className="ib g" style={{ width: 44, height: 44 }} onClick={() => setNav(!nav)} aria-label="Show or hide navigation" aria-expanded={nav}><Icon name="menu" /></button>
+          {!locked && <button className="ib g" style={{ width: 44, height: 44 }} onClick={() => setNav(!nav)} aria-label="Show or hide navigation" aria-expanded={nav}><Icon name="menu" /></button>}
           <span className="wordmark">NIKO</span>
         </div>
         <div className="right">
+        {locked ? <span className="lock-pill"><Icon name="lock" size={14} />Locked</span> : <>
         {fs.offer && <button className="ib g" style={{ width: 44, height: 44 }} onClick={() => void toggleFullscreen()} aria-label={fs.on ? 'Leave full screen' : 'Full screen'} aria-pressed={fs.on} title={fs.on ? 'Leave full screen' : 'Full screen'}><Icon name={fs.on ? 'collapse' : 'expand'} /></button>}
         <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : n.me?.engine.brain === 'self-hosted-ai' ? 'Your model' : 'Workers AI'} · {voiceName(firstVoice(n.me))}</span><span className="short">Engine</span></Link>
+        </>}
         </div>
       </div>
-      <Dock className={'dock' + (nav ? ' show' : '')} />
+      {!locked && <Dock className={'dock' + (nav ? ' show' : '')} />}
       <GlanceStack wide={wide} />
-      {wide && !card && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}
+      {!locked && wide && !card && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}
       {n.fullscreenAsk && (
         <div className="fs-ask g" role="dialog" aria-label="Full screen">
           <span>Browsers need a tap for full screen.</span>
@@ -238,18 +246,18 @@ export function Home() {
         </>}
       </aside>
       )}
-      {typing && (
+      {typing && !locked && (
         <form className="g typebar" onSubmit={submit}>
           <label className="sr" htmlFor="ask">Message Niko</label>
           <input id="ask" autoFocus value={text} onChange={(e) => setText(e.target.value)} placeholder="Ask, or tell me what to do" />
           <button className="ib on" style={{ width: 44, height: 44 }} aria-label="Send"><Icon name="arrow" size={20} /></button>
         </form>
       )}
-      <div className="controls">
+      {!locked && <div className="controls">
         <button className="ib g" onClick={() => setTyping(!typing)} aria-label="Type instead" aria-pressed={typing}><Icon name="keys" /></button>
         <button className="micbtn" onClick={n.toggleMic} aria-label="Talk"><Icon name="mic" size={28} /></button>
         <button className="ib g" onClick={n.stop} aria-label="Stop"><Icon name="stop" /></button>
-      </div>
+      </div>}
     </div>
   );
 }
@@ -476,7 +484,7 @@ export function Workspace() {
     try {
       const r = await api<{ reply: string }>('/chat', { body: { message, tz: new Date().getTimezoneOffset(), purpose: 'draft' } });
       // Only the reply itself: no "Here's the new draft:" lead-in, no wrapping quotes, no draft markers.
-      const t = (typeof r.reply === 'string' ? r.reply : '').trim()
+      const t = stripTags(typeof r.reply === 'string' ? r.reply : '').trim()
         .replace(/^(sure[,!.]?\s*)?(here('|’)s|here is)\s+(the|a|your)\s+[^:\n]{0,40}:\s*/i, '')
         .replace(/^DRAFT START\s*/i, '').replace(/\s*DRAFT END$/i, '')
         .replace(/^["“](.*)["”]$/s, '$1').trim();
@@ -553,7 +561,7 @@ export function Workspace() {
     const about = sel.kind === 'mail' ? `the email from ${sel.title} with subject "${sel.subject}"` : `the last message from ${sel.title}: "${lastIn}"`;
     setDrafting(true);
     api<{ reply: string }>('/chat', { body: { message: `Write only the text of a short, friendly reply to ${about}. No preamble.`, tz: new Date().getTimezoneOffset(), purpose: 'draft' } })
-      .then((r) => { const t = typeof r.reply === 'string' ? r.reply : ''; if (t) { if (draftCache.size > 100) draftCache.delete(draftCache.keys().next().value!); draftCache.set(key, t); } setDraft((d) => d || t); }).catch(() => undefined).finally(() => setDrafting(false));
+      .then((r) => { const t = stripTags(typeof r.reply === 'string' ? r.reply : ''); if (t) { if (draftCache.size > 100) draftCache.delete(draftCache.keys().next().value!); draftCache.set(key, t); } setDraft((d) => d || t); }).catch(() => undefined).finally(() => setDrafting(false));
   }, [sel, thread, view, n.me?.permissions.draft, send.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const counting = send.phase === 'counting';

@@ -13,9 +13,13 @@ import { Home, Workspace } from './pages/Core';
 import { Account, Appearance, Connections, Engine, SettingsLayout, Voice } from './pages/Settings';
 
 function Private({ children }: { children: ReactNode }) {
-  const { me } = useNiko();
+  const { me, locked } = useNiko();
+  const { pathname } = useLocation();
   if (me === undefined) return <div className="bg" />;
-  return me ? <PlanGate>{children}</PlanGate> : <Navigate to="/sign-in" replace />;
+  if (!me) return <Navigate to="/sign-in" replace />;
+  // Locked: only Home (with the lock on it). The server refuses everything else anyway.
+  if (locked && pathname !== '/') return <Navigate to="/" replace />;
+  return <PlanGate>{children}</PlanGate>;
 }
 function Public({ children }: { children: ReactNode }) {
   const { me } = useNiko();

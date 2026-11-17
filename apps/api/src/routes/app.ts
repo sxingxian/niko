@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, sessions, users, type Db } from '@niko/db';
-import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, type MapAskMode, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource, type WeatherCard, plainText } from '@niko/shared';
+import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, type MapAskMode, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource, type WeatherCard, plainText, stripTags } from '@niko/shared';
 import { accessState, APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -21,6 +21,8 @@ import { calendarIdLink, calendarsOf, calendarsSecret, cleanCalName, icalCheckOn
 import { accountLimitsFor } from '../limits';
 import { cleanPoint, findRoute, loadMapKeys, mapKeyInfo, mapKeyProblem, MAP_PROVIDERS_LIST, NotFound, saveMapKeys, testMapKey, type MapKey } from '../maps';
 import { IMAP_PROVIDERS, imapCheck, isImapProvider } from '../mailbox';
+import { lockInfo, lockOf } from '../lock';
+import { lock } from './lock';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
   telegramSetWebhook, type AppKeys, api as providerApi, googleCals,
@@ -28,6 +30,8 @@ import {
 
 export const app = new Hono<AppEnv>();
 app.use('*', requireUser);
+// The screen lock answers before the plan check, so a locked device can always be unlocked.
+app.route('/lock', lock);
 // Using Niko needs access: paid or free time left, a plan, lifetime, or an admin account. Without it only /me answers
 // (so the app can offer a plan); /api/billing sits outside this router.
 app.use('*', async (c, next) => {
@@ -38,13 +42,16 @@ app.use('*', async (c, next) => {
   await next();
 });
 
+
 const clampNum = (v: unknown, lo: number, hi: number, d: number) => (typeof v === 'number' && isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : d);
 
 // ---------------------------------------------------------------- me
 app.get('/me', async (c) => {
   const u = c.get('user');
   const weather = !!(await getConnection(c.get('db'), u.id, 'open-meteo').catch(() => null));
-  return c.json({ id: u.id, email: u.email, name: u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: await offFor(c.get('db'), u), glanceLimits: await limitsFor(c.get('db'), u), access: await accessFor(c.env, c.get('db'), u) });
+  // While locked, who the account belongs to stays hidden too (the locked screen needs only how Niko looks and behaves).
+  const hide = !!c.get('locked');
+  return c.json({ id: u.id, email: hide ? '' : u.email, name: hide ? null : u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: await offFor(c.get('db'), u), glanceLimits: await limitsFor(c.get('db'), u), access: await accessFor(c.env, c.get('db'), u), lock: lockInfo(u), locked: !!c.get('locked') });
 });
 
 // Changing the password while signed in: the current one is needed. Every other session (other devices, the admin
@@ -628,12 +635,28 @@ app.get('/glance/status', async (c) => {
   const row = (await db.select({ checked: glanceState.checked }).from(glanceState).where(eq(glanceState.userId, u.id)).limit(1))[0];
   return c.json({ checked: row?.checked ?? {}, every: Object.fromEntries(GLANCE_PARTS.map((p) => [p, glanceEvery(prefs, limits, p)])) });
 });
+/** Once unlocked: the items that arrived while locked, in full. */
+app.post('/glance/reveal', async (c) => {
+  const u = c.get('user'), now = Date.now();
+  const b = await c.req.json<{ sealed?: unknown }>().catch(() => ({} as { sealed?: unknown }));
+  const list = Array.isArray(b.sealed) ? b.sealed.filter((x): x is string => typeof x === 'string' && x.length < 4000).slice(0, 30) : [];
+  const items = [];
+  for (const s of list) {
+    const v = await unseal<{ u: string; exp: number; title: string; line: string; open: string }>(c.env.ENCRYPTION_KEY, s).catch(() => null);
+    items.push(v && v.u === u.id && v.exp > now ? { title: v.title, line: v.line, open: v.open } : null);
+  }
+  return c.json({ items });
+});
 app.post('/glance', async (c) => {
   const u = c.get('user'), db = c.get('db'), now = Date.now();
   const b = await c.req.json<{ tz?: number }>().catch(() => ({} as { tz?: number }));
   const prefs = cleanGlancePrefs((u.appearance as Record<string, unknown>)?.glance), limits = await limitsFor(db, u);
   const every = Object.fromEntries(GLANCE_PARTS.map((p) => [p, glanceEvery(prefs, limits, p)])) as Record<GlancePart, number>;
   if (!prefs.on || !limits.allowed) return c.json({ items: [], off: true });
+  // Locked: new items are read only when the person chose to see them on the locked screen, and then by default
+  // only who they are from (nothing of what they say, and nothing to open them by until unlocked).
+  const lk = c.get('locked') ? lockOf(u) : null;
+  if (lk && lk.showNew === 'off') return c.json({ items: [], waitMs: 60_000, locked: true });
   // Asked again too soon (another tab, or a modified app): nothing is read.
   if (now - (lastGlance.get(u.id) ?? 0) < 40_000) return c.json({ items: [], waitMs: 60_000 });
   if (lastGlance.size > 2000) lastGlance.delete(lastGlance.keys().next().value!);
@@ -650,7 +673,17 @@ app.post('/glance', async (c) => {
   const { items, state } = diffGlance(prev, brief, due, now, remind, tz);
   await db.insert(glanceState).values({ userId: u.id, ...state, updatedAt: new Date() })
     .onConflictDoUpdate({ target: glanceState.userId, set: { ...state, updatedAt: new Date() } });
-  return c.json({ items, waitMs: 60_000 });
+  if (lk && lk.showNew === 'who') {
+    const WHO: Record<string, string> = { invite: 'New event', reminder: 'Event soon', note: 'A note changed' };
+    // The full item travels sealed under the server's key (the app can't read it); after unlocking, /glance/reveal
+    // opens it, so Open and Reply still work without the server keeping any of it.
+    const out = await Promise.all(items.map(async (it) => ({
+      ...it, title: WHO[it.kind] ?? it.title, line: '', open: '',
+      sealed: await seal(c.env.ENCRYPTION_KEY, { u: u.id, exp: now + 6 * 3600_000, title: it.title, line: it.line, open: it.open }),
+    })));
+    return c.json({ items: out, waitMs: 60_000, locked: true });
+  }
+  return c.json({ items, waitMs: 60_000, ...(lk ? { locked: true } : {}) });
 });
 
 // What opens from the workspace: one note, one email or one event, as plain text.
@@ -681,8 +714,8 @@ app.get('/threads/:provider/:chatId', async (c) => {
  * so they are never shown as part of the message, or sent. */
 export function cleanDraft(text: string): string {
   const meta = /^\s*[\[(*_]*\s*(note:|p\.?s\.?:)?\s*(this|the|your)?\s*(response|reply|draft|message|text)?\s*(is|will be)?\s*(now\s+)?(waiting|awaiting|pending|held|ready)\b[^\n]*\b(approv|review|confirm|send)[^\n]*$/i;
-  // A screen tag ([[open:…]]) is for the app, never part of a message.
-  const lines = text.replace(/\r/g, '').replace(/\s*\[\[\s*(open|item|image)\s*:[^\]]*\]\]/gi, '').split('\n').filter((l) => !meta.test(l));
+  // The app's tags ([[open:…]], [[page:next]], [[map:…]] and the rest) are for the app, never part of a message.
+  const lines = stripTags(text.replace(/\r/g, '')).split('\n').filter((l) => !meta.test(l));
   let out = lines.join('\n')
     // …or the same remark tacked on to the end of the last line.
     .replace(/\s*[([]?\s*(this|the|your)\s+(response|reply|draft|message)\s+(is|will be)\s+(now\s+)?(waiting|awaiting|pending|held)[^.!?\n]*(approv|review|confirm)[^.!?\n]*[.!?]?\s*[)\]]?\s*$/i, '')
@@ -843,7 +876,7 @@ app.post('/chat', async (c) => {
   const mapRule = oneOff ? '' : !mapsOn(off) ? NOT_ON_ACCOUNT_MAP_RULE : await mapsUsable(c.env, db, u, off) ? MAP_RULE : NO_MAP_RULE;
   const wxRule = wx ? `\n${WEATHER_RULE}${weather ? '' : '\nNo forecast for the user’s own location is given. If they ask about the weather where they are, say their location is off, and that they can allow it in the browser or set a home place for Open-Meteo in Connections.'}` : '';
   const msgs = [
-    { role: 'system', content: `${SYSTEM}${oneOff ? '' : `\n${off.includes('sec:images') ? NOT_ON_ACCOUNT_IMAGE_RULE : imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}\n${mapRule}`}${wxRule}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${weather}` },
+    { role: 'system', content: `${SYSTEM}${oneOff ? '\nThis request is for the text of a message the user will send: write only that text, and never any [[…]] tag (no screen, scroll, page, map or picture tags).' : `\n${off.includes('sec:images') ? NOT_ON_ACCOUNT_IMAGE_RULE : imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}\n${mapRule}`}${wxRule}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${weather}` },
     ...history.map((h) => ({ role: h.role, content: h.content })),
     { role: 'user', content: text },
   ];
