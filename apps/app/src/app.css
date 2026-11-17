@@ -794,3 +794,8 @@ button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; 
 @keyframes fsIn { from { opacity: 0; transform: translate(-50%, -8px); } }
 @media (max-width: 760px) { .fs-ask { flex-wrap: wrap; justify-content: center; border-radius: 22px; padding: 12px; } .fs-ask span { width: 100%; text-align: center; } }
 @media (prefers-reduced-motion: reduce) { .fs-ask { animation: none; } }
+
+/* Full screen keeps the screen awake; Niko dims itself after a minute with nothing going on. Taps go through. */
+.awake-dim { position: fixed; inset: 0; z-index: 90; background: #000; opacity: 0; pointer-events: none; transition: opacity 1.6s ease; }
+.awake-dim.on { opacity: .7; }
+@media (prefers-reduced-motion: reduce) { .awake-dim { transition: none; } }

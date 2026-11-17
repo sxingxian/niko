@@ -1,7 +1,7 @@
 // Shared Niko state: who is signed in, and the voice loop (wake word, commands, speech).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type MapAskMode, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
+import { speakable, aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type MapAskMode, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
 import { enterFullscreen, exitFullscreen, fullscreenSupported } from './fullscreen';
 import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag } from './speech';
 import { scrollScreen } from './scroll';
@@ -164,7 +164,9 @@ function whereAmI(): Promise<{ lat: number; lon: number } | undefined> {
   });
 }
 
-function speakWith(source: VoiceSource, text: string, engine: EnginePrefs | undefined): Speech {
+function speakWith(source: VoiceSource, raw: string, engine: EnginePrefs | undefined): Speech {
+  // The voice gets the text without symbols ("**", "#", "—"); the screen shows the answer itself.
+  const text = speakable(raw) || raw;
   return source === 'kokoro' ? kokoroSpeak(text, engine?.kokoroVoice ?? 'af_heart') : serverSpeech(source, text);
 }
 
@@ -362,7 +364,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     setMode('speaking'); setLabel('Speaking'); setLine(text.length > 160 ? text.slice(0, 157) + '…' : text);
     const device = () => {
       if (!window.speechSynthesis) return done();
-      const u = new SpeechSynthesisUtterance(text);
+      const u = new SpeechSynthesisUtterance(speakable(text) || text);
       u.onstart = () => began('device');
       u.onboundary = (e) => { if (live() && progress.current) progress.current.heard = e.charIndex; }; // exact word position
       u.onend = done;

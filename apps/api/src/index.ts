@@ -66,7 +66,7 @@ const SECURITY_HEADERS: Record<string, string> = {
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
   'referrer-policy': 'strict-origin-when-cross-origin',
-  'permissions-policy': 'microphone=(self), camera=(), geolocation=(self)',
+  'permissions-policy': 'microphone=(self), camera=(), geolocation=(self), fullscreen=(self), screen-wake-lock=(self)',
   'content-security-policy': [
     // 'wasm-unsafe-eval' lets WebAssembly run (the on-device voice) without allowing eval() of scripts.
     "default-src 'self'", "script-src 'self' 'wasm-unsafe-eval'", "style-src 'self' 'unsafe-inline'", "font-src 'self'",

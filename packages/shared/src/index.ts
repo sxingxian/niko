@@ -2,6 +2,7 @@
 import type { AccessInfo } from './billing';
 export * from './billing';
 export * from './maps';
+export * from './speechtext';
 import { MAP_PROVIDERS, mapPreset, type MapProvider, type MapSource } from './maps';
 
 export type ProviderGroup = 'mail' | 'calendar' | 'notes' | 'automation' | 'messaging' | 'weather' | 'ai';

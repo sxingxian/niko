@@ -5,6 +5,7 @@ import { appBase } from '@niko/ui';
 import '@niko/ui/src/styles.css';
 import './app.css';
 import { NikoProvider, useNiko } from './niko';
+import { Awake } from './awake';
 import { FLOW_SECONDS, FlowLayer, LEAVE_MS } from './flow';
 import { Forgot, Invite, Reset, SignIn, SignUp } from './pages/Auth';
 import { PlanGate } from './pages/Plan';
@@ -123,6 +124,7 @@ function App() {
   return (
     <NikoProvider>
       <Screens />
+      <Awake />
     </NikoProvider>
   );
 }

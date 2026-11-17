@@ -40,9 +40,10 @@ export function GlanceStack({ wide }: { wide: boolean }) {
   const busy = n.mode !== 'idle';
   const busyRef = useRef(busy);
   busyRef.current = busy;
-  // An answer or picture open on Home takes the right-hand column: new items go below it (or, without room, to the
-  // left), and on a phone one at a time, over the core.
-  const panelsOpen = !!n.reply || !!n.picture;
+  // An answer, picture or map open on Home takes the right-hand column: new items go below it (or, without room, to
+  // the left), and on a phone one at a time, over the core. (The map was missing here: cards sat on top of it, and the
+  // pointer resting on the map held them, so they never left.)
+  const panelsOpen = !!n.reply || !!n.picture || !!n.map;
   const [place, setPlace] = useState<{ style?: React.CSSProperties; room: number }>({ room: wide ? 3 : 2 });
   useEffect(() => {
     if (!panelsOpen) { setPlace({ room: wide ? 3 : 2 }); return; }
@@ -200,7 +201,9 @@ export function GlanceStack({ wide }: { wide: boolean }) {
         const ago = Math.round((now - c.start) / 1000);
         return (
           <section key={c.it.key} data-glance={c.it.key} className={'g glance' + (c.entered && !c.leaving ? ' arrived' : '')} aria-label={`${LABEL[c.it.kind]}: ${c.it.title}`}
-            onMouseEnter={() => hold(c.it.key, true)} onMouseLeave={() => hold(c.it.key, false)} onFocus={() => hold(c.it.key, true)} onBlur={() => hold(c.it.key, false)}>
+            onMouseEnter={() => hold(c.it.key, true)} onMouseLeave={() => hold(c.it.key, false)}
+            // Only keyboard focus holds a card: focus left behind by a tap or click would otherwise hold it for good.
+            onFocus={(e) => { if ((e.target as HTMLElement).matches(':focus-visible')) hold(c.it.key, true); }} onBlur={() => hold(c.it.key, false)}>
             <div className="glance-top">
               <span className="glance-ic"><Icon name={ICON[c.it.kind]} size={19} /></span>
               <span className="glance-meta"><span className="k">{LABEL[c.it.kind]} · {c.it.source}</span><span>{ago < 5 ? 'now' : `${ago} s ago`} · {c.held ? 'Paused' : `${Math.ceil(left / 1000)} s`}</span></span>
