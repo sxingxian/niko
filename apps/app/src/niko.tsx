@@ -258,7 +258,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       const wav = await cap.done;
       if (capture.current !== cap) return;
       capture.current = null;
-      if (!wav) { idle(); unmuteMic(); return; }
+      if (!wav) { unmuteMic(); endListeningRef.current(); return; }
       setMode('thinking'); setLabel('Hearing'); setLine('Turning that into words…');
       try {
         const r = await transcribe(wav);
@@ -271,6 +271,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
           setVoiceProblem(`Speech in: ${(e as Error).message}`);
           active.current = true; wantRec.current = true; unmuteMic();
           setMode('listening'); setLabel('Listening'); setLine('That didn’t come through. Say it again.');
+          listenWindow();
         } else { unmuteMic(); setMode('idle'); setLabel('Problem'); setLine((e as Error).message); }
       }
     })();
@@ -298,6 +299,19 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     if (was) { lastSaid.current.until = Date.now() + ECHO_MS; window.setTimeout(unmuteMic, 300); }
   };
   const endFollowUp = () => { window.clearTimeout(followUp.current); followUp.current = undefined; };
+  /** Niko has stopped listening: the status says so, so a silence never leaves "Listening" on screen. With the wake word
+   * off, the mic is let go too (tap it again to talk); with it on, Niko goes back to waiting for its name. */
+  const endListening = useCallback(() => {
+    active.current = false; endFollowUp();
+    const wake = !!(meRef.current?.engine as EnginePrefs | undefined)?.wake && !!SR;
+    if (!wake) { wantRec.current = false; try { rec.current?.stop(); } catch { /* already stopped */ } setMicOn(false); }
+    setMode('idle'); setLabel('Stopped listening');
+    setLine(wake ? 'Say “Niko” when you need me, or tap the mic.' : 'Tap the mic when you need me.');
+  }, [SR]); // eslint-disable-line react-hooks/exhaustive-deps
+  const endListeningRef = useRef(endListening);
+  endListeningRef.current = endListening;
+  /** How long Niko waits for someone to start talking, after a tap, its name, or an answer. */
+  const listenWindow = () => { endFollowUp(); followUp.current = window.setTimeout(() => { followUp.current = undefined; endListeningRef.current(); }, FOLLOW_UP_MS); };
 
   /** After Niko answers, keep listening for a few seconds so the conversation can carry on without saying "Niko" again. */
   const FOLLOW_UP_MS = 9000;
@@ -309,7 +323,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     active.current = true;
     setMode('listening'); setLabel('Listening'); setLine('Go on, or say “that’s all”.');
     endFollowUp();
-    followUp.current = window.setTimeout(() => { active.current = false; followUp.current = undefined; idle(); }, FOLLOW_UP_MS);
+    listenWindow();
   }, [SR, idle]);
 
   /** Speaks with the first voice in the user's order that works, ending with the device voice. */
@@ -657,12 +671,13 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         const hit = alts.map(matchWake).find(Boolean);
         if (!res.isFinal) {
           if (hit && !active.current) { setMode('listening'); setLabel('Listening'); setLine('Go ahead.'); }
+          else if (active.current && alts[0]) listenWindow(); // they are talking: wait from their last word
           continue;
         }
         if (hit) {
           if (hit.command) { active.current = false; void ask(hit.command); }
           else if (apiHearing()) listenByApi(8000); // the request itself goes to the speech-in service
-          else { active.current = true; setMode('listening'); setLabel('Listening'); setLine('Go ahead.'); }
+          else { active.current = true; setMode('listening'); setLabel('Listening'); setLine('Go ahead.'); listenWindow(); }
         } else if (active.current && alts[0]) { active.current = false; endFollowUp(); void ask(alts[0]); }
       }
     };
@@ -698,6 +713,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     endFollowUp();
     wantRec.current = true; startRec();
     active.current = true; setMode('listening'); setLabel('Listening'); setLine('Go ahead.');
+    listenWindow();
   }, [SR, startRec]);
 
   const stop = useCallback(() => {
