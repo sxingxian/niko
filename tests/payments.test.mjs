@@ -928,6 +928,44 @@ await ok('screen lock: set with the password, kept by the server, new items only
   r = await b.post('/lock/now', { idle: true }); assert.equal(r.data.locked, true);
   assert.equal((await b.post('/lock/unlock', { code: '482916' })).status, 200);
 
+  // Unlocking with a passkey: a software authenticator signs the challenge exactly as a browser's passkey does.
+  {
+    const { generateKeyPairSync, sign: signData, createHash: hash } = await import('node:crypto');
+    const kp = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const jwk = kp.publicKey.export({ format: 'jwk' });
+    const bx = Buffer.from(jwk.x, 'base64url'), by = Buffer.from(jwk.y, 'base64url');
+    const cose = Buffer.concat([Buffer.from([0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]), bx, Buffer.from([0x22, 0x58, 0x20]), by]);
+    const credId = randomBytes(16).toString('base64url');
+    await q('insert into passkeys (user_id, credential_id, public_key, counter, rp_id) values ($1, $2, $3, 0, $4)', [row.id, credId, cose.toString('base64'), 'niko.test']);
+    const assertion = (challenge, counter = 1) => {
+      const authData = Buffer.concat([hash('sha256').update('niko.test').digest(), Buffer.from([0x05]), Buffer.from([0, 0, 0, counter])]);
+      const cdj = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge, origin: ORIGIN, crossOrigin: false }));
+      const sig = signData('sha256', Buffer.concat([authData, hash('sha256').update(cdj).digest()]), kp.privateKey);
+      return { id: credId, rawId: credId, type: 'public-key', clientExtensionResults: {}, response: { clientDataJSON: cdj.toString('base64url'), authenticatorData: authData.toString('base64url'), signature: sig.toString('base64url') } };
+    };
+    assert.equal((await b.post('/lock/passkey/options')).status, 400, 'not while unlocked: nothing to unlock');
+    await b.post('/lock/now');
+    r = await b.post('/lock/passkey/options');
+    assert.equal(r.status, 200, 'options: ' + JSON.stringify(r.data));
+    assert.deepEqual(r.data.options.allowCredentials.map((x) => x.id), [credId], 'only this account’s passkeys are offered');
+    // Signed for another challenge: refused, still locked.
+    const bad = await b.post('/lock/passkey/verify', { challengeId: r.data.challengeId, response: assertion(randomBytes(32).toString('base64url')) });
+    assert.equal(bad.status, 401); assert.equal((await b.get('/calendars')).status, 423);
+    r = await b.post('/lock/passkey/options');
+    const good = await b.post('/lock/passkey/verify', { challengeId: r.data.challengeId, response: assertion(r.data.options.challenge, 2) });
+    assert.equal(good.status, 200, 'verify: ' + JSON.stringify(good.data)); assert.equal(good.data.locked, false);
+    assert.equal((await b.get('/calendars')).status, 200, 'unlocked with the passkey');
+    // The same signed answer can't be used again (the challenge is gone).
+    await b.post('/lock/now');
+    assert.equal((await b.post('/lock/passkey/verify', { challengeId: r.data.challengeId, response: assertion(r.data.options.challenge, 3) })).status, 401);
+    // Turned off in settings: refused.
+    assert.equal((await b.post('/lock/unlock', { code: '482916' })).status, 200);
+    assert.equal((await b.put('/lock', { passkey: false })).status, 200);
+    await b.post('/lock/now');
+    assert.equal((await b.post('/lock/passkey/options')).status, 400);
+    assert.equal((await b.post('/lock/unlock', { code: '482916' })).status, 200);
+  }
+
   // Five wrong codes end the sign-in.
   await b.post('/lock/now');
   for (let i = 1; i <= 4; i++) assert.equal((await b.post('/lock/unlock', { code: '111112' })).data.left, 5 - i);

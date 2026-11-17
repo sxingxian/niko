@@ -103,6 +103,7 @@ lock.post('/unlock', async (c) => {
 lock.post('/passkey/options', async (c) => {
   const u = c.get('user'), lk = lockOf(u), site = c.get('site');
   if (!lk?.passkey) return c.json({ error: 'Unlocking with a passkey is off.' }, 400);
+  if (!c.get('locked')) return c.json({ error: 'Niko isn’t locked.' }, 400);
   const mine = await c.get('db').select({ id: passkeys.credentialId }).from(passkeys).where(and(eq(passkeys.userId, u.id), eq(passkeys.rpId, site.rpId)));
   if (!mine.length) return c.json({ error: 'No passkey is saved for this account here.' }, 400);
   const options = await generateAuthenticationOptions({ rpID: site.rpId, userVerification: 'required', allowCredentials: mine.map((m) => ({ id: m.id })) });
