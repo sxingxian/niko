@@ -288,6 +288,7 @@ function LimitsAdmin({ guard }: { guard: (e: unknown) => void }) {
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [find, setFind] = useState('');
   const load = useCallback(async () => {
     try {
       const r = await api<LimitsReply>('/admin/limits');
@@ -318,50 +319,75 @@ function LimitsAdmin({ guard }: { guard: (e: unknown) => void }) {
       await load(); setNote({ ok: true, text: person ? `Saved for ${person.name || person.email}.` : 'Saved. It applies to everyone without their own limit within a minute.' });
     } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
   };
-  const count = (p: LimitsUser) => Object.keys(p.accountLimits).length;
   const resetDay = resets ? new Date(resets).toLocaleDateString(undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' }) : '';
-  const row = (k: LimitKey, name: string, sub: string, options: { v: number; label: string }[], used?: string) => {
+  // What each person gets (their own amount, or the default), and whether they are close to a monthly amount.
+  const eff = (p: LimitsUser, k: UsageKind) => p.accountLimits[k] ?? defaults[k];
+  const near = (p: LimitsUser) => !!p.used && USAGE_KINDS.some((k) => eff(p, k) > 0 && p.used![k] >= eff(p, k) * 0.9);
+  const changes = (p: LimitsUser) => Object.keys(p.accountLimits).filter((k) => (p.accountLimits as Record<string, number>)[k] !== (defaults as unknown as Record<string, number>)[k]).length;
+  const noLimit = (p: LimitsUser) => USAGE_KINDS.every((k) => eff(p, k) === 0) && USAGE_KINDS.some((k) => defaults[k] > 0);
+  const badge = (p: LimitsUser) => (changes(p) ? (noLimit(p) ? 'No limit' : `${changes(p)} ${changes(p) === 1 ? 'change' : 'changes'}`) : 'Default');
+  const following = people.filter((p) => !p.invite && !changes(p)).length;
+  const q = find.trim().toLowerCase();
+  const shownPeople = people.filter((p) => !q || `${p.name} ${p.email}`.toLowerCase().includes(q));
+  const totals = Object.fromEntries(USAGE_KINDS.map((k) => [k, people.reduce((n, p) => n + (p.used?.[k] ?? 0), 0)])) as Record<UsageKind, number>;
+  const active = Object.fromEntries(USAGE_KINDS.map((k) => [k, people.filter((p) => (p.used?.[k] ?? 0) > 0).length])) as Record<UsageKind, number>;
+  const unitOf = (k: UsageKind, n: number) => USAGE_UNITS[k][n === 1 ? 0 : 1];
+  const ROW_SUB: Record<UsageKind, string> = { brain: 'Replies from the AI', voice: 'Spoken replies', hear: 'Minutes of speech turned into words', image: 'Pictures made', map: 'Place searches and routes' };
+  const monthCol = (k: UsageKind) => {
+    if (!person) return `${totals[k].toLocaleString()} ${unitOf(k, totals[k])} · ${active[k]} ${active[k] === 1 ? 'account' : 'accounts'}`;
+    if (person.invite) return 'Counts from the day they join';
+    const used = person.used?.[k] ?? 0, cap = valOf(k);
+    return cap ? `${used.toLocaleString()} of ${cap.toLocaleString()}` : `${used.toLocaleString()} · no limit`;
+  };
+  const row = (k: LimitKey, name: string, sub: string, options: { v: number; label: string }[], month: string, hot = false) => {
     const changed = isChanged(k);
     const label = (n: number) => options.find((o) => o.v === n)?.label ?? String(n);
-    return <div key={k} className="ai-row">
-      <span className="ai-txt"><span>{name}</span><span className="sub">{changed ? `Default is ${label(defaults[k]).toLowerCase()}` : sub}{used ? ` · ${used}` : ''}</span></span>
-      {changed && <><span className="chg">Changed</span><button className="lnk" onClick={() => setVal(k, defaults[k])}>Reset</button></>}
-      <label className="sr" htmlFor={`lim-${k}`}>{name}</label>
-      <select id={`lim-${k}`} className="in gl-sel" value={valOf(k)} onChange={(e) => setVal(k, Number(e.target.value))}>
+    return <div key={k} className="lim-row">
+      <span className="lim-what"><b>{name}</b><span className="sub">{changed ? `Default is ${label(defaults[k]).toLowerCase()}` : sub}</span>
+        {changed && <span className="cap-chg"><span className="chg">Changed</span><button className="lnk" style={{ padding: 0 }} onClick={() => setVal(k, defaults[k])}>Reset</button></span>}</span>
+      <span className={'lim-month' + (hot ? ' hot' : '')}>{month}</span>
+      <label className="sr" htmlFor={`lim-${k}`}>{name}, each month</label>
+      <select id={`lim-${k}`} className="in lim-sel" value={valOf(k)} onChange={(e) => setVal(k, Number(e.target.value))}>
         {options.map((o) => <option key={o.v} value={o.v}>{o.label}</option>)}
       </select>
     </div>;
   };
+  const monthHead = person ? (person.invite ? 'Before they join' : 'This month') : 'Across everyone this month';
   return <>
-    <header><h1>Limits</h1><p className="sub" style={{ fontSize: 15, maxWidth: 860 }}>How much each account may add, and how much it can use each month of what’s included: your keys and Niko’s built-in services. People’s own keys are never counted or capped.</p></header>
+    <header><h1>Limits</h1><p className="sub" style={{ fontSize: 15, maxWidth: 860 }}>How much each account may add, and how much of Niko’s included services it can use each month. Set the default for everyone, then change it for anyone who needs something different.</p></header>
     {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
     <div className="ai-grid">
       <section className="g card ai-people" aria-label="Applies to">
         <span className="k" style={{ padding: '0 6px' }}>Applies to</span>
+        <input className="in lim-find" type="search" aria-label="Find a person" placeholder="Find a person" value={find} onChange={(e) => setFind(e.target.value)} />
         <div className="ai-list">
-          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default' }, ...people.map((p) => ({ id: p.id, name: p.invite ? 'Invited' : p.name || p.email, sub: p.email, badge: count(p) ? 'Own' : 'Default' }))].map((p) => (
+          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default', warn: false }, ...shownPeople.map((p) => ({ id: p.id, name: p.invite ? p.email : p.name || p.email, sub: p.invite ? 'Invited · not joined yet' : near(p) ? 'Near a monthly amount' : p.email, badge: badge(p), warn: !p.invite && near(p) }))].map((p) => (
             <button key={p.id} className="who-row" aria-pressed={p.id === sel} onClick={() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; setSel(p.id); setNote(null); }}>
-              <span className="who-txt"><b>{p.name}</b><span>{p.sub}</span></span><span className="who-badge">{p.badge}</span>
+              <span className="who-txt"><b>{p.name}</b><span className={p.warn ? 'warn' : ''}>{p.sub}</span></span><span className={'lim-badge' + (p.badge === 'Default' ? '' : p.badge === 'No limit' ? ' free' : ' chg')}>{p.badge}</span>
             </button>
           ))}
+          {q && !shownPeople.length && <p className="sub small" style={{ padding: '6px' }}>No one matches “{find.trim()}”.</p>}
         </div>
-        <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>New accounts get the default. An invite’s limits are copied when they join. These limits apply to admins too.</p>
+        <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>New accounts and invites get the default. Their own keys are never counted.</p>
       </section>
       <section className="g card ai-options" aria-label="Limits">
         <div className="ai-head">
           <div><h2>{person ? (person.invite ? `${person.email} · invited` : person.name || person.email) : 'Everyone · default'}</h2>
-            <p className="sub" style={{ fontSize: 13 }}>{person ? (anyChanged ? 'Some limits are different from the default.' : 'Follows the default. Change a limit to set it for this person only.') : 'What every account gets, unless it is changed for that person.'}</p></div>
+            <p className="sub" style={{ fontSize: 13 }}>{person ? (anyChanged ? 'Some limits are different from the default; the rest follow it.' : 'Follows the default. Change a limit to set it for this person only.') : `What every account gets, unless it is changed for that person. ${following} ${following === 1 ? 'account follows' : 'accounts follow'} it.`}</p></div>
           <div className="ai-acts">
             {person && <button className="bt" onClick={() => { setDraft({}); setDirty(true); }} disabled={!anyChanged}>Reset to default</button>}
             <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
           </div>
         </div>
-        {row('calendars', 'Calendar links', 'Private and public iCal calendars, per account', CALENDAR_LIMIT_STEPS.map((n) => ({ v: n, label: n === 1 ? '1 calendar' : `Up to ${n}` })))}
-        <div className="psec-row" style={{ paddingTop: 18 }}><span className="k">Included each month</span>
+        <div className="psec-row lim-sec"><span className="k" style={{ color: '#fff' }}>Included each month</span>
           {!person && <button className="lnk" onClick={() => { setNote(null); setDirty(true); setDraft({ ...draft, ...Object.fromEntries(USAGE_KINDS.map((k) => [k, 0])) }); }}>No limit on all</button>}</div>
-        {USAGE_KINDS.map((k) => row(k, USAGE_NAMES[k], k === 'map' ? 'Place searches and routes, OpenStreetMap included' : k === 'hear' ? 'Minutes of speech turned into text' : `Through your keys and Workers AI`,
-          USAGE_STEPS[k].map((n) => ({ v: n, label: stepText(k, n) })), person?.used ? `${person.used[k].toLocaleString()} used this month` : undefined))}
-        <p className="sub" style={{ fontSize: 12, lineHeight: 1.5 }}>Monthly amounts start again on the 1st{resetDay ? ` (next: ${resetDay})` : ''}. At the limit, Niko skips what’s included and uses the person’s own keys; with none, it tells them when it starts again. Lowering a calendar limit removes nothing: only that many are read. Every change is written to the audit log.</p>
+        <p className="sub" style={{ fontSize: 13, lineHeight: 1.5 }}>Counts what Niko’s included services do: the keys you give people and Niko’s built-in ones (Workers AI, OpenStreetMap). Their own keys, the on-device voice and the device’s own listening are never counted. Resets on the 1st of each month{resetDay ? ` (next: ${resetDay})` : ''}.</p>
+        <div className="lim-row lim-headrow" aria-hidden="true"><span className="k">What</span><span className="k">{monthHead}</span><span className="k">Each month</span></div>
+        {(['brain', 'voice', 'hear', 'image', 'map'] as UsageKind[]).map((k) => row(k, USAGE_NAMES[k], ROW_SUB[k], USAGE_STEPS[k].map((n) => ({ v: n, label: stepText(k, n) })), monthCol(k),
+          !!person && !person.invite && valOf(k) > 0 && (person.used?.[k] ?? 0) >= valOf(k) * 0.9))}
+        <div className="psec-row lim-sec"><span className="k" style={{ color: '#fff' }}>Accounts</span></div>
+        {row('calendars', 'Calendar links', 'Private and public iCal calendars, per account', CALENDAR_LIMIT_STEPS.map((n) => ({ v: n, label: n === 1 ? '1 calendar' : `Up to ${n}` })), `${valOf('calendars')} per account`)}
+        <p className="sub" style={{ fontSize: 12, lineHeight: 1.5, paddingTop: 8 }}>At the monthly amount, Niko moves on to the person’s own keys; with none, it tells them when it resets. Raising an amount takes effect at once; lowering one never deletes anything. People see what is included, and their use, on their Engine and Voice pages, worded as part of their plan. Every change is written to the audit log.</p>
       </section>
     </div>
   </>;
