@@ -35,6 +35,17 @@ How it behaves:
 
 `DATABASE_URL` is the master key: anyone who has it can read every account and reset any password (see "Account recovery" below). Keep it in two places only: your password manager and the deploy secret (Cloudflare build, or GitHub) that updates the database. Each deploy copies that same value to the Worker as its runtime secret, so you never set it on the Worker by hand and the two can't drift apart.
 
+## 1a. Knowledge database (optional, its own Neon project)
+
+Knowledge (each person's files, the pieces Niko searches, and what Niko learned) lives in a **separate free Neon project**, so it can never fill the main database's storage. Until it is set up, Knowledge simply stays off.
+
+1. Neon → **New project**, for example `niko-knowledge`, in the same region as the main one.
+2. Copy its connection string (Dashboard → **Connect**, pooled, `postgresql://…`).
+3. Cloudflare → Workers & Pages → `niko` → Settings → **Build** → **Build variables** → add `KNOWLEDGE_DATABASE_URL` as a **Secret**, next to `DATABASE_URL`.
+4. Deploy (push to `main`, or Retry the latest build). `npm run release` updates the Knowledge database (it turns on pgvector, the search add-on Neon includes) and hands the same value to the Worker, exactly like `DATABASE_URL`.
+
+Keep it only in Cloudflare and your password manager, never in GitHub. It must be a different project from `DATABASE_URL`; the release refuses to use the same one for both.
+
 ## 1b. Email (Resend)
 
 1. Create a Resend account, add the domain `app.midnightpoetry.studio` and the DNS records it asks for (SPF/DKIM) in the `midnightpoetry.studio` zone. If that domain is already verified in Resend, skip this.
@@ -129,7 +140,7 @@ Connect the repository to Cloudflare once. After that, every new commit on `main
    - **Build command:** `npm ci && npm run build:web`
    - **Deploy command:** `npm run release`
    - **Builds for non-production branches:** off
-   - **Build variables:** `NODE_VERSION=22`, and `DATABASE_URL` added as a **Secret**
+   - **Build variables:** `NODE_VERSION=22`, and `DATABASE_URL` added as a **Secret** (and `KNOWLEDGE_DATABASE_URL`, also a **Secret**, once you set up Knowledge: section 1a)
 3. Save and deploy. Later, the same settings are under the Worker → Settings → **Build**.
 
 > **Don't keep the default deploy command `npx wrangler deploy`.** The Worker's settings live in `apps/api`, not the repository root, so the default fails. `npm run release` updates the Neon database (`npm run migrate`) and then deploys from the right folder. If the database update fails, the deploy stops and the live site is left as it was.

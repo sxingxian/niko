@@ -3,7 +3,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState, type FormEvent } 
 import { createRoot } from 'react-dom/client';
 import { api, ApiError, BackgroundPreview, DesignPreview, Field, PasswordField, Switch } from '@niko/ui';
 import { BACKGROUNDS, backgroundInfo, DESIGNS, designInfo, type BackgroundInfo, type DesignInfo } from '@niko/shared';
-import { AI_OPTION_GROUPS, AI_PRESETS, aiAllowed, BUILTIN_TOKEN, hearPresetOf, imagePresetOf, presetOf, providedIds, voicePresetOf, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
+import { AI_OPTION_GROUPS, AI_PRESETS, aiAllowed, defaultOn, BUILTIN_TOKEN, hearPresetOf, imagePresetOf, presetOf, providedIds, voicePresetOf, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
 import '@niko/ui/src/styles.css';
 import './admin.css';
 
@@ -111,8 +111,8 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
   // What is being edited: the default itself, or this person's changes to it.
   useEffect(() => { if (defaults) { setDraft(person ? { ...person.aiAccess } : { ...defaults }); setDirty(false); } }, [sel, defaults, people]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!defaults) return null;
-  const defOn = (k: string) => defaults[k] ?? true;
-  const on = (k: string) => (k in draft ? draft[k]! : person ? defOn(k) : true);
+  const defOn = (k: string) => defaultOn(defaults, k);
+  const on = (k: string) => (k in draft ? draft[k]! : person ? defOn(k) : defaultOn({}, k));
   const changed = (k: string) => !!person && k in draft && draft[k] !== defOn(k);
   const set = (k: string, v: boolean) => {
     setNote(null); setDirty(true);
@@ -161,7 +161,7 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
         </div>
         {noBrain && <p className="err" role="alert">At least one brain must stay on, or Niko could not answer. Turn one back on to save.</p>}
         <div className="ai-groups">
-          {AI_OPTION_GROUPS.map((g) => {
+          {AI_OPTION_GROUPS.filter((g) => !g.ownPage).map((g) => {
             const shown = !g.section || on(g.section);
             return (
               <div key={g.id} className="ai-group">

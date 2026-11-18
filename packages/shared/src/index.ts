@@ -363,7 +363,10 @@ export interface Permissions { draft: boolean; chatReply: boolean; files: boolea
 // default) and can change that for any one account. Options that are off are hidden from that account's screens and
 // refused by the server; keys already saved for them are kept and skipped. Admins always have every option.
 // The device's own voice and speech recognition are never listed: they are the last resort and always on.
-export interface AiOptionGroup { id: 'brain' | 'images' | 'maps' | 'voices' | 'hears'; name: string; where: string; section?: string; items: { key: string; name: string; sub: string }[] }
+// An item marked offByDefault is off unless the admin turns it on (for everyone or for one person). An item marked
+// feature is a feature switch rather than a service: it never counts as "some services are managed" on their screens.
+export interface AiOptionItem { key: string; name: string; sub: string; offByDefault?: boolean; feature?: boolean }
+export interface AiOptionGroup { id: 'brain' | 'images' | 'maps' | 'voices' | 'hears' | 'knowledge'; name: string; where: string; section?: string; items: AiOptionItem[]; ownPage?: boolean }
 const BUILTIN = 'Built in · free daily allowance', THEIRS = 'Their API key', SERVER = 'A server they run';
 export const AI_OPTION_GROUPS: AiOptionGroup[] = [
   { id: 'brain', name: 'Brain', where: 'Engine screen', items: [
@@ -379,9 +382,24 @@ export const AI_OPTION_GROUPS: AiOptionGroup[] = [
     { key: 'v:workers', name: 'Cloudflare voice', sub: BUILTIN }, { key: 'v:kokoro', name: 'On-device voice', sub: 'Runs on their device' }, { key: 'v:self-hosted', name: 'Their own voice server', sub: SERVER },
     ...VOICE_PROVIDERS.map((p) => ({ key: `v:${p.id}`, name: p.name, sub: p.id === 'other' ? 'Any address they enter' : THEIRS })) ] },
   { id: 'hears', name: 'Listening · speech in', where: 'Voice screen', section: 'sec:hears', items: [
+    { key: 'h:only-me', name: 'Respond only to my voice', sub: 'Voice check on their device · no key, no cost', offByDefault: true, feature: true },
     { key: 'h:workers', name: 'Cloudflare speech recognition', sub: BUILTIN }, { key: 'h:self-hosted', name: 'Their own speech-to-text server', sub: SERVER },
     ...HEAR_PROVIDERS.map((p) => ({ key: `h:${p.id}`, name: p.name, sub: p.id === 'other' ? 'Any address they enter' : THEIRS })) ] },
+  // Knowledge has its own admin page (Admin · Knowledge), so the AI options page leaves it out.
+  { id: 'knowledge', name: 'Knowledge', where: 'Knowledge screen', ownPage: true, items: [
+    { key: 'kn:files', name: 'Knowledge files', sub: 'Niko keeps their files and answers from them', offByDefault: true, feature: true },
+    { key: 'kn:place:niko', name: 'Kept in Niko', sub: 'A separate Niko database' },
+    { key: 'kn:place:device', name: 'Kept on their device', sub: 'Never leaves the device' },
+    { key: 'kn:place:notion', name: 'Notion', sub: 'Their Notion connection' },
+    { key: 'kn:place:gdrive', name: 'Google Drive', sub: 'Their Google connection' },
+    { key: 'kn:place:onedrive', name: 'OneDrive', sub: 'Their Microsoft connection' },
+    { key: 'kn:cf-read', name: 'Cloudflare reads files', sub: 'PDF, Word and spreadsheets into text · keeps nothing' },
+    { key: 'kn:cf-search', name: 'Cloudflare search', sub: 'Search numbers for their files · keeps nothing' },
+    { key: 'kn:learning', name: 'Learning from each person', sub: 'Notes, corrections and playbooks', offByDefault: true, feature: true } ] },
 ];
+const OFF_BY_DEFAULT = new Set(AI_OPTION_GROUPS.flatMap((g) => g.items.filter((i) => i.offByDefault).map((i) => i.key)));
+/** Whether an option is on in the default for everyone: what the admin saved, else the option's own starting value. */
+export const defaultOn = (defaults: Record<string, boolean>, key: string) => (key in defaults ? defaults[key]! : !OFF_BY_DEFAULT.has(key));
 export const AI_OPTION_KEYS: string[] = AI_OPTION_GROUPS.flatMap((g) => [...(g.section ? [g.section] : []), ...g.items.map((i) => i.key)]);
 /** Keeps only known options with true/false values. */
 export function cleanAiAccess(v: unknown): Record<string, boolean> {
@@ -389,10 +407,11 @@ export function cleanAiAccess(v: unknown): Record<string, boolean> {
   if (v && typeof v === 'object') for (const [k, x] of Object.entries(v as Record<string, unknown>)) if (AI_OPTION_KEYS.includes(k) && typeof x === 'boolean') out[k] = x;
   return out;
 }
-/** The options that are off for an account: its own changes over the default (missing means on). Admins: none. */
+/** The options that are off for an account: its own changes over the default (missing means the option's starting
+ *  value: on, except options marked offByDefault). Admins: none. */
 export function aiOff(defaults: Record<string, boolean>, own: Record<string, boolean>, isAdmin = false): string[] {
   if (isAdmin) return [];
-  return AI_OPTION_KEYS.filter((k) => (k in own ? own[k] : defaults[k] ?? true) === false);
+  return AI_OPTION_KEYS.filter((k) => (k in own ? own[k] : defaultOn(defaults, k)) === false);
 }
 /** Whether an option is usable, given the list of options that are off. A section that is off turns off all of it. */
 export function aiAllowed(off: readonly string[], key: string): boolean {

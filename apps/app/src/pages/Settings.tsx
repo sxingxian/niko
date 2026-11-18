@@ -604,7 +604,7 @@ function moveShown<T>(order: T[], shown: T[], v: T, by: -1 | 1): T[] {
   return next;
 }
 /** Whether the admin has turned anything off in this group, for the small note under its list. */
-const managedIn = (off: readonly string[], group: 'brain' | 'images' | 'maps' | 'voices' | 'hears') => { const g = AI_OPTION_GROUPS.find((x) => x.id === group)!; return g.items.some((i) => off.includes(i.key)); };
+const managedIn = (off: readonly string[], group: 'brain' | 'images' | 'maps' | 'voices' | 'hears') => { const g = AI_OPTION_GROUPS.find((x) => x.id === group)!; return g.items.some((i) => !i.feature && off.includes(i.key)); };
 const MANAGED = 'Some options aren’t included in your plan.';
 
 type ImageDraft = ImageKeyInfo & { apiKey: string; saved: boolean };
@@ -1538,7 +1538,8 @@ export function Voice() {
           </>}
           <div className="eng-line"><span>Wake when I say “Niko”</span><Switch on={!!e.wake} onChange={(x) => set({ wake: x })} label="Wake when I say Niko" /></div>
           <div className="eng-line"><span>After Niko answers, keep listening for a few seconds so you can carry on talking</span><span className="k later">On</span></div>
-          <div className="eng-line"><span>Respond only to my voice <span className="k soon">Not available yet</span></span><Switch on={false} onChange={() => undefined} label="Respond only to my voice" disabled /></div>
+          {/* Shown only when this account is allowed it (off until the admin turns it on); the voice check itself comes in a later stage. */}
+          {aiAllowed(off, 'h:only-me') && <div className="eng-line"><span>Respond only to my voice <span className="k soon">Not available yet</span></span><Switch on={false} onChange={() => undefined} label="Respond only to my voice" disabled /></div>}
           <p className="hint">Keys are encrypted on the server, never stored in this browser, and never shown again after saving. Recordings go to the service once and are never stored. Two keys from the same account share one allowance, so a backup helps most when it is from another account or service.</p>
         </section>
       </div>

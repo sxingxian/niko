@@ -1,7 +1,7 @@
 import { and, desc, eq, gt, ilike, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { appSettings, auditLog, backgroundOwned, designOwned, invites, recoveryCodes, sessions, signups, users, type Db } from '@niko/db';
-import { accessState, accountLimits, cleanProvided, providedIds, USAGE_KINDS, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
+import { accessState, accountLimits, cleanProvided, providedIds, USAGE_KINDS, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, defaultOn, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
 import { connectInfo, connectStripe, dateLabel, forgetPayments, forgetStripeMode, inviteCodeHash, keysOf, makeInviteCode, paymentSettings, PAYMENTS_KEY, payNow, plansLine, secretsFor, STRIPE_MODE_KEY, stripeMode } from '../billing';
 import { isMode, keysFor, modeStatus, stripe, StripeError, stripeReady } from '../stripe';
 import { forgetGlanceDefaults, GLANCE_DEFAULT_KEY, glanceDefaults } from '../glance';
@@ -477,7 +477,8 @@ admin.put('/ai/default', requireAdmin, async (c) => {
   const b = await c.req.json<{ access?: unknown }>().catch(() => ({} as { access?: unknown }));
   const access = cleanAiAccess(b.access);
   // Only what is off needs keeping: anything not listed is on.
-  const stored = Object.fromEntries(Object.entries(access).filter(([, v]) => v === false));
+  // Only what differs from each option's starting value is kept: off for most, on for options that start off.
+  const stored = Object.fromEntries(Object.entries(access).filter(([k, v]) => v !== defaultOn({}, k)));
   const db = c.get('db');
   const members = await db.select({ email: users.email, role: users.role, aiAccess: users.aiAccess }).from(users);
   if (!aiHasBrain(aiOff(stored, {}))) return c.json({ error: 'At least one brain must stay on.' }, 400);
@@ -486,7 +487,7 @@ admin.put('/ai/default', requireAdmin, async (c) => {
   const before = await aiDefaults(db, true);
   await db.insert(appSettings).values({ key: AI_DEFAULT_KEY, value: stored }).onConflictDoUpdate({ target: appSettings.key, set: { value: stored } });
   forgetAiDefaults();
-  await audit(c, 'ai.default', { off: Object.keys(stored).join(', ') || 'none', changed: changedKeys(before, stored).join(', ') }, c.get('user').id);
+  await audit(c, 'ai.default', { off: aiOff(stored, {}).join(', ') || 'none', changed: changedKeys(before, stored).join(', ') }, c.get('user').id);
   return c.json({ ok: true, defaults: stored });
 });
 admin.put('/ai/users/:id', requireAdmin, async (c) => {
@@ -496,7 +497,7 @@ admin.put('/ai/users/:id', requireAdmin, async (c) => {
   if (!target) return c.json({ error: 'No such user.' }, 404);
   const defaults = await aiDefaults(db, true);
   // A change that matches the default is not a change: only real differences are kept.
-  const own = Object.fromEntries(Object.entries(cleanAiAccess(b.access)).filter(([k, v]) => v !== (defaults[k] ?? true)));
+  const own = Object.fromEntries(Object.entries(cleanAiAccess(b.access)).filter(([k, v]) => v !== defaultOn(defaults, k)));
   if (!aiHasBrain(aiOff(defaults, own))) return c.json({ error: 'At least one brain must stay on.' }, 400);
   await db.update(users).set({ aiAccess: own }).where(eq(users.id, target.id));
   await audit(c, 'ai.user', { target: target.email, changes: Object.entries(own).map(([k, v]) => `${k} ${v ? 'on' : 'off'}`).join(', ') || 'follows the default' }, c.get('user').id);
@@ -580,7 +581,7 @@ admin.put('/limits/users/:id', requireAdmin, async (c) => {
   return c.json({ ok: true, limits: own });
 });
 
-const changedKeys = (a: Record<string, boolean>, b: Record<string, boolean>) => [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => (a[k] ?? true) !== (b[k] ?? true));
+const changedKeys = (a: Record<string, boolean>, b: Record<string, boolean>) => [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => defaultOn(a, k) !== defaultOn(b, k));
 
 // The audit log, newest first, one page at a time. Search matches the action or its details; a person narrows it to
 // what they did and what was done to their account.

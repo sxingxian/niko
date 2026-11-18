@@ -4,6 +4,8 @@ export interface Env {
   ASSETS: Fetcher;
   AI: Ai;
   DATABASE_URL: string;
+  /** Knowledge's own Neon project (files, search pieces, what Niko learned). Without it, Knowledge stays off. */
+  KNOWLEDGE_DATABASE_URL?: string;
   ENCRYPTION_KEY: string;
   BOOTSTRAP_TOKEN?: string;
   RESEND_API_KEY?: string;
