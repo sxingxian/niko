@@ -86,7 +86,7 @@ export async function readWithCloudflare(env: Pick<Env, 'AI'>, name: string, byt
 }
 
 // ---------------------------------------------------------------- files
-export interface KnFile { id: string; name: string; kind: KnKind; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; flagged: boolean; sheets: number; rows: number; addedAt: string }
+export interface KnFile { id: string; name: string; kind: KnKind; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; flagged: boolean; sheets: number; rows: number; columns: number; addedAt: string }
 const cleanText = (v: unknown, n: number) => (typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, n) : '');
 const cleanName = (v: unknown) => cleanText(v, 255).replace(/[\\/]/g, '-');
 
@@ -267,12 +267,13 @@ export async function finishFile(k: Kdb, account: string, id: string): Promise<{
 }
 
 export async function listFiles(k: Kdb, account: string): Promise<KnFile[]> {
-  const rows = await k.q<{ id: string; name: string; kind: KnKind; collection: string; bytes: number; status: KnFile['status']; error: string | null; chunk_count: number; flagged: boolean; sheets: number; rows: string; created_at: string | Date }>(
+  const rows = await k.q<{ id: string; name: string; kind: KnKind; collection: string; bytes: number; status: KnFile['status']; error: string | null; chunk_count: number; flagged: boolean; sheets: number; rows: string; columns: number; created_at: string | Date }>(
     `select d.id, d.name, d.kind, d.collection, d.bytes, d.status, d.error, d.chunk_count, d.flagged, d.created_at,
             (select count(*)::int from kn_sheets s where s.document_id = d.id) as sheets,
-            (select coalesce(sum(s.row_count), 0)::bigint from kn_sheets s where s.document_id = d.id) as rows
+            (select coalesce(sum(s.row_count), 0)::bigint from kn_sheets s where s.document_id = d.id) as rows,
+            (select coalesce(max(jsonb_array_length(s.columns)), 0)::int from kn_sheets s where s.document_id = d.id) as columns
      from kn_documents d where d.account_id = $1 order by d.created_at desc limit 1000`, [account]);
-  return rows.map((r) => ({ id: r.id, name: r.name, kind: r.kind, collection: r.collection, bytes: r.bytes, status: r.status, error: r.error, pieces: r.chunk_count, flagged: r.flagged, sheets: r.sheets, rows: Number(r.rows), addedAt: new Date(r.created_at).toISOString() }));
+  return rows.map((r) => ({ id: r.id, name: r.name, kind: r.kind, collection: r.collection, bytes: r.bytes, status: r.status, error: r.error, pieces: r.chunk_count, flagged: r.flagged, sheets: r.sheets, rows: Number(r.rows), columns: r.columns, addedAt: new Date(r.created_at).toISOString() }));
 }
 
 export async function deleteFile(k: Kdb, account: string, id: string): Promise<boolean> {
@@ -320,8 +321,9 @@ export async function search(k: Kdb, env: Pick<Env, 'AI'>, account: string, quer
 }
 
 /** Size of the Knowledge database and how many files and people it holds, for the admin. Never what is in them. */
-export async function databaseUsage(k: Kdb): Promise<{ bytes: number; files: number; people: number }> {
+export async function databaseUsage(k: Kdb): Promise<{ bytes: number; files: number; people: number; accounts: Record<string, { files: number; bytes: number }> }> {
   const [r] = await k.q<{ bytes: string; files: number; people: number }>(
     `select pg_database_size(current_database())::bigint as bytes, count(*)::int as files, count(distinct account_id)::int as people from kn_documents`);
-  return { bytes: Number(r?.bytes ?? 0), files: r?.files ?? 0, people: r?.people ?? 0 };
+  const per = await k.q<{ account_id: string; files: number; bytes: string }>(`select account_id, count(*)::int as files, coalesce(sum(bytes), 0)::bigint as bytes from kn_documents group by account_id`);
+  return { bytes: Number(r?.bytes ?? 0), files: r?.files ?? 0, people: r?.people ?? 0, accounts: Object.fromEntries(per.map((x) => [x.account_id, { files: x.files, bytes: Number(x.bytes) }])) };
 }

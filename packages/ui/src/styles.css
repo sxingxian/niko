@@ -149,3 +149,46 @@ html { -webkit-tap-highlight-color: transparent; }
   .hud-in, .hud-in *, .hud-sweep, .route.hud-out { animation: none !important; }
   .hud-sweep { display: none; }
 }
+
+/* ---------------------------------------------------------------- shared controls (the same on every screen) */
+/* Pill switcher */
+.segs { display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; border: 1px solid rgba(255,255,255,.22); background: rgba(0,0,0,.3); flex: none; }
+.segs-b { height: 40px; padding: 0 18px; border: 0; border-radius: 999px; background: transparent; color: #e6eaf1; font-size: 14px; cursor: pointer; white-space: nowrap; }
+.segs-b:hover { background: rgba(255,255,255,.08); }
+.segs-b[aria-pressed='true'] { background: #fff; color: #05070d; }
+.segs-b:disabled { opacity: .45; cursor: default; }
+/* Pill tabs, such as collections */
+.ptab { height: 40px; padding: 0 16px; border-radius: 999px; border: 1px solid rgba(255,255,255,.22); background: rgba(0,0,0,.25); color: #e6eaf1; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.ptab:hover { background: rgba(255,255,255,.08); }
+.ptab[aria-pressed='true'], .ptab[aria-selected='true'] { background: #fff; color: #05070d; border-color: #fff; }
+.ptab .n { font-size: 12px; opacity: .6; }
+.ptab.add { border-style: dashed; }
+/* Setting rows: name and hint on the left, control on the right, a line between rows */
+.srow { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 0; border-top: 1px solid rgba(255,255,255,.08); }
+.srow:first-child { border-top: 0; padding-top: 0; }
+.srow:last-child { padding-bottom: 0; }
+.srow-t { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.srow-name { font-size: 15px; }
+.srow-hint { font: 400 12px/1.45 system-ui, sans-serif; color: var(--muted); }
+.srow-c { flex: none; display: flex; align-items: center; gap: 8px; }
+.srow-c select.in { width: 300px; height: 44px; border-radius: 14px; font-size: 14px; padding: 0 12px; background-color: #11161e; }
+/* Status dot */
+.state { display: inline-flex; align-items: center; gap: 8px; font: 400 13px system-ui, sans-serif; white-space: nowrap; }
+.state i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+.state.ready { color: #7fe3a8; } .state.look { color: #ffd38a; } .state.busy { color: #9fdcf3; } .state.bad { color: #ffb3aa; }
+/* Fill bar (how full something is) */
+.fillbar { display: block; height: 6px; border-radius: 99px; background: rgba(255,255,255,.12); overflow: hidden; }
+.fillbar i { display: block; height: 100%; border-radius: 99px; background: #9fdcf3; transition: width .3s ease; }
+.fillbar.warn i { background: #ffd38a; }
+/* Small action buttons inside rows */
+.bt.sm { height: 32px; min-width: 0; padding: 0 12px; font-size: 12px; font-weight: 400; }
+.bt.md, .pri.md { height: 36px; min-width: 0; padding: 0 14px; font-size: 13px; }
+.pri.md { font-weight: 600; }
+.more-b { width: 40px; height: 40px; border-radius: 50%; border: 1px solid transparent; background: transparent; color: #fff; font-size: 18px; line-height: 1; cursor: pointer; flex: none; }
+.more-b:hover { background: rgba(255,255,255,.1); }
+@media (max-width: 600px) {
+  .srow:has(select.in) { flex-wrap: wrap; }
+  .srow-c select.in { width: 100%; }
+  .srow-c:has(select) { flex: 1 1 100%; }
+  .segs-b { padding: 0 12px; font-size: 13px; }
+}

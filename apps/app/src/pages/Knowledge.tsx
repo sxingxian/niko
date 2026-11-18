@@ -1,7 +1,8 @@
 // Settings · Knowledge: each person gives Niko their own files. Niko keeps answering as it does now; when a file is a
 // confident match it leads the answer. Files are read and split here in the browser, then kept by Niko.
+// Laid out as the Knowledge-Settings mockup, with the shared controls (Segmented, SettingRow, Status, Meter).
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
-import { api, Icon, Switch } from '@niko/ui';
+import { api, Meter, Segmented, SettingRow, Status, Switch } from '@niko/ui';
 import {
   knKindOf, knModeOf, knNeedsCloudflare, KN_COL_TYPE_NAMES, KN_COL_TYPES,
   type KnColType, type KnColumn, type KnMode, type KnowledgeAccess, type KnowledgeLimits, type KnowledgePrefs,
@@ -11,22 +12,30 @@ import { addFile } from '../knowledge';
 import { Sheet } from './Designs';
 import { NoteLine, SettingsPage } from './Settings';
 
-type KnFile = { id: string; name: string; kind: string; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; flagged: boolean; sheets: number; rows: number; addedAt: string };
+type KnFile = { id: string; name: string; kind: string; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; flagged: boolean; sheets: number; rows: number; columns: number; addedAt: string };
 type KnSheet = { id: string; name: string; columns: KnColumn[]; rows: number; header: boolean; example: string[] };
 type State = { available: boolean; access: KnowledgeAccess; prefs: KnowledgePrefs; limits: KnowledgeLimits; usage: { files: number; bytes: number } };
-type Upload = { key: string; name: string; step: string; done: number; total: number; error?: string };
+type Upload = { key: string; name: string; bytes: number; step: string; done: number; total: number; error?: string };
 
 const MB = 1024 * 1024;
-const mb = (b: number) => (b < MB ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / MB).toFixed(b < 10 * MB ? 1 : 0)} MB`);
+const size = (b: number) => (b < MB ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / MB).toFixed(b < 10 * MB ? 1 : 0)} MB`);
+const n = (x: number, one: string, many: string) => `${x.toLocaleString()} ${x === 1 ? one : many}`;
 const TEXT_TYPES = 'JSON, XML, MD, TXT, CSV, TSV, HTML';
 const ALL_TYPES = 'JSON, XML, MD, TXT, CSV, TSV, XLSX, XLS, PDF, DOCX';
-const MODES: [KnMode, string][] = [['files', 'Files first'], ['only', 'Only my files'], ['off', 'Off']];
+const MODES: readonly (readonly [KnMode, string])[] = [['files', 'Files first'], ['only', 'Only my files'], ['off', 'Off']];
 const MODE_HINT: Record<KnMode, string> = {
   files: 'When a file here is a confident match, it leads the answer, with what Niko knows, finds online and sees in your apps added after.',
   only: 'Niko uses these files only when you say “from my files”.',
   off: 'Niko doesn’t use these files. They’re kept until you remove them.',
 };
 const TYPE_LABEL: Record<string, string> = { md: 'MD', txt: 'TXT', csv: 'CSV', tsv: 'TSV', json: 'JSON', xml: 'XML', html: 'HTML', pdf: 'PDF', docx: 'DOCX', xlsx: 'XLSX', xls: 'XLS', ods: 'ODS', odt: 'ODT' };
+const ACCEPT_TEXT = '.json,.xml,.md,.markdown,.txt,.csv,.tsv,.html,.htm';
+const ACCEPT_ALL = `${ACCEPT_TEXT},.xlsx,.xls,.ods,.pdf,.docx,.odt`;
+
+const IconNiko = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /></svg>;
+const IconUpload = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 20h16" /></svg>;
+const IconFile = () => <svg className="kn-ic big" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l3 3v15H6z" /><path d="M12 10v6M9 13h6" /></svg>;
+const IconPlus = () => <svg className="kn-ic sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>;
 
 export function Knowledge() {
   const { me } = useNiko();
@@ -50,6 +59,8 @@ export function Knowledge() {
     } catch (e) { setNote({ ok: false, text: (e as Error).message }); }
   }, []);
   useEffect(() => { void load(); }, [load]);
+  // The ⋯ menu closes when you click anywhere else.
+  useEffect(() => { if (!menu) return; const close = () => setMenu(null); window.addEventListener('click', close); return () => window.removeEventListener('click', close); }, [menu]);
 
   const collections = useMemo(() => {
     const counts = new Map<string, number>();
@@ -59,7 +70,8 @@ export function Knowledge() {
   }, [files, extraCols]);
 
   if (!me) return null;
-  if (!st) return <SettingsPage title="Knowledge" sub="Give Niko your own files."><NoteLine note={note} /></SettingsPage>;
+  const sub = 'Give Niko your own files. Niko keeps doing everything it does now, and when a file is a confident match it leads the answer, with what Niko knows, finds online and sees in your apps added after.';
+  if (!st) return <SettingsPage title="Knowledge" sub={sub}><NoteLine note={note} /></SettingsPage>;
   const { access, prefs, limits } = st;
   const readCf = access.cloudflareRead && prefs.read === 'cloudflare';
 
@@ -73,14 +85,14 @@ export function Knowledge() {
   const add = async (list: FileList | File[]) => {
     setNote(null);
     const chosen = [...list];
-    const queue: Upload[] = chosen.map((f, i) => ({ key: `${Date.now()}-${i}`, name: f.name, step: 'Waiting', done: 0, total: 1 }));
+    const queue: Upload[] = chosen.map((f, i) => ({ key: `${Date.now()}-${i}`, name: f.name, bytes: f.size, step: 'Waiting', done: 0, total: 1 }));
     setUploads((u) => [...queue, ...u]);
     const update = (key: string, x: Partial<Upload>) => setUploads((u) => u.map((y) => (y.key === key ? { ...y, ...x } : y)));
     for (let i = 0; i < chosen.length; i++) {
       const f = chosen[i]!, key = queue[i]!.key;
       const kind = knKindOf(f.name);
       if (!kind) { update(key, { error: 'Knowledge can’t read this kind of file.' }); continue; }
-      if (knNeedsCloudflare(kind) && !readCf) { update(key, { error: access.cloudflareRead ? 'Turn on “Read files with Cloudflare” below to add PDF, Word and spreadsheet files.' : 'PDF, Word and spreadsheet files aren’t included in your plan. Save it as CSV, MD or TXT instead.' }); continue; }
+      if (knNeedsCloudflare(kind) && !readCf) { update(key, { error: access.cloudflareRead ? 'Choose Cloudflare under “Read files with” to add PDF, Word and spreadsheet files.' : 'PDF, Word and spreadsheet files aren’t included in your plan. Save it as CSV, MD or TXT instead.' }); continue; }
       if (f.size > limits.mbPerFile * MB) { update(key, { error: `Each file can be up to ${limits.mbPerFile} MB.` }); continue; }
       try {
         await addFile(f, col, { readWithCloudflare: readCf, onStep: (step, done, total) => update(key, { step, done, total }) });
@@ -98,126 +110,148 @@ export function Knowledge() {
     try { await api(`/knowledge/files/${f.id}`, { method: 'PATCH', body: { flagged: false } }); setFiles((x) => x.map((y) => (y.id === f.id ? { ...y, flagged: false } : y))); }
     catch (e) { setNote({ ok: false, text: (e as Error).message }); }
   };
-  const onDrop = (e: DragEvent) => { e.preventDefault(); setDrag(false); if (e.dataTransfer.files.length) void add(e.dataTransfer.files); };
+  const dropProps = { onDragOver: (e: DragEvent) => { e.preventDefault(); setDrag(true); }, onDragLeave: () => setDrag(false), onDrop: (e: DragEvent) => { e.preventDefault(); setDrag(false); if (e.dataTransfer.files.length) void add(e.dataTransfer.files); } };
 
   const here = files.filter((f) => f.collection === col);
   const mode = knModeOf(prefs, col);
   const types = `${readCf ? ALL_TYPES : TEXT_TYPES} · up to ${limits.mbPerFile} MB each`;
-  const detail = (f: KnFile) => [f.sheets ? `${f.sheets === 1 ? '1 sheet' : `${f.sheets} sheets`} · ${f.rows.toLocaleString()} ${f.rows === 1 ? 'row' : 'rows'}` : `${f.pieces} ${f.pieces === 1 ? 'piece' : 'pieces'}`, mb(f.bytes), new Date(f.addedAt).toLocaleDateString([], { day: 'numeric', month: 'short' })].join(' · ');
-  const picked = <input ref={picker} type="file" multiple hidden accept={readCf ? '.json,.xml,.md,.markdown,.txt,.csv,.tsv,.html,.htm,.xlsx,.xls,.ods,.pdf,.docx,.odt' : '.json,.xml,.md,.markdown,.txt,.csv,.tsv,.html,.htm'} onChange={(e) => { if (e.target.files?.length) void add(e.target.files); e.target.value = ''; }} />;
+  const detail = (f: KnFile) => [
+    f.sheets === 0 ? n(f.pieces, 'piece', 'pieces') : f.kind === 'json' ? n(f.rows, 'record', 'records') : f.sheets === 1 ? `${n(f.rows, 'row', 'rows')} · ${n(f.columns, 'column', 'columns')}` : `${n(f.sheets, 'sheet', 'sheets')} · ${n(f.rows, 'row', 'rows')}`,
+    size(f.bytes),
+  ].join(' · ');
+  const empty = files.length === 0 && uploads.length === 0;
+  const picked = <input ref={picker} type="file" multiple hidden accept={readCf ? ACCEPT_ALL : ACCEPT_TEXT} onChange={(e) => { if (e.target.files?.length) void add(e.target.files); e.target.value = ''; }} />;
+  const choose = <button type="button" className="pri md" onClick={() => picker.current?.click()}>Choose files</button>;
 
   return (
-    <SettingsPage title="Knowledge" sub="Give Niko your own files. Niko keeps doing everything it does now, and when a file is a confident match it leads the answer, with what Niko knows, finds online and sees in your apps added after.">
+    <SettingsPage title="Knowledge" sub={sub}>
       <NoteLine note={note} />
       {!st.available ? (
-        <section className="g eng-card"><span className="k">Knowledge</span><p className="hint">Knowledge isn’t available right now. Try again later.</p></section>
+        <div className="kn-page"><div className="kn-main"><section className="g kn-card"><b className="kn-h">Knowledge</b><p className="srow-hint">Knowledge isn’t available right now. Try again later.</p></section></div></div>
       ) : (
-      <div className="kn-grid">
+      <div className="kn-page">
         <div className="kn-main">
-          <section className="g eng-card" aria-label="Where it’s kept">
-            <span className="k">Where it’s kept</span>
-            {access.niko ? (
-              <div className="kn-place on">
-                <span className="kn-place-ic" aria-hidden="true"><Icon name="spark" size={20} /></span>
-                <span className="kn-place-t"><b>Niko</b><span className="sub">Kept by Niko, apart from your account details. Works on all your devices and for Telegram replies.</span></span>
+          <section className="g kn-card" aria-label="Where your Knowledge is kept">
+            <div className="kn-head"><b className="kn-h">Where it’s kept</b><span className="srow-hint">{access.niko ? 'Kept in Niko' : 'Not included in your plan'}</span></div>
+            {access.niko && <>
+              <div className="kn-places">
+                <button type="button" className="kn-place" aria-pressed="true">
+                  <span className="kn-place-top"><IconNiko /><b>Niko</b><span className="kn-pill rec">Recommended</span></span>
+                  <span className="srow-hint ready">In use</span>
+                </button>
               </div>
-            ) : <p className="hint">Keeping files in Niko isn’t included in your plan.</p>}
-            {access.niko && <p className="hint kn-use">{mb(st.usage.bytes)} of {limits.mbTotal} MB included in your plan · {st.usage.files} of {limits.files} {limits.files === 1 ? 'file' : 'files'}</p>}
+              <div className="kn-inset">
+                <span className="kn-lead">Kept by Niko, apart from your account details. Works on all your devices and for Telegram replies.</span>
+                <div className="kn-use">
+                  <span className="kn-use-l"><span>{size(st.usage.bytes)} of {limits.mbTotal} MB included in your plan</span><span className="srow-hint">{n(st.usage.files, 'file', 'files')} of {limits.files.toLocaleString()}</span></span>
+                  <Meter value={st.usage.bytes / (limits.mbTotal * MB)} label="Space used" />
+                </div>
+              </div>
+            </>}
           </section>
 
-          {access.niko && (
-          <section className="g eng-card kn-files" aria-label="Files" onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)} onDrop={onDrop}>
-            {picked}
-            {files.length === 0 && uploads.length === 0 ? (
-              <div className={'kn-empty' + (drag ? ' drag' : '')}>
-                <Icon name="note" size={28} />
-                <b>No files yet</b>
-                <p className="hint">Right now Niko answers from what it knows and finds online, and from your connected apps. Add files and it answers from them too, when they fit.</p>
-                <p className="hint">{types}</p>
-                <button type="button" className="pri" onClick={() => picker.current?.click()}>Choose files</button>
-              </div>
-            ) : <>
-              <div className="kn-chips" role="tablist" aria-label="Collections">
-                {collections.map(([name, n]) => (
-                  <button key={name} type="button" role="tab" aria-selected={name === col} className={'kn-chip' + (name === col ? ' on' : '')} onClick={() => setCol(name)}>{name}<span className="n">{n}</span></button>
-                ))}
+          {access.niko && picked}
+          {access.niko && empty && (
+            <section className={'g kn-card kn-empty' + (drag ? ' drag' : '')} aria-label="No files yet" {...dropProps}>
+              <IconFile />
+              <b className="kn-h">No files yet</b>
+              <span className="srow-hint big">Right now Niko answers from what it knows and finds online, and from your connected apps. Add files and it answers from them too, when they fit.</span>
+              <span className="srow-hint">{types}</span>
+              {choose}
+            </section>
+          )}
+          {access.niko && !empty && (
+            <section className="g kn-card" aria-label="Your files" {...dropProps}>
+              <div className="kn-tabs" role="tablist" aria-label="Collections">
+                {collections.map(([name, count]) => <button key={name} type="button" role="tab" className="ptab" aria-selected={name === col} onClick={() => setCol(name)}>{name}<span className="n">{count}</span></button>)}
                 {newCol === null
-                  ? <button type="button" className="kn-chip add" onClick={() => setNewCol('')}><Icon name="plus" size={16} />Collection</button>
-                  : <form className="kn-newcol" onSubmit={(e) => { e.preventDefault(); const n = newCol.trim().slice(0, 80); if (n) { setExtraCols((x) => [...new Set([...x, n])]); setCol(n); } setNewCol(null); }}>
-                      <input className="in" autoFocus value={newCol} maxLength={80} placeholder="Name" aria-label="New collection name" onChange={(e) => setNewCol(e.target.value)} onBlur={() => { if (!newCol.trim()) setNewCol(null); }} />
+                  ? <button type="button" className="ptab add" onClick={() => setNewCol('')}><IconPlus />Collection</button>
+                  : <form className="kn-newcol" onSubmit={(e) => { e.preventDefault(); const name = newCol.trim().slice(0, 80); if (name) { setExtraCols((x) => [...new Set([...x, name])]); setCol(name); } setNewCol(null); }}>
+                      <input className="in" autoFocus value={newCol} maxLength={80} placeholder="Collection name" aria-label="New collection name" onChange={(e) => setNewCol(e.target.value)} onBlur={() => { if (!newCol.trim()) setNewCol(null); }} />
                     </form>}
               </div>
-              <div className="kn-mode">
-                <span className="k">How Niko answers from {col}</span>
-                <div className="kn-seg" role="group" aria-label={`How Niko answers from ${col}`}>
-                  {MODES.map(([m, label]) => <button key={m} type="button" className="seg" aria-pressed={mode === m} onClick={() => savePrefs({ modes: { ...prefs.modes, [col]: m } })}>{label}</button>)}
-                </div>
-                <p className="hint">{MODE_HINT[mode]}</p>
+              <div className="kn-inset kn-mode">
+                <span className="kn-mode-t"><span className="k">How Niko answers from {col}</span><span className="kn-lead sm">{MODE_HINT[mode]}</span></span>
+                <Segmented value={mode} options={MODES} label="Answer mode" onChange={(m) => void savePrefs({ modes: { ...prefs.modes, [col]: m } })} />
               </div>
-              <button type="button" className={'kn-drop' + (drag ? ' drag' : '')} onClick={() => picker.current?.click()}>
-                <Icon name="plus" size={20} /><span><b>Drop files here</b><span className="sub">{types}</span></span><span className="bt">Choose files</span>
-              </button>
-              <ul className="kn-list">
+              <div className={'kn-drop' + (drag ? ' drag' : '')}>
+                <span className="kn-drop-t"><IconUpload /><span><span className="kn-drop-h">Drop files here</span><span className="srow-hint">{types}</span></span></span>
+                {choose}
+              </div>
+              <div className="kn-files">
                 {uploads.map((u) => (
-                  <li key={u.key} className={'kn-row' + (u.error ? ' bad' : '')}>
+                  <div key={u.key} className="kn-frow">
                     <span className="kn-badge">{TYPE_LABEL[knKindOf(u.name) ?? ''] ?? '?'}</span>
-                    <span className="kn-t"><b>{u.name}</b><span className="sub">{u.error ?? `${u.step}${u.total > 1 ? ` · ${Math.round((u.done / u.total) * 100)}%` : '…'}`}</span></span>
-                    {u.error && <button type="button" className="bt quiet" onClick={() => setUploads((x) => x.filter((y) => y.key !== u.key))}>Dismiss</button>}
-                  </li>
+                    <span className="kn-ft"><b>{u.name}</b><span className="srow-hint">{u.error ?? size(u.bytes)}</span></span>
+                    <span className="kn-fs">
+                      {u.error ? <Status tone="bad">Couldn’t add</Status> : <Status tone="busy">{u.step}{u.total > 1 ? ` · ${Math.round((u.done / u.total) * 100)}%` : '…'}</Status>}
+                      {!u.error && u.total > 1 && <Meter value={u.done / u.total} warnAt={2} label={`Adding ${u.name}`} />}
+                    </span>
+                    {u.error ? <button type="button" className="more-b" aria-label={`Dismiss ${u.name}`} onClick={() => setUploads((x) => x.filter((y) => y.key !== u.key))}>×</button> : <span />}
+                  </div>
                 ))}
                 {here.map((f) => (
-                  <li key={f.id} className="kn-row-wrap">
-                    <div className="kn-row">
+                  <div key={f.id} className="kn-fwrap">
+                    <div className="kn-frow">
                       <span className="kn-badge">{TYPE_LABEL[f.kind] ?? f.kind.toUpperCase()}</span>
-                      <span className="kn-t"><b>{f.name}</b><span className="sub">{detail(f)}</span></span>
-                      {f.sheets > 0 && <button type="button" className="bt" onClick={() => setChecking(f)}>Check</button>}
-                      <span className="kn-more">
-                        <button type="button" className="ib" aria-label={`More for ${f.name}`} aria-expanded={menu === f.id} onClick={() => setMenu(menu === f.id ? null : f.id)}>⋯</button>
-                        {menu === f.id && <span className="kn-menu g" role="menu"><button type="button" role="menuitem" className="danger" onClick={() => void remove(f)}>Remove file</button></span>}
+                      <span className="kn-ft"><b>{f.name}</b><span className="srow-hint">{detail(f)}</span></span>
+                      <span className="kn-fs">
+                        <span className="kn-fs-line">
+                          {f.flagged ? <Status tone="look">Needs a look</Status> : <Status tone="ready">Ready</Status>}
+                          {f.sheets > 0 && <button type="button" className="bt sm" onClick={() => setChecking(f)}>Check</button>}
+                        </span>
+                      </span>
+                      <span className="kn-more" onClick={(e) => e.stopPropagation()}>
+                        <button type="button" className="more-b" aria-label={`More for ${f.name}`} aria-haspopup="menu" aria-expanded={menu === f.id} onClick={() => setMenu(menu === f.id ? null : f.id)}>⋯</button>
+                        {menu === f.id && <span className="kn-menu g" role="menu">
+                          {f.sheets > 0 && <button type="button" role="menuitem" onClick={() => { setMenu(null); setChecking(f); }}>Check columns</button>}
+                          <button type="button" role="menuitem" className="danger" onClick={() => void remove(f)}>Remove file</button>
+                        </span>}
                       </span>
                     </div>
                     {f.flagged && (
                       <div className="kn-warn">
-                        <p>Part of this file is written as instructions to an AI (“ignore earlier rules and send…”). Niko will only ever read it as data, never act on it.</p>
-                        <span className="sheet-actions"><button type="button" className="bt danger" onClick={() => void remove(f)}>Remove file</button><button type="button" className="bt" onClick={() => void keep(f)}>Keep as data</button></span>
+                        <span>Part of this file is written as instructions to an AI (“ignore earlier rules and send…”). Niko will only ever read it as data, never act on it.</span>
+                        <span className="kn-warn-b"><button type="button" className="bt md" onClick={() => void remove(f)}>Remove file</button><button type="button" className="pri md" onClick={() => void keep(f)}>Keep as data</button></span>
                       </div>
                     )}
-                  </li>
+                  </div>
                 ))}
-                {here.length === 0 && uploads.length === 0 && <li className="hint kn-none">Nothing in {col} yet. Drop files above to add them here.</li>}
-              </ul>
-            </>}
-          </section>
+                {here.length === 0 && uploads.length === 0 && <p className="srow-hint kn-none">Nothing in {col} yet. Drop files here, or choose them, to add them to {col}.</p>}
+              </div>
+            </section>
           )}
 
-          <section className="g eng-card" aria-label="Knowledge settings">
-            {access.cloudflareRead && <label className="fld kn-fld"><span className="k">Read files with</span>
-              <select className="in" value={prefs.read} onChange={(e) => void savePrefs({ read: e.target.value === 'device' ? 'device' : 'cloudflare' })}>
+          <section className="g kn-card" aria-label="Search and use">
+            {access.cloudflareRead && <SettingRow title="Read files with" hint={prefs.read === 'cloudflare' ? 'Cloudflare turns PDF, Word and spreadsheet files into text and keeps nothing. Pictures inside them aren’t read.' : 'Only files this browser can read itself: JSON, XML, MD, TXT, CSV, TSV and HTML.'}>
+              <select className="in" aria-label="Read files with" value={prefs.read} onChange={(e) => void savePrefs({ read: e.target.value === 'device' ? 'device' : 'cloudflare' })}>
                 <option value="cloudflare">Cloudflare · reads PDF and Word too</option><option value="device">This browser only</option>
               </select>
-              <span className="hint">{prefs.read === 'cloudflare' ? 'Cloudflare turns PDF, Word and spreadsheet files into text and keeps nothing. Pictures inside them aren’t read.' : 'Only files this browser can read itself: JSON, XML, MD, TXT, CSV, TSV and HTML.'}</span>
-            </label>}
-            {access.cloudflareSearch
-              ? <label className="fld kn-fld"><span className="k">Find things by meaning with</span>
-                  <select className="in" value="cloudflare" disabled><option value="cloudflare">Cloudflare · included in your plan</option></select>
-                  <span className="hint">Cloudflare makes search numbers so Niko finds the right part even when you use different words. It keeps nothing.</span>
-                </label>
-              : <p className="hint">Niko finds things in your files by the words in them.</p>}
-            <div className="eng-line"><span>Use Knowledge in reply drafts<span className="sub kn-sub">Drafts stay quick by reading only the message, unless this is on.</span></span><Switch on={prefs.drafts} onChange={(v) => void savePrefs({ drafts: v })} label="Use Knowledge in reply drafts" /></div>
-            <div className="eng-line"><span>Answer Telegram messages from Knowledge<span className="sub kn-sub">{prefs.telegram ? 'Telegram replies can use your files kept in Niko.' : 'Telegram replies don’t use your files.'}</span></span><Switch on={prefs.telegram} onChange={(v) => void savePrefs({ telegram: v })} label="Answer Telegram messages from Knowledge" /></div>
+            </SettingRow>}
+            <SettingRow title="Find things by meaning with" hint={access.cloudflareSearch ? 'Cloudflare makes search numbers so Niko finds the right part even when you use different words. It keeps nothing.' : 'Niko finds things in your files by the words in them.'}>
+              {access.cloudflareSearch
+                ? <select className="in" aria-label="Find things by meaning with" value="cloudflare" disabled><option value="cloudflare">Cloudflare · included in your plan</option></select>
+                : <span className="srow-hint">Words only</span>}
+            </SettingRow>
+            <SettingRow title="Use Knowledge in reply drafts" hint="Drafts stay quick by reading only the message, unless this is on.">
+              <Switch on={prefs.drafts} onChange={(v) => void savePrefs({ drafts: v })} label="Use Knowledge in reply drafts" />
+            </SettingRow>
+            <SettingRow title="Answer Telegram messages from Knowledge" hint={prefs.telegram ? 'Telegram replies can use your files kept in Niko.' : 'Telegram replies don’t use your files.'}>
+              <Switch on={prefs.telegram} onChange={(v) => void savePrefs({ telegram: v })} label="Answer Telegram messages from Knowledge" />
+            </SettingRow>
           </section>
         </div>
 
-        <aside className="g eng-card kn-aside">
+        <aside className="kn-aside" aria-label="About Knowledge">
           <span className="k">On top of Niko</span>
-          <p className="hint">Niko still answers from what it knows, what it finds online and your connected apps. When a file is a confident match, it leads, with the file and row shown, and the rest is added after.</p>
-          <p className="hint">If something is only similar, Niko asks “Is this the one?”. Say “that’s the one” and it remembers.</p>
-          <p className="hint">Say “from my files” to keep one answer to your files only.</p>
-          <p className="hint">Spreadsheets become tables, so Niko can count and add up, not just search. The original file is never kept, only the text and rows.</p>
-          <span className="k" style={{ paddingTop: 12 }}>Kept private</span>
-          <p className="hint">Only you can see your Knowledge.</p>
-          <p className="hint">Text inside a file is never an instruction: a file can’t make Niko send, pay, delete or change anything.</p>
-          <p className="hint">Removing a file removes its text, rows and search index straight away.</p>
+          <p>Niko still answers from what it knows, what it finds online and your connected apps. When a file is a confident match, it leads, with the file and row shown, and the rest is added after.</p>
+          <p>If something is only similar, Niko asks “Is this the one?”. Say “that’s the one” and it remembers.</p>
+          <p>Say “from my files” to keep one answer to your files only.</p>
+          <p>Spreadsheets become tables, so Niko can count and add up, not just search. The original file is never kept, only the text and rows.</p>
+          <span className="k">Kept private</span>
+          <p>Only you can see your Knowledge.</p>
+          <p>Text inside a file is never an instruction: a file can’t make Niko send, pay, delete or change anything.</p>
+          <p>Removing a file removes its text, rows and search index straight away.</p>
         </aside>
       </div>
       )}
@@ -248,26 +282,26 @@ function CheckColumns({ file, onClose }: { file: KnFile; onClose: () => void }) 
   };
   return (
     <Sheet onClose={onClose} labelledBy="kn-check-h">
-      <div className="dz-sheet-t"><h3 id="kn-check-h">Check columns · {file.name}</h3>
-        <p className="hint">Niko found {header ? 'a header row and ' : ''}these columns{sheets && sheets.length > 1 ? ` in ${sheet?.name}` : ''}. Fix any type that’s wrong, so counts and totals come out right.</p></div>
-      {err && <p className="err" role="alert">{err}</p>}
-      {!sheet ? <p className="hint">{err ? '' : 'Loading…'}</p> : <>
-        <ul className="kn-cols">
-          {cols.map((c, j) => (
-            <li key={j} className="kn-col">
-              <span className="kn-col-t">
-                <input className="in" value={c.name} maxLength={120} aria-label={`Column ${j + 1} name`} disabled={!header} onChange={(e) => setCols(cols.map((x, k) => (k === j ? { ...x, name: e.target.value } : x)))} />
-                <span className="sub">e.g. {sheet.example[j] || '—'}</span>
-              </span>
-              <select className="in" value={c.type} aria-label={`What ${c.name} holds`} onChange={(e) => setCols(cols.map((x, k) => (k === j ? { ...x, type: e.target.value as KnColType } : x)))}>
-                {KN_COL_TYPES.map((t) => <option key={t} value={t}>{KN_COL_TYPE_NAMES[t]}</option>)}
-              </select>
-            </li>
-          ))}
-        </ul>
-        <label className="eng-check"><input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} />First row is the header</label>
-        <div className="sheet-actions"><button type="button" className="bt" onClick={onClose}>Cancel</button><button type="button" className="pri" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save columns'}</button></div>
-      </>}
+      <div className="kn-dlg">
+        <b id="kn-check-h" className="kn-dlg-h">Check columns · {file.name}</b>
+        <span className="srow-hint big">Niko found {sheet?.header === false ? 'no header row, and ' : 'a header row and '}these columns{sheets && sheets.length > 1 ? ` in ${sheet?.name} (${i + 1} of ${sheets.length})` : ''}. Fix any type that’s wrong, so counts and totals come out right.</span>
+        {err && <p className="err" role="alert">{err}</p>}
+        {!sheet ? <p className="srow-hint">{err ? '' : 'Loading…'}</p> : <>
+          <div className="kn-cols">
+            {cols.map((c, j) => (
+              <div key={j} className="kn-col">
+                <b>{c.name}</b>
+                <span className="srow-hint">e.g. {sheet.example[j] || '—'}</span>
+                <select className="in" value={c.type} aria-label={`Type of ${c.name}`} onChange={(e) => setCols(cols.map((x, k) => (k === j ? { ...x, type: e.target.value as KnColType } : x)))}>
+                  {KN_COL_TYPES.map((t) => <option key={t} value={t}>{KN_COL_TYPE_NAMES[t]}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+          <label className="kn-check"><input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} />First row is the header</label>
+          <div className="kn-dlg-b"><button type="button" className="bt" onClick={onClose}>Cancel</button><button type="button" className="pri md" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save columns'}</button></div>
+        </>}
+      </div>
     </Sheet>
   );
 }

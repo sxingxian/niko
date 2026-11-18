@@ -26,6 +26,9 @@ export const KN_SHEET_ROW_PIECES_MAX = 2000; // sheets up to this many rows also
 export const KN_DEVICE_DIMS = 384;         // search numbers made on the device
 export const KN_CLOUDFLARE_DIMS = 1024;    // search numbers made by Cloudflare (bge-m3)
 export const KN_READ_MAX_BYTES = 10 * 1024 * 1024; // the largest file Cloudflare reading takes
+/** Storage in one Neon Free plan project (1 GB since October 2026; https://neon.com/faqs/free-plan-limits-and-quotas).
+ *  Knowledge has its own project, so this is what the admin's database bar measures against. */
+export const KN_DB_FREE_BYTES = 1024 ** 3;
 
 /** How much each account may keep. The admin sets a default and can change it per person. */
 export interface KnowledgeLimits { files: number; mbPerFile: number; mbTotal: number }

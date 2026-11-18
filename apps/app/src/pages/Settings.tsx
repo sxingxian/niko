@@ -1,4 +1,4 @@
-// Settings: one area with a shared sidebar (Appearance, Voice, Connections, Engine, Account) and a way back to Niko.
+// Settings: one area with a shared sidebar (Appearance, Voice, Engine, Connections, Knowledge, Account) and a way back to Niko.
 import { startRegistration } from '@simplewebauthn/browser';
 import { BillingCard } from './Plan';
 import { passkeyError } from '../passkeyError';
@@ -30,7 +30,7 @@ type MyApp = AppDef & { configured: boolean; hint: string | null; uses: string[]
 type Note = { ok: boolean; text: string } | null;
 
 // ---------------------------------------------------------------- shell
-const SETTINGS: [string, string, string][] = [['/appearance', 'Appearance', 'palette'], ['/voice', 'Voice', 'wave'], ['/connections', 'Connections', 'plug'], ['/engine', 'Engine', 'spark'], ['/knowledge', 'Knowledge', 'note'], ['/account', 'Account', 'user']];
+const SETTINGS: [string, string, string][] = [['/appearance', 'Appearance', 'palette'], ['/voice', 'Voice', 'wave'], ['/engine', 'Engine', 'spark'], ['/connections', 'Connections', 'plug'], ['/knowledge', 'Knowledge', 'note'], ['/account', 'Account', 'user']];
 
 /** Route layout: the sidebar stays put while the page beside it changes. */
 export function SettingsLayout() {

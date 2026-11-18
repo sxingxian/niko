@@ -432,8 +432,28 @@ body { background: #07090d; }
 .dz-see b { font-weight: 600; font-size: 16px; text-align: right; max-width: 220px; }
 .dz-amini.wide { width: 70px; background: #05070d; }
 
-/* Knowledge */
-.kn-db { display: flex; flex-direction: column; gap: 6px; padding: 18px 22px; margin-bottom: 18px; }
-.kn-db b { font-size: 18px; font-weight: 500; }
-.kn-db code { font: 500 12px 'JetBrains Mono', monospace; }
-.ai-items.dim .lim-row { opacity: .45; }
+/* Knowledge (as the Admin-Knowledge mockup) */
+.shell main header.kn-adm-head { display: flex; flex-direction: row; justify-content: space-between; align-items: flex-end; gap: 24px; }
+.kn-adm-head > div { display: flex; flex-direction: column; gap: 6px; }
+.kn-db { width: 340px; flex: none; padding: 14px 18px; border-radius: 18px; display: flex; flex-direction: column; gap: 8px; }
+.kn-db-top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; font-size: 13px; }
+.kn-db .k { font-size: 11px; }
+.kn-db .sub { font-size: 12px; line-height: 1.45; }
+.kn-db code { font: 500 11px 'JetBrains Mono', monospace; }
+.kn-opts { gap: 4px; }
+.kn-useline { display: flex; gap: 18px; align-items: center; padding: 12px 14px; border-radius: 14px; background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.1); margin-bottom: 6px; }
+.kn-useline-l { display: flex; flex-direction: column; gap: 6px; flex: 1; font-size: 13px; }
+.kn-useline-l .fillbar { max-width: 320px; }
+.kn-useline .sub { font-size: 12px; max-width: 300px; }
+.kn-group { display: flex; flex-direction: column; }
+.kn-group-h { color: #fff; padding: 16px 0 4px; }
+.kn-krow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; min-height: 58px; padding: 6px 0; border-top: 1px solid rgba(255,255,255,.1); }
+.kn-krow.dim { opacity: .45; }
+.kn-krow-t { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.kn-krow-t b { font-weight: 500; }
+.kn-krow-t .sub { font-size: 12px; }
+.kn-krow-m { display: flex; align-items: center; gap: 8px; }
+.kn-krow-c { display: flex; justify-content: flex-end; }
+.kn-sel { width: 180px; height: 44px; border-radius: 14px; font-size: 14px; }
+.kn-foot { margin-top: 14px; font-size: 12px; line-height: 1.5; }
+@media (max-width: 900px) { .shell main header.kn-adm-head { flex-direction: column; align-items: stretch; } .kn-db { width: auto; } }

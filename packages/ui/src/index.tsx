@@ -197,6 +197,34 @@ export function PasswordField({ label, value, onChange, autoComplete, meter }: {
   );
 }
 
+// ---------------------------------------------------------------- shared controls (the same on every screen)
+/** A pill switcher for choosing one of a few options (for example Files first / Only my files / Off). */
+export function Segmented<T extends string>({ value, options, onChange, label, disabled }: { value: T; options: readonly (readonly [T, string])[]; onChange: (v: T) => void; label: string; disabled?: boolean }) {
+  return (
+    <span className="segs" role="group" aria-label={label}>
+      {options.map(([v, name]) => <button key={v} type="button" className="segs-b" aria-pressed={v === value} disabled={disabled} onClick={() => v !== value && onChange(v)}>{name}</button>)}
+    </span>
+  );
+}
+/** One setting: what it is and a line about it on the left, its control (switch, select, button) on the right. */
+export function SettingRow({ title, hint, children, id }: { title: ReactNode; hint?: ReactNode; children: ReactNode; id?: string }) {
+  return (
+    <div className="srow">
+      <span className="srow-t" id={id}><span className="srow-name">{title}</span>{hint && <span className="srow-hint">{hint}</span>}</span>
+      <span className="srow-c">{children}</span>
+    </div>
+  );
+}
+/** A coloured dot with a short state, such as Ready or Needs a look. */
+export function Status({ tone, children }: { tone: 'ready' | 'look' | 'busy' | 'bad'; children: ReactNode }) {
+  return <span className={`state ${tone}`}><i aria-hidden="true" />{children}</span>;
+}
+/** How full something is, 0 to 1. Turns amber from `warnAt`. */
+export function Meter({ value, warnAt = 0.8, label }: { value: number; warnAt?: number; label: string }) {
+  const v = Math.max(0, Math.min(1, value || 0));
+  return <span className={'fillbar' + (v >= warnAt ? ' warn' : '')} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(v * 100)}><i style={{ width: `${v * 100}%` }} /></span>;
+}
+
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return <label className="fld"><span className="k">{label}</span>{children}</label>;
 }

@@ -1,9 +1,9 @@
 // Niko admin portal: sign-in with a second factor, then users and registration.
 import { StrictMode, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, ApiError, BackgroundPreview, DesignPreview, Field, PasswordField, Switch } from '@niko/ui';
+import { api, ApiError, Meter, BackgroundPreview, DesignPreview, Field, PasswordField, Switch } from '@niko/ui';
 import { BACKGROUNDS, backgroundInfo, DESIGNS, designInfo, type BackgroundInfo, type DesignInfo } from '@niko/shared';
-import { AI_OPTION_GROUPS, AI_PRESETS, aiAllowed, defaultOn, KN_FILE_STEPS, KN_MB_FILE_STEPS, KN_MB_TOTAL_STEPS, type KnowledgeLimits, BUILTIN_TOKEN, hearPresetOf, imagePresetOf, presetOf, providedIds, voicePresetOf, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
+import { AI_OPTION_GROUPS, AI_PRESETS, aiAllowed, defaultOn, KN_DB_FREE_BYTES, KN_FILE_STEPS, KN_MB_FILE_STEPS, KN_MB_TOTAL_STEPS, type KnowledgeLimits, BUILTIN_TOKEN, hearPresetOf, imagePresetOf, presetOf, providedIds, voicePresetOf, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
 import '@niko/ui/src/styles.css';
 import './admin.css';
 
@@ -192,16 +192,18 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
   </>;
 }
 
-// ---------------------------------------------------------------- Knowledge
-type KnAdminUser = { id: string; name: string; email: string; role: string; status: string; knowledgeLimits: Partial<KnowledgeLimits> };
+// ---------------------------------------------------------------- Knowledge (as the Admin-Knowledge mockup)
+type KnAdminUser = { id: string; name: string; email: string; role: string; status: string; knowledgeLimits: Partial<KnowledgeLimits>; used: { files: number; bytes: number } };
 type KnAdmin = { ready: boolean; usage: { bytes: number; files: number; people: number } | null; split: 'browser' | 'server'; defaults: KnowledgeLimits; users: KnAdminUser[] };
-/** The Knowledge switches built so far (the others in AI_OPTION_GROUPS arrive with their stages). */
-const KN_SHOWN = ['kn:files', 'kn:place:niko', 'kn:cf-read', 'kn:cf-search'];
+/** The Knowledge switches built so far, in their groups (the others in AI_OPTION_GROUPS arrive with their stages). */
+const KN_GROUPS: [string, string[]][] = [['Files', ['kn:files']], ['Where they keep files', ['kn:place:niko']], ['Cloudflare', ['kn:cf-read', 'kn:cf-search']]];
+const KN_SHOWN = KN_GROUPS.flatMap(([, keys]) => keys);
 const KN_LIMIT_ROWS: [keyof KnowledgeLimits, string, string, number[], (n: number) => string][] = [
   ['files', 'Files', 'How many files each person can keep', KN_FILE_STEPS, (n) => `${n.toLocaleString()} files`],
   ['mbPerFile', 'Size of each file', 'The largest file they can add', KN_MB_FILE_STEPS, (n) => `${n} MB`],
   ['mbTotal', 'All their files together', 'Counts the files as added, before splitting', KN_MB_TOTAL_STEPS, (n) => `${n} MB`],
 ];
+const knSize = (b: number) => (b < 1024 * 1024 ? `${Math.round(b / 1024)} KB` : b < 1024 ** 3 ? `${(b / 1024 / 1024).toFixed(b < 10 * 1024 * 1024 ? 1 : 0)} MB` : `${(b / 1024 ** 3).toFixed(1)} GB`);
 /** Whether each person can give Niko their own files, where, with Cloudflare or not, and how much: a default, then per person. */
 function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
   const [kn, setKn] = useState<KnAdmin | null>(null);
@@ -234,6 +236,7 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
   const on = (k: string) => (k in access ? access[k]! : person ? defOn(k) : defaultOn({}, k));
   const changed = (k: string) => !!person && k in access && access[k] !== defOn(k);
   const setOn = (k: string, v: boolean) => { const next = { ...access }; if (person && v === defOn(k)) delete next[k]; else next[k] = v; setAccess(next); setDirty(true); setNote(null); };
+  const resetOn = (k: string) => { const next = { ...access }; delete next[k]; setAccess(next); setDirty(true); };
   const limOf = (k: keyof KnowledgeLimits) => limits[k] ?? kn.defaults[k];
   const limChanged = (k: keyof KnowledgeLimits) => !!person && limits[k] !== undefined && limits[k] !== kn.defaults[k];
   const setLim = (k: keyof KnowledgeLimits, v: number) => { const next = { ...limits }; if (person && v === kn.defaults[k]) delete next[k]; else next[k] = v; setLimits(next); setDirty(true); setNote(null); };
@@ -256,17 +259,22 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
   };
   const item = (key: string) => AI_OPTION_GROUPS.find((g) => g.id === 'knowledge')!.items.find((i) => i.key === key)!;
   const q = find.trim().toLowerCase();
-  const mbText = (b: number) => (b < 1024 * 1024 ? `${Math.round(b / 1024)} KB` : `${(b / 1024 / 1024).toFixed(b < 10 * 1024 * 1024 ? 1 : 0)} MB`);
+  const first = person ? (person.name || person.email).split(' ')[0] : '';
+  const total = person ? limOf('mbTotal') * 1024 * 1024 : 0;
+  const changedMark = (isChanged: boolean, reset: () => void) => isChanged ? <><span className="chg">Changed</span><button className="lnk" onClick={reset}>Reset</button></> : null;
   return <>
-    <header><h1>Knowledge</h1><p className="sub" style={{ fontSize: 15, maxWidth: 860 }}>Whether each person can give Niko their own files, where they may keep them, and how much. You never see what is in anyone’s files, only counts and sizes.</p></header>
+    <header className="kn-adm-head">
+      <div><h1>Knowledge</h1><p className="sub" style={{ fontSize: 15, maxWidth: 760 }}>Whether each person can give Niko their own files, where they may keep them, and how much. You never see what is in anyone’s files, only counts and sizes.</p></div>
+      <section className="g kn-db" aria-label="Knowledge database">
+        {kn.ready && kn.usage ? <>
+          <span className="kn-db-top"><span className="k">Knowledge database</span><span>{knSize(kn.usage.bytes)} of {knSize(KN_DB_FREE_BYTES)}</span></span>
+          <Meter value={kn.usage.bytes / KN_DB_FREE_BYTES} label="Knowledge database used" />
+          <span className="sub">Its own free Neon project, so it can never fill up accounts. {kn.usage.files.toLocaleString()} {kn.usage.files === 1 ? 'file' : 'files'} from {kn.usage.people} {kn.usage.people === 1 ? 'person' : 'people'}. Warns at 80%.</span>
+        </> : kn.ready ? <><span className="k">Knowledge database</span><span className="sub">Connected.</span></>
+          : <><span className="k">Knowledge database</span><span className="sub">Not set up yet, so Knowledge is off for everyone. Add <code>KNOWLEDGE_DATABASE_URL</code> as a Cloudflare build secret and deploy (docs/DEPLOYMENT.md, section 1a).</span></>}
+      </section>
+    </header>
     {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
-    <section className="g card kn-db" aria-label="Knowledge database">
-      <span className="k">Knowledge database</span>
-      {kn.ready ? <>
-        <b>{kn.usage ? `${mbText(kn.usage.bytes)} used` : 'Connected'}</b>
-        <span className="sub">Its own Neon project, so it can never fill up accounts.{kn.usage ? ` ${kn.usage.files.toLocaleString()} ${kn.usage.files === 1 ? 'file' : 'files'} from ${kn.usage.people} ${kn.usage.people === 1 ? 'person' : 'people'}.` : ''}</span>
-      </> : <span className="sub">Not set up yet, so Knowledge is off for everyone. Add <code>KNOWLEDGE_DATABASE_URL</code> as a Cloudflare build secret and deploy (docs/DEPLOYMENT.md, section 1a).</span>}
-    </section>
     <div className="ai-grid">
       <section className="g card ai-people" aria-label="Applies to">
         <span className="k" style={{ padding: '0 6px' }}>Applies to</span>
@@ -280,39 +288,43 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
         </div>
         <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>New accounts and invites get the default.</p>
       </section>
-      <section className="g card ai-options" aria-label="Knowledge options">
+      <section className="g card ai-options kn-opts" aria-label="Knowledge settings">
         <div className="ai-head">
           <div><h2>{person ? person.name || person.email : 'Everyone · default'}</h2>
-            <p className="sub" style={{ fontSize: 13 }}>{person ? (person.role === 'admin' ? 'Admins always have every option; these apply if they are made a member.' : count(person) ? 'Different from the default where marked. Everything else follows the default.' : `Follows the default. Change anything to change it for ${(person.name || person.email).split(' ')[0]} only.`) : 'What every account gets, unless it is changed for that person.'}</p></div>
+            <p className="sub" style={{ fontSize: 13 }}>{person ? (person.role === 'admin' ? 'Admins always have every option; these apply if they are made a member.' : count(person) ? 'Different from the default where marked. Everything else follows the default.' : `Follows the default. Change anything to change it for ${first} only.`) : 'What every account gets, unless it is changed for that person.'}</p></div>
           <div className="ai-acts">
             {person && <button className="bt" onClick={() => { setAccess({}); setLimits({}); setDirty(true); }} disabled={!count(person) && !dirty}>Reset to default</button>}
             <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
           </div>
         </div>
-        <div className="ai-items">
-          {KN_SHOWN.map((k) => {
+        {person && <div className="kn-useline">
+          <span className="kn-useline-l"><span>{first} uses {knSize(person.used.bytes)} of {limOf('mbTotal')} MB · {person.used.files.toLocaleString()} of {limOf('files').toLocaleString()} files</span><Meter value={total ? person.used.bytes / total : 0} label={`Space ${first} uses`} /></span>
+          <span className="sub">Kept in Niko’s Knowledge database. You see sizes and counts only.</span>
+        </div>}
+        {KN_GROUPS.map(([title, keys]) => <div key={title} className="kn-group">
+          <span className="k kn-group-h">{title}</span>
+          {keys.map((k) => {
             const it = item(k), gated = k !== 'kn:files' && !filesOn;
-            return <div key={k} className="ai-row">
-              <span className="ai-txt"><span>{it.name}</span><span className="sub">{changed(k) ? `Default is ${defOn(k) ? 'on' : 'off'}` : it.sub}</span></span>
-              {changed(k) && <><span className="chg">Changed</span><button className="lnk" onClick={() => { const n = { ...access }; delete n[k]; setAccess(n); setDirty(true); }}>Reset</button></>}
-              <Switch on={on(k)} onChange={(v) => setOn(k, v)} label={it.name} disabled={gated} />
+            return <div key={k} className={'kn-krow' + (gated ? ' dim' : '')}>
+              <span className="kn-krow-t"><b>{it.name}</b><span className="sub">{changed(k) ? `Default is ${defOn(k) ? 'on' : 'off'}` : it.sub}</span></span>
+              <span className="kn-krow-m">{changedMark(changed(k), () => resetOn(k))}</span>
+              <span className="kn-krow-c"><Switch on={on(k)} onChange={(v) => setOn(k, v)} label={it.name} disabled={gated} /></span>
             </div>;
           })}
-        </div>
-        <div className={'ai-items' + (filesOn ? '' : ' dim')} style={{ paddingTop: 10 }}>
-          <span className="k" style={{ padding: '6px 0' }}>How much each person keeps</span>
+        </div>)}
+        <div className="kn-group">
+          <span className="k kn-group-h">How much each person keeps</span>
           {KN_LIMIT_ROWS.map(([k, name, sub, steps, label]) => (
-            <div key={k} className="lim-row">
-              <span className="lim-what"><b>{name}</b><span className="sub">{limChanged(k) ? `Default is ${label(kn.defaults[k])}` : sub}</span>
-                {limChanged(k) && <span className="cap-chg"><span className="chg">Changed</span><button className="lnk" style={{ padding: 0 }} onClick={() => setLim(k, kn.defaults[k])}>Reset</button></span>}</span>
-              <label className="sr" htmlFor={`kn-${k}`}>{name}</label>
-              <select id={`kn-${k}`} className="in lim-sel" value={limOf(k)} onChange={(e) => setLim(k, Number(e.target.value))} disabled={!filesOn}>
+            <div key={k} className={'kn-krow' + (filesOn ? '' : ' dim')}>
+              <span className="kn-krow-t"><b>{name}</b><span className="sub">{limChanged(k) ? `Default is ${label(kn.defaults[k])}` : sub}</span></span>
+              <span className="kn-krow-m">{changedMark(limChanged(k), () => setLim(k, kn.defaults[k]))}</span>
+              <span className="kn-krow-c"><select className="in kn-sel" aria-label={name} value={limOf(k)} onChange={(e) => setLim(k, Number(e.target.value))} disabled={!filesOn}>
                 {steps.map((n) => <option key={n} value={n}>{label(n)}</option>)}
-              </select>
+              </select></span>
             </div>
           ))}
         </div>
-        <p className="sub" style={{ fontSize: 12, lineHeight: 1.5 }}>Knowledge files start off: people get them only when you turn them on, for everyone or for them. Lowering a limit never deletes anything; it only stops more files being added. Answering Telegram from Knowledge is each person’s own Settings switch. People see these as part of their plan, with no mention of an admin. Every change is written to the audit log.</p>
+        <p className="sub kn-foot">Knowledge files start off: people get them only when you turn them on, for everyone or for them. Lowering a limit never deletes anything; it only stops more files being added. Answering Telegram from Knowledge is each person’s own Settings switch. People see these as part of their plan, with no mention of an admin. Every change is written to the audit log.</p>
       </section>
     </div>
   </>;
