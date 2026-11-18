@@ -952,7 +952,7 @@ button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; 
 .bz-frame { position: relative; width: 100%; max-width: 760px; aspect-ratio: 16 / 10; border-radius: 28px; overflow: hidden; border: 1px solid rgba(255,255,255,.16); box-shadow: 0 24px 60px rgba(0,0,0,.4); background: #05070d; }
 .bz-frame > canvas { position: absolute; inset: 0; }
 .bz-frame .bz-core { position: absolute; left: 50%; top: 44%; width: 46%; aspect-ratio: 1 / 1; transform: translate(-50%, -50%); }
-.bz-cap { margin-top: 0; }
+.dz-cap.bz-cap { margin-top: 4px; }
 .dz-thumb.wide { aspect-ratio: 16 / 10; background: #05070d; }
 .dz-sheet-thumb.wide { width: 128px; height: 80px; border-radius: 16px; background: #05070d; }
 @media (max-width: 560px) { .bz-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
