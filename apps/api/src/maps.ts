@@ -13,6 +13,7 @@ import {
 } from '@niko/shared';
 import type { Env } from './env';
 import { BrainFail, providerMessage } from './brains';
+import { RestBook, waitFrom } from './rest';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
 import { arranged, withProvided } from './provided';
@@ -72,8 +73,7 @@ export function mapKeyProblem(k: Pick<MapKey, 'provider' | 'baseUrl' | 'apiKey' 
 // ---------------------------------------------------------------- talking to services
 async function fail(res: Response): Promise<BrainFail> {
   const body = (await res.text().catch(() => '')).slice(0, 2000), text = body.toLowerCase(), detail = providerMessage(body);
-  const after = Number(res.headers.get('retry-after'));
-  const wait = Number.isFinite(after) && after > 0 ? Math.min(Math.max(after * 1000, 15_000), HOUR) : 0;
+  const wait = waitFrom(body, res.headers.get('retry-after'));
   const quota = /quota|credit|limit|billing|exceeded|payment|balance/.test(text);
   if (res.status === 402 || (quota && [400, 403, 429].includes(res.status))) return new BrainFail(`limit ${res.status}`, 'limit', wait || HOUR, detail);
   if (res.status === 429) return new BrainFail(`rate ${res.status}`, 'limit', wait || MIN, detail);
@@ -448,9 +448,9 @@ export async function findRoute(env: Env, db: Db, user: { id: string; engine: un
   else if (ask.country === 'auto' && ask.here) { country = await countryOf(ask.here.lng, ask.here.lat); how = country ? 'gps' : 'none'; }
   const lists = mapCountryLists(engine), listed = !!(country && lists[country]);
 
-  const now = Date.now(), rest: Record<string, BrainRest> = {};
-  for (const [k, v] of Object.entries(engine.mapRest ?? {})) if (v && v.until > now) rest[k] = v;
-  let changed = Object.keys(rest).length !== Object.keys(engine.mapRest ?? {}).length;
+  // Which services to skip for now, read fresh; tried one at a time.
+  const book = await RestBook.open(db, user, 'mapRest');
+  const rest = book.active;
   const skipped = new Set<string>();
 
   const entries = (cc: string | null): Entry[] => arranged(user, 'map', mapChain(engine, cc && lists[cc] ? cc : null).chain).flatMap((entry): Entry[] => {
@@ -464,9 +464,9 @@ export async function findRoute(env: Env, db: Db, user: { id: string; engine: un
   const failed = (e: Entry, err: unknown) => {
     const f = err instanceof BrainFail ? err : new BrainFail(String((err as Error)?.message ?? err).slice(0, 200), 'down', MIN);
     console.warn(`map ${e.provider} failed (${f.why}): ${f.message.slice(0, 120)}`);
-    if (f.restMs > 0) { rest[e.entry] = { until: Date.now() + f.restMs, why: f.why }; changed = true; }
+    book.failed(e.entry, f);
   };
-  const worked = (e: Entry) => { if (rest[e.entry]) { delete rest[e.entry]; changed = true; } };
+  const worked = (e: Entry) => book.worked(e.entry);
 
   if (!entries(null).length && !Object.keys(lists).some((cc) => entries(cc).length)) throw gate.anyBlocked() ? new BrainFail('included used up', 'limit', 0, gate.message) : new BrainFail('no services', 'refused', 0, 'No map service is set up yet. Add one on the Engine screen.');
   try {
@@ -550,7 +550,7 @@ export async function findRoute(env: Env, db: Db, user: { id: string; engine: un
       chain: [...new Set(chain)], skipped: [...skipped].slice(0, 6), handoff: mapHandoff(handoffCc, to, ask.mode, from), credit,
     };
   } finally {
-    if (changed) await db.update(users).set({ engine: { ...engine, mapRest: rest } as any }).where(eq(users.id, user.id)).catch(() => undefined);
+    await book.save();
   }
 }
 

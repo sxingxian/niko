@@ -18,6 +18,8 @@ globalThis.fetch = async (url, init) => {
   if (b === 'quota') return new Response(JSON.stringify({ error: { code: 'insufficient_quota', message: 'You exceeded your current quota' } }), { status: 429 });
   if (b === 'rate') return new Response('slow down', { status: 429, headers: { 'retry-after': '20' } });
   if (b === 'refused') return new Response('bad key', { status: 401 });
+  // Gemini when today's free requests are used up: 429 with "retry in 31s", though it won't work until tomorrow.
+  if (b === 'gemini-daily') return new Response(JSON.stringify({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'You exceeded your current quota. Please retry in 31.2s.', details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaMetric: 'generativelanguage.googleapis.com/generate_content_free_tier_requests', quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' }] }, { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '31s' }] } }), { status: 429 });
   if (b === 'down') throw new TypeError('fetch failed');
   const anth = String(url).includes('/v1/messages');
   return new Response(JSON.stringify(anth ? { content: [{ text: 'from B' }] } : { choices: [{ message: { content: 'from A' } }] }), { status: 200 });
@@ -125,5 +127,33 @@ await ok('Google model names lose their "models/" prefix', async () => {
   globalThis.fetch = async () => Response.json({ data: [{ id: 'models/gemini-2.5-flash' }, { id: 'models/text-embedding-004' }] });
   assert.deepEqual(await listModels({ baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', apiKey: 'k' }), ['gemini-2.5-flash']);
   globalThis.fetch = saved;
+});
+await ok('a used-up daily quota (Gemini says “retry in 31s”) is skipped until it resets, not retried every minute', async () => {
+  calls = []; behaviour = { 'sk-A': 'gemini-daily' }; store.engineWrites = [];
+  const r = await think(workersOk, fakeDb, user({ brains: ['key:aaaa', 'workers-ai'] }), msgs);
+  assert.equal(r.used, 'workers-ai');
+  const rest = store.engineWrites.at(-1).rest['key:aaaa'];
+  assert.ok(rest.until - Date.now() > 31 * 60_000, 'well past 31 seconds');
+  assert.ok(rest.until - Date.now() <= 24 * 3_600_000 + 60_000, 'no later than the next reset');
+  // Asked again (with the skip saved), it goes straight to the next one: Gemini isn't called.
+  calls = [];
+  await think(workersOk, fakeDb, user({ brains: ['key:aaaa', 'workers-ai'], rest: { 'key:aaaa': rest } }), msgs);
+  assert.deepEqual(calls, [], 'Gemini not asked again');
+});
+await ok('one question is asked of one brain at a time: the next only after the one before fails', async () => {
+  let open = 0, most = 0;
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => { open++; most = Math.max(most, open); await new Promise((r) => setTimeout(r, 20)); try { return await real(url, init); } finally { open--; } };
+  behaviour = { 'sk-A': 'down' };
+  try { await think(workersOk, fakeDb, user({ brains: ['key:aaaa', 'key:bbbb', 'workers-ai'] }), msgs); } finally { globalThis.fetch = real; }
+  assert.equal(most, 1);
+});
+await ok('failing again soon after a skip waits longer each time', async () => {
+  behaviour = { 'sk-A': 'rate' }; store.engineWrites = [];
+  const past = { until: Date.now() - 1000, why: 'limit', n: 2 };
+  await think(workersOk, fakeDb, user({ brains: ['key:aaaa', 'workers-ai'], rest: { 'key:aaaa': past } }), msgs);
+  const rest = store.engineWrites.at(-1).rest['key:aaaa'];
+  assert.equal(rest.n, 3);
+  assert.ok(rest.until - Date.now() >= 79_000, 'four times the 20 seconds asked');
 });
 console.log(`${pass} brain checks passed`);

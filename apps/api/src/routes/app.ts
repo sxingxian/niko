@@ -16,7 +16,7 @@ import { audioProblem, defaultHearLabel, hear, hearServerKey, HEAR_PROVIDERS_LIS
 import { NOT_ON_ACCOUNT, offFor } from '../access';
 import { diffGlance, limitsFor } from '../glance';
 import { Declined, defaultImageLabel, serverKey, IMAGE_PROVIDERS_LIST, imageKeyInfo, imageKeyProblem, imageKeys, loadImageKeys, MAX_PROMPT, paint, saveImageKeys, type ImageKey } from '../images';
-import { defaultVoiceLabel, listVoices, loadVoiceKeys, voiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
+import { defaultVoiceLabel, Gone, listVoices, loadVoiceKeys, voiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
 import { calendarIdLink, calendarsOf, calendarsSecret, cleanCalName, icalCheckOne, newCalId, normalizeLink, shownCalendars, type Cal } from '../calendarlink';
 import { accountLimitsFor } from '../limits';
 import { cleanPoint, findRoute, loadMapKeys, mapKeyInfo, mapKeys, mapKeyProblem, MAP_PROVIDERS_LIST, NotFound, saveMapKeys, testMapKey, type MapKey } from '../maps';
@@ -1472,12 +1472,16 @@ app.post('/voice/tts', async (c) => {
         key = { ...k, id: 'preview', apiKey };
       }
       if (!key) return ttsError(c, 'That voice key is no longer saved.', 404);
-      out = await speakWithKey(key, text);
+      out = await speakWithKey(key, text, c.req.raw.signal);
     } else return ttsError(c, 'Unknown voice.', 400);
+    // The app gave up waiting and asked the next voice: this one isn't counted (nobody hears it).
+    if (c.req.raw.signal?.aborted) return ttsError(c, 'Stopped waiting.', 499);
     if (!preview && (u.engine as unknown as EnginePrefs)?.voiceRest?.[source]) await noteVoice(db, u, source, null);
     if (!preview) await gate.count(source);
     return new Response(out.bytes, { headers: { 'content-type': out.type, 'cache-control': 'no-store' } });
   } catch (e) {
+    // The app stopped waiting: not this voice's fault, so it isn't skipped.
+    if (e instanceof Gone || c.req.raw.signal?.aborted) return ttsError(c, 'Stopped waiting.', 499);
     const f = e instanceof BrainFail ? e : new BrainFail(String((e as Error)?.message ?? e).slice(0, 200), 'down', 60_000);
     console.warn(`tts ${source} failed (${f.why}): ${f.message.slice(0, 200)}`);
     const rest = preview ? null : await noteVoice(db, u, source, f);

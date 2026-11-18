@@ -7,6 +7,7 @@ import { aiAllowed, aiProviderOf, brainOption, brainOrder, MAX_AI_KEYS, NOT_CHAT
 import type { Env } from './env';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
+import { RestBook, waitFrom } from './rest';
 import { arranged, providedFor } from './provided';
 import { usageGate } from './usage';
 
@@ -38,8 +39,7 @@ const nextUtcMidnight = (now: number) => { const d = new Date(now); return Date.
 function classify(status: number, body: string, retryAfter: string | null): BrainFail {
   const text = body.toLowerCase();
   const quota = /insufficient_quota|quota|billing|credit balance|credits|exceeded your|resource_exhausted|payment|spend limit|usage limit/.test(text);
-  const after = Number(retryAfter);
-  const wait = Number.isFinite(after) && after > 0 ? Math.min(Math.max(after * 1000, 15_000), HOUR) : 0;
+  const wait = waitFrom(body, retryAfter);
   const detail = providerMessage(body);
   if (status === 402 || (quota && (status === 429 || status === 403 || status === 400))) return new BrainFail(`limit ${status}`, 'limit', wait || HOUR, detail);
   if (status === 429) return new BrainFail(`rate ${status}`, 'limit', wait || MIN, detail);
@@ -212,26 +212,21 @@ export async function think(env: Env, db: Db, user: { id: string; engine: unknow
     if (!aiAllowed(off, 'workers-ai')) throw new BrainFail('no brain on this account', 'refused', 0, 'No brain is switched on for your account.');
     order.push('workers-ai');
   }
-  const now = Date.now();
-  const rest: Record<string, BrainRest> = {};
-  for (const [k, v] of Object.entries(engine.rest ?? {})) if (v && v.until > now && order.includes(k as BrainEntry)) rest[k] = v;
-  const ready = order.filter((b) => !rest[b]);
-  const resting = order.filter((b) => rest[b]).sort((a, b) => rest[a]!.until - rest[b]!.until);
-  let changed = Object.keys(rest).length !== Object.keys(engine.rest ?? {}).length;
+  // Which brains to skip for now, read fresh (not from the copy this request started with), tried one at a time.
+  const book = await RestBook.open(db, user, 'rest');
   let last: unknown = null;
   try {
-    for (const entry of [...ready, ...resting]) {
+    for (const entry of book.order(order)) {
       if (gate.blocked(entry)) continue;
       try {
         const reply = await runEntry(env, db, user.id, entry, engine.model, msgs, keys);
-        if (rest[entry]) { delete rest[entry]; changed = true; }
+        book.worked(entry);
         await gate.count(entry);
         return { reply, used: entry, first: order[0]! };
       } catch (e) {
         last = e;
         const f = e instanceof BrainFail ? e : new BrainFail(String((e as Error)?.message ?? e).slice(0, 200), 'down', MIN);
-        rest[entry] = { until: Date.now() + f.restMs, why: f.why };
-        changed = true;
+        book.failed(entry, f);
         // The provider's own error text stays in the Worker log: it can name internal models, accounts or limits.
         console.warn(`brain ${entry} failed (${f.why}): ${f.message.slice(0, 200)}`);
       }
@@ -239,7 +234,7 @@ export async function think(env: Env, db: Db, user: { id: string; engine: unknow
     if (gate.anyBlocked()) throw new BrainFail('included used up', 'limit', 0, gate.message);
     throw last ?? new Error('No brain answered.');
   } finally {
-    if (changed) await db.update(users).set({ engine: { ...engine, rest } as any }).where(eq(users.id, user.id)).catch(() => undefined);
+    await book.save();
   }
 }
 

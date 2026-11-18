@@ -14,6 +14,7 @@ import { connections, users, type Db } from '@niko/db';
 import { aiAllowed, imageOption, imageOrder, MAX_IMAGE_KEYS, type BrainRest, type EnginePrefs, type ImageKeyInfo, type ImageProvider, type ImageShape, type ImageSource } from '@niko/shared';
 import type { Env } from './env';
 import { BrainFail, providerMessage } from './brains';
+import { RestBook, waitFrom } from './rest';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
 import { arranged, withProvided } from './provided';
@@ -87,8 +88,7 @@ const declinedText = (msg: string) => DECLINED.test(msg) && !BAD_INPUT.test(msg)
 
 async function fail(res: Response): Promise<BrainFail | Declined> {
   const body = (await res.text().catch(() => '')).slice(0, 2000), text = body.toLowerCase(), detail = providerMessage(body);
-  const after = Number(res.headers.get('retry-after'));
-  const wait = Number.isFinite(after) && after > 0 ? Math.min(Math.max(after * 1000, 15_000), HOUR) : 0;
+  const wait = waitFrom(body, res.headers.get('retry-after'));
   if ([400, 403, 422].includes(res.status) && declinedText(text) && !/api[ _-]?key|unauthori|permission|billing|account/.test(text)) return new Declined(detail);
   const quota = /quota|credit|limit|billing|insufficient|exceeded|payment|balance/.test(text);
   if (res.status === 402 || (quota && [400, 403, 429].includes(res.status))) return new BrainFail(`limit ${res.status}`, 'limit', wait || HOUR, detail);
@@ -364,14 +364,12 @@ export async function paint(env: Env, db: Db, user: { id: string; engine: unknow
     if (!order.length && only) throw new BrainFail('not on account', 'refused', 0, 'That service isn’t available on your account.');
   }
   if (!order.length) throw new BrainFail('no services', 'refused', 0, 'Pictures are switched off on the Engine screen.');
-  const now = Date.now();
-  const rest: Record<string, BrainRest> = {};
-  for (const [k, v] of Object.entries(engine.imageRest ?? {})) if (v && v.until > now) rest[k] = v;
-  const ready = order.filter((s) => !rest[s]), resting = order.filter((s) => rest[s]).sort((a, b) => rest[a]!.until - rest[b]!.until);
-  let changed = Object.keys(rest).length !== Object.keys(engine.imageRest ?? {}).length, last: unknown = null;
+  // Which services to skip for now, read fresh; tried one at a time.
+  const book = await RestBook.open(db, user, 'imageRest');
+  let last: unknown = null;
   const declined: string[] = [];
   try {
-    for (const entry of [...ready, ...resting]) {
+    for (const entry of book.order(order)) {
       if (!only && gate.blocked(entry)) continue;
       const t0 = Date.now();
       let label = 'Cloudflare';
@@ -389,7 +387,7 @@ export async function paint(env: Env, db: Db, user: { id: string; engine: unknow
           label = k.label || defaultImageLabel(k);
           pic = await paintWithKey(k, prompt, shape);
         }
-        if (!only && rest[entry]) { delete rest[entry]; changed = true; }
+        if (!only) book.worked(entry);
         if (!only?.key) await gate.count(entry);
         return { ...pic, used: entry, label, ms: Date.now() - t0 };
       } catch (e) {
@@ -397,7 +395,7 @@ export async function paint(env: Env, db: Db, user: { id: string; engine: unknow
         last = e;
         const f = e instanceof BrainFail ? e : new BrainFail(String((e as Error)?.message ?? e).slice(0, 200), 'down', MIN);
         console.warn(`image ${entry} failed (${f.why}): ${f.message.slice(0, 200)}`);
-        if (!only?.key) { rest[entry] = { until: Date.now() + f.restMs, why: f.why }; changed = true; }
+        if (!only?.key) book.failed(entry, f);
       }
     }
     // Every service that answered declined it: that is the answer, rather than whatever else went wrong.
@@ -405,6 +403,6 @@ export async function paint(env: Env, db: Db, user: { id: string; engine: unknow
     if (gate.anyBlocked()) throw new BrainFail('included used up', 'limit', 0, gate.message);
     throw last ?? new Error('No image service could make that picture.');
   } finally {
-    if (changed && !only?.key) await db.update(users).set({ engine: { ...engine, imageRest: rest } as any }).where(eq(users.id, user.id)).catch(() => undefined);
+    if (!only?.key) await book.save();
   }
 }

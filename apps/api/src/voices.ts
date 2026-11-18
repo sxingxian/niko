@@ -6,6 +6,7 @@ import { connections, users, type Db } from '@niko/db';
 import { MAX_VOICE_KEYS, type BrainRest, type EnginePrefs, type VoiceKeyInfo, type VoiceProvider } from '@niko/shared';
 import type { Env } from './env';
 import { BrainFail, providerMessage } from './brains';
+import { RestBook, waitFrom } from './rest';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
 import { withProvided } from './provided';
@@ -69,8 +70,7 @@ async function fail(res: Response): Promise<BrainFail> {
   const body = (await res.text().catch(() => '')).slice(0, 2000);
   const text = body.toLowerCase();
   const detail = providerMessage(body);
-  const after = Number(res.headers.get('retry-after'));
-  const wait = Number.isFinite(after) && after > 0 ? Math.min(Math.max(after * 1000, 15_000), HOUR) : 0;
+  const wait = waitFrom(body, res.headers.get('retry-after'));
   const quota = /quota|credit|limit|billing|insufficient|exceeded|payment|character/.test(text);
   // ElevenLabs' free plan refuses cloud servers: nothing changes that until the plan does.
   if (/detected_unusual_activity|unusual activity|free tier usage disabled/.test(text)) return new BrainFail('elevenlabs free plan', 'refused', 6 * HOUR, 'ElevenLabs’ free plan refuses requests from cloud servers such as Niko’s; a paid plan works.');
@@ -81,11 +81,16 @@ async function fail(res: Response): Promise<BrainFail> {
   return new BrainFail(`down ${res.status}`, 'down', wait || MIN, detail);
 }
 
+/** The app stopped waiting for this voice: not the voice's fault, so it isn't skipped or counted. */
+export class Gone extends Error { constructor() { super('the app stopped waiting'); } }
 async function call(url: string, init: RequestInit): Promise<Response> {
   try {
     // Redirects are not followed, so an address cannot bounce the request (and the key) somewhere else.
-    return await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) });
+    // Also stops when the app gives up on this voice (it then asks the next one), so two voices never make one line.
+    const signal = init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000);
+    return await fetch(url, { ...init, redirect: 'manual', signal });
   } catch (e) {
+    if (init.signal?.aborted) throw new Gone();
     throw new BrainFail('unreachable', 'down', MIN, (e as Error)?.name === 'TimeoutError' ? 'It took longer than 20 seconds to answer.' : 'Its address could not be reached.');
   }
 }
@@ -113,43 +118,43 @@ async function audioOf(res: Response): Promise<{ bytes: Uint8Array; type: string
 const xml = (s: string) => s.replace(/[<>&'"]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[ch]!);
 
 /** One line of speech from one voice key. */
-export async function speakWithKey(k: VoiceKey, text: string): Promise<{ bytes: Uint8Array; type: string }> {
+export async function speakWithKey(k: VoiceKey, text: string, signal?: AbortSignal): Promise<{ bytes: Uint8Array; type: string }> {
   const problem = voiceKeyProblem(k);
   if (problem) throw new BrainFail('settings', 'refused', 30 * MIN, problem);
   if (k.provider === 'openai') {
     const root = publicHttpsUrl(k.baseUrl)!.toString().replace(/\/+$/, '');
     const url = /\/audio\/speech$/.test(root) ? root : /\/v1$/.test(root) ? `${root}/audio/speech` : `${root}/v1/audio/speech`;
-    return audioOf(await call(url, { method: 'POST', headers: { authorization: `Bearer ${k.apiKey}`, 'content-type': 'application/json', accept: 'audio/mpeg' },
+    return audioOf(await call(url, { signal, method: 'POST', headers: { authorization: `Bearer ${k.apiKey}`, 'content-type': 'application/json', accept: 'audio/mpeg' },
       body: JSON.stringify({ model: k.model || 'gpt-4o-mini-tts', voice: k.voice || 'alloy', input: text, response_format: 'mp3' }) }));
   }
   if (k.provider === 'elevenlabs') {
-    return audioOf(await call(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(k.voice)}/stream`, {
+    return audioOf(await call(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(k.voice)}/stream`, { signal,
       method: 'POST', headers: { 'xi-api-key': k.apiKey, 'content-type': 'application/json', accept: 'audio/mpeg' },
       body: JSON.stringify({ text, model_id: k.model || 'eleven_flash_v2_5' }) }));
   }
   if (k.provider === 'google') {
     const lang = k.voice.split('-').slice(0, 2).join('-') || 'en-US';
-    return audioOf(await call(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${encodeURIComponent(k.apiKey)}`, {
+    return audioOf(await call(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${encodeURIComponent(k.apiKey)}`, { signal,
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ input: { text }, voice: { languageCode: lang, name: k.voice }, audioConfig: { audioEncoding: 'MP3' } }) }));
   }
   if (k.provider === 'azure') {
     const lang = k.voice.split('-').slice(0, 2).join('-') || 'en-US';
-    return audioOf(await call(`https://${k.region}.tts.speech.microsoft.com/cognitiveservices/v1`, {
+    return audioOf(await call(`https://${k.region}.tts.speech.microsoft.com/cognitiveservices/v1`, { signal,
       method: 'POST', headers: { 'ocp-apim-subscription-key': k.apiKey, 'content-type': 'application/ssml+xml', 'x-microsoft-outputformat': 'audio-24khz-48kbitrate-mono-mp3', 'user-agent': 'niko' },
       body: `<speak version='1.0' xml:lang='${xml(lang)}'><voice name='${xml(k.voice)}'>${xml(text)}</voice></speak>` }));
   }
   if (k.provider === 'deepgram') {
-    return audioOf(await call(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(k.voice)}&encoding=mp3`, {
+    return audioOf(await call(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(k.voice)}&encoding=mp3`, { signal,
       method: 'POST', headers: { authorization: `Token ${k.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ text }) }));
   }
   if (k.provider === 'fishaudio') {
     // The model goes in a header; reference_id picks the voice (left out, Fish Audio uses its default voice).
-    return audioOf(await call('https://api.fish.audio/v1/tts', {
+    return audioOf(await call('https://api.fish.audio/v1/tts', { signal,
       method: 'POST', headers: { authorization: `Bearer ${k.apiKey}`, 'content-type': 'application/json', model: k.model || 's2-pro' },
       body: JSON.stringify({ text, ...(k.voice ? { reference_id: k.voice } : {}), format: 'mp3', mp3_bitrate: 128, latency: 'normal' }) }));
   }
-  return audioOf(await call('https://api.cartesia.ai/tts/bytes', {
+  return audioOf(await call('https://api.cartesia.ai/tts/bytes', { signal,
     method: 'POST', headers: { authorization: `Bearer ${k.apiKey}`, 'cartesia-version': CARTESIA_VERSION, 'content-type': 'application/json' },
     body: JSON.stringify({ model_id: k.model || 'sonic-3.5', transcript: text, voice: { mode: 'id', id: k.voice }, output_format: { container: 'mp3', sample_rate: 44100, bit_rate: 128000 } }) }));
 }
@@ -191,13 +196,9 @@ export async function listVoices(k: VoiceKey): Promise<{ id: string; name: strin
 // ---------------------------------------------------------------- rests
 /** Notes that a voice failed (so it is skipped until its rest is over) or spoke (which ends its rest). */
 export async function noteVoice(db: Db, user: { id: string; engine: unknown }, entry: string, f: BrainFail | null): Promise<BrainRest | null> {
-  const engine = (user.engine ?? {}) as EnginePrefs;
-  const rest = { ...(engine.voiceRest ?? {}) };
-  for (const [k, v] of Object.entries(rest)) if (!v || v.until <= Date.now()) delete rest[k];
-  let mine: BrainRest | null = null;
-  if (f) { mine = { until: Date.now() + f.restMs, why: f.why }; rest[entry] = mine; }
-  else if (!rest[entry] && Object.keys(rest).length === Object.keys(engine.voiceRest ?? {}).length) return null;
-  else delete rest[entry];
-  await db.update(users).set({ engine: { ...engine, voiceRest: rest } as any }).where(eq(users.id, user.id)).catch(() => undefined);
-  return mine;
+  // Read fresh and saved as voiceRest alone, so it never undoes other settings; failing again soon waits longer.
+  const book = await RestBook.open(db, user, 'voiceRest');
+  const mine = f ? book.failed(entry, f) : (book.worked(entry), null);
+  await book.save();
+  return mine ? { until: mine.until, why: mine.why } : null;
 }

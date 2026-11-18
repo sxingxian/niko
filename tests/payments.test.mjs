@@ -73,6 +73,11 @@ globalThis.fetch = async (input, init = {}) => {
     return Response.json({ code: 'Ok', routes: [{ duration: 900, distance: 7000, geometry: { coordinates: [[103.82, 1.35], [103.8607, 1.2834]] }, legs: [{ steps: [{ maneuver: { instruction: 'Head south' }, distance: 7000 }] }] }] });
   }
   // An AI service for included keys (Groq) and one for a person's own key (OpenRouter), which also reports usage.
+  // An AI service whose daily free requests are used up (as Gemini answers: "retry in 31s", though not until tomorrow).
+  if (u.hostname === 'api.mistral.ai') {
+    aiCalls.push({ host: u.hostname, path: u.pathname, auth: init.headers?.authorization ?? '' });
+    return new Response(JSON.stringify({ error: { code: 429, message: 'Quota exceeded. Please retry in 31s.', details: [{ quotaId: 'RequestsPerDay' }] } }), { status: 429 });
+  }
   if (u.hostname === 'api.groq.com' || u.hostname === 'openrouter.ai') {
     const auth = init.headers?.authorization ?? init.headers?.Authorization ?? '';
     aiCalls.push({ host: u.hostname, path: u.pathname, auth });
@@ -1502,6 +1507,27 @@ await ok('backgrounds: admins give one (even one not offered), take back only gi
   assert.equal((await owner.post('/backgrounds/checkout', { what: 'one', background: 'aurora' })).status, 400);
   const log = JSON.stringify(await q(`select action from audit_log where action like '%background%'`));
   assert.ok(['payment.background', 'background.checkout', 'admin.backgrounds', 'admin.background_gift', 'admin.background_ungift'].every((a) => log.includes(a)));
+});
+
+await ok('a service out of its daily quota is skipped until it resets; the skip is saved without touching other settings', async () => {
+  const nur = new Browser();
+  assert.equal((await nur.post('/auth/sign-in', { email: 'nur@example.com', password: PW })).status, 200);
+  const k1 = (await nur.post('/engine/keys', { baseUrl: 'https://api.mistral.ai/v1', model: 'mistral-small-latest', apiKey: 'mis-key-1111' })).data.key.id;
+  const k2 = (await nur.post('/engine/keys', { baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', apiKey: 'gsk-nur-2222' })).data.key.id;
+  assert.equal((await nur.patch('/me', { engine: { brains: [`key:${k1}`, `key:${k2}`] } })).status, 200);
+  const before = (await user('nur@example.com')).engine;
+  aiCalls.length = 0;
+  let r = await nur.post('/chat', { message: 'first', tz: 0 });
+  assert.equal(r.status, 200, JSON.stringify(r.data)); assert.match(r.data.reply, /included key/); // the Groq stand-in's answer
+  assert.deepEqual(aiCalls.map((c) => c.host), ['api.mistral.ai', 'api.groq.com'], 'one after the other');
+  const e = (await user('nur@example.com')).engine;
+  assert.ok(e.rest[`key:${k1}`].until - Date.now() > 3_600_000, 'skipped for hours, not 31 seconds');
+  const { rest: _r, ...after } = e, { rest: _b, ...was } = before;
+  assert.deepEqual(after, was, 'other settings untouched');
+  aiCalls.length = 0;
+  r = await nur.post('/chat', { message: 'second', tz: 0 });
+  assert.equal(r.status, 200);
+  assert.deepEqual(aiCalls.map((c) => c.host), ['api.groq.com'], 'the used-up service is not asked again');
 });
 
 await sqlc.end();

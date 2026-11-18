@@ -7,6 +7,7 @@ import { connections, users, type Db } from '@niko/db';
 import { aiAllowed, hearOption, hearOrder, MAX_HEAR_KEYS, type BrainRest, type EnginePrefs, type HearKeyInfo, type HearProvider, type HearSource } from '@niko/shared';
 import type { Env } from './env';
 import { BrainFail, providerMessage } from './brains';
+import { RestBook, waitFrom } from './rest';
 import { seal } from './lib/crypto';
 import { credentials, publicHttpsUrl } from './providers';
 import { AZURE_REGION } from './voices';
@@ -52,8 +53,7 @@ export function hearKeyProblem(k: Pick<HearKey, 'provider' | 'model' | 'baseUrl'
 // ---------------------------------------------------------------- transcribing
 async function fail(res: Response): Promise<BrainFail> {
   const body = (await res.text().catch(() => '')).slice(0, 2000), text = body.toLowerCase(), detail = providerMessage(body);
-  const after = Number(res.headers.get('retry-after'));
-  const wait = Number.isFinite(after) && after > 0 ? Math.min(Math.max(after * 1000, 15_000), HOUR) : 0;
+  const wait = waitFrom(body, res.headers.get('retry-after'));
   const quota = /quota|credit|limit|billing|insufficient|exceeded|payment/.test(text);
   if (/detected_unusual_activity|unusual activity|free tier usage disabled/.test(text)) return new BrainFail('elevenlabs free plan', 'refused', 6 * HOUR, 'ElevenLabs’ free plan refuses requests from cloud servers such as Niko’s; a paid plan works.');
   if (res.status === 402 || (quota && [400, 403, 429].includes(res.status))) return new BrainFail(`limit ${res.status}`, 'limit', wait || HOUR, detail);
@@ -168,13 +168,11 @@ export async function hear(env: Env, db: Db, user: { id: string; engine: unknown
     if (!order.length && only) throw new BrainFail('not on account', 'refused', 0, 'That service isn’t available on your account.');
   }
   if (!order.length) throw new BrainFail('no services', 'down', 0, 'No speech-in service is switched on.');
-  const now = Date.now();
-  const rest: Record<string, BrainRest> = {};
-  for (const [k, v] of Object.entries(engine.hearRest ?? {})) if (v && v.until > now) rest[k] = v;
-  const ready = order.filter((s) => !rest[s]), resting = order.filter((s) => rest[s]).sort((a, b) => rest[a]!.until - rest[b]!.until);
-  let changed = Object.keys(rest).length !== Object.keys(engine.hearRest ?? {}).length, last: unknown = null;
+  // Which services to skip for now, read fresh; tried one at a time.
+  const book = await RestBook.open(db, user, 'hearRest');
+  let last: unknown = null;
   try {
-    for (const entry of [...ready, ...resting]) {
+    for (const entry of book.order(order)) {
       if (!only && gate.blocked(entry)) continue;
       try {
         let text: string;
@@ -188,19 +186,19 @@ export async function hear(env: Env, db: Db, user: { id: string; engine: unknown
           if (!k) throw new BrainFail('key not found', 'refused', 6 * HOUR, 'That key is no longer saved.');
           text = await transcribeWithKey(k, audio, lang);
         }
-        if (!only && rest[entry]) { delete rest[entry]; changed = true; }
+        if (!only) book.worked(entry);
         if (!only?.key) await gate.count(entry, wavSeconds(audio));
         return { text, used: entry };
       } catch (e) {
         last = e;
         const f = e instanceof BrainFail ? e : new BrainFail(String((e as Error)?.message ?? e).slice(0, 200), 'down', MIN);
         console.warn(`hear ${entry} failed (${f.why}): ${f.message.slice(0, 200)}`);
-        if (!only?.key) { rest[entry] = { until: Date.now() + f.restMs, why: f.why }; changed = true; }
+        if (!only?.key) book.failed(entry, f);
       }
     }
     if (gate.anyBlocked()) throw new BrainFail('included used up', 'limit', 0, gate.message);
     throw last ?? new Error('Nothing could hear that.');
   } finally {
-    if (changed && !only?.key) await db.update(users).set({ engine: { ...engine, hearRest: rest } as any }).where(eq(users.id, user.id)).catch(() => undefined);
+    if (!only?.key) await book.save();
   }
 }

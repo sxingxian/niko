@@ -7,7 +7,8 @@ export function publicHttpsUrl(raw) {
   try { const u = new URL(String(raw)); return u.protocol === 'https:' && !/^(localhost|127\.|10\.|192\.168\.)/.test(u.hostname) ? u : null; } catch { return null; }
 }
 export const fakeDb = {
-  update: () => ({ set: (v) => ({ where: async () => { store.engineWrites.push(v.engine); } }) }),
+  // A skip list is saved as that one field (rest, voiceRest…): recorded as { [field]: list }.
+  update: () => ({ set: (v) => ({ where: async () => { store.engineWrites.push(v.engine?.restKey ? { [v.engine.restKey]: v.engine.rest } : v.engine); } }) }),
   delete: () => ({ where: async () => {} }),
   insert: () => ({ values: async (v) => { store.keyWrites.push(v); } }),
   // Reads find nothing (no settings, no usage this month); counting use does nothing.
