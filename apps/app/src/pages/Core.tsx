@@ -1,4 +1,5 @@
 // Home (the adaptive core) and the workspace (inbox, calendar, notes with the docked core and countdown).
+import { chatWithTables, knowledgeFor } from '../knowledgeChat';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { aiAllowed, stripTags, PAGE_SIZES, SEND_COUNTDOWN_SECONDS, voiceName, voiceOption, voiceOrder, type Me } from '@niko/shared';
@@ -498,7 +499,8 @@ export function Workspace() {
     setRewriting(true);
     if (spoken) n.setStatus('Rewriting', 'Changing the draft…', 'thinking');
     try {
-      const r = await api<{ reply: string }>('/chat', { body: { message, tz: new Date().getTimezoneOffset(), purpose: 'draft', provider: sel.provider } });
+      const knowledge = await knowledgeFor(n.me, message);
+      const r = await chatWithTables<{ reply: string }>(n.me, { message, tz: new Date().getTimezoneOffset(), purpose: 'draft', provider: sel.provider, ...(knowledge ? { knowledge } : {}) });
       // Only the reply itself: no "Here's the new draft:" lead-in, no wrapping quotes, no draft markers.
       const t = stripTags(typeof r.reply === 'string' ? r.reply : '').trim()
         .replace(/^(sure[,!.]?\s*)?(here('|’)s|here is)\s+(the|a|your)\s+[^:\n]{0,40}:\s*/i, '')
@@ -576,7 +578,7 @@ export function Workspace() {
     if (kept !== undefined) { setDraft((d) => d || kept); return; }
     const about = sel.kind === 'mail' ? `the email from ${sel.title} with subject "${sel.subject}"` : `the last message from ${sel.title}: "${lastIn}"`;
     setDrafting(true);
-    api<{ reply: string }>('/chat', { body: { message: `Write only the text of a short, friendly reply to ${about}. No preamble.`, tz: new Date().getTimezoneOffset(), purpose: 'draft', provider: sel.provider } })
+    knowledgeFor(n.me, `${about}`).then((knowledge) => chatWithTables<{ reply: string }>(n.me, { message: `Write only the text of a short, friendly reply to ${about}. No preamble.`, tz: new Date().getTimezoneOffset(), purpose: 'draft', provider: sel.provider, ...(knowledge ? { knowledge } : {}) }))
       .then((r) => { const t = stripTags(typeof r.reply === 'string' ? r.reply : ''); if (t) { if (draftCache.size > 100) draftCache.delete(draftCache.keys().next().value!); draftCache.set(key, t); } setDraft((d) => d || t); }).catch(() => undefined).finally(() => setDrafting(false));
   }, [sel, thread, view, n.me?.permissions.draft, send.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 

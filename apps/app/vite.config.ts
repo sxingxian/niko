@@ -36,7 +36,12 @@ export default defineConfig({
   base: '/app/',
   plugins: [react(), speechRuntime()],
   // kokoro-js's self-contained browser build (its package exports point at the Node build).
-  resolve: { alias: { 'kokoro-web': require.resolve('kokoro-js').replace(/kokoro\.(c?js)$/, 'kokoro.web.js') } },
+  // The search model's runtime: ONNX Runtime's build that loads its WebAssembly from Niko's /app/ort/ (the same
+  // pinned files as the voice) instead of bundling a second 21 MB copy.
+  resolve: { alias: {
+    'kokoro-web': require.resolve('kokoro-js').replace(/kokoro\.(c?js)$/, 'kokoro.web.js'),
+    'onnxruntime-web': join(dirname(require.resolve('onnxruntime-web')), 'ort.min.mjs'),
+  } },
   worker: { format: 'es' },
   build: { outDir: OUT, emptyOutDir: true, sourcemap: false },
   server: { proxy: { '/api': 'http://localhost:8787' } },

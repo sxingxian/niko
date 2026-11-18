@@ -6,6 +6,7 @@ export * from './backgrounds';
 export * from './maps';
 export * from './speechtext';
 export * from './knowledge';
+export * from './knowledgeDevice';
 import { MAP_PROVIDERS, mapPreset, type MapProvider, type MapSource } from './maps';
 
 export type ProviderGroup = 'mail' | 'calendar' | 'notes' | 'automation' | 'messaging' | 'weather' | 'ai';
@@ -390,7 +391,7 @@ export const AI_OPTION_GROUPS: AiOptionGroup[] = [
   { id: 'knowledge', name: 'Knowledge', where: 'Knowledge screen', ownPage: true, items: [
     { key: 'kn:files', name: 'Knowledge files', sub: 'Niko keeps their files and answers from them', offByDefault: true, feature: true },
     { key: 'kn:place:niko', name: 'Kept in Niko', sub: 'A separate Niko database' },
-    { key: 'kn:place:device', name: 'Kept on their device', sub: 'Never leaves the device' },
+    { key: 'kn:place:device', name: 'Kept on their device', sub: 'Files stay on that device' },
     { key: 'kn:place:notion', name: 'Notion', sub: 'Their Notion connection' },
     { key: 'kn:place:gdrive', name: 'Google Drive', sub: 'Their Google connection' },
     { key: 'kn:place:onedrive', name: 'OneDrive', sub: 'Their Microsoft connection' },
@@ -449,6 +450,8 @@ export interface Me {
   design?: string;
   /** The background to draw: the one chosen, or Glow if this account can no longer use it. */
   background?: string;
+  /** Where this person keeps Knowledge and how it is searched, when their plan includes Knowledge files. */
+  knowledge?: { place: 'niko' | 'device'; search: 'cloudflare' | 'device' };
 }
 
 /** Whether a message is about the weather. Only then is the device's location asked for and sent. */

@@ -8,6 +8,7 @@
     "build": "vite build"
   },
   "dependencies": {
+    "@huggingface/transformers": "3.5.1",
     "@niko/shared": "*",
     "@niko/ui": "*",
     "@simplewebauthn/browser": "^13.0.0",
@@ -18,7 +19,6 @@
     "react-router-dom": "^7.0.0"
   },
   "devDependencies": {
-    "@huggingface/transformers": "3.5.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.0.0",
