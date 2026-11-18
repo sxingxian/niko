@@ -1279,3 +1279,11 @@ a.bt { text-decoration: none; display: inline-flex; align-items: center; justify
   .kn-own { justify-content: flex-start; width: 100%; }
   .kn-own .in { flex: 1 1 100%; width: auto; }
 }
+/* Settings · Knowledge: places that keep a copy in the person's own apps. */
+.kn-place .srow-hint.wait { color: #ffd38a; }
+.kn-field { display: flex; flex-direction: column; gap: 6px; max-width: 420px; }
+.kn-k { font: 500 11px 'JetBrains Mono', ui-monospace, monospace; letter-spacing: .16em; text-transform: uppercase; color: #c3cad6; }
+.kn-field select.in { height: 44px; border-radius: 14px; font-size: 14px; padding: 0 12px; background-color: #11161e; }
+.kn-menu a { height: 44px; display: flex; align-items: center; border-radius: 10px; color: #fff; padding: 0 12px; font-size: 14px; text-decoration: none; }
+.kn-menu a:hover { background: rgba(255,255,255,.08); }
+.kn-move > .pri, .kn-move > .bt { flex: none; white-space: nowrap; }

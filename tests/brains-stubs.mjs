@@ -3,6 +3,7 @@ export const users = { name: 'users', id: 'id' };
 export const connections = { name: 'connections', userId: 'userId', provider: 'provider' };
 export const store = { creds: {}, engineWrites: [], keyWrites: [] };
 export async function credentials(_env, _db, _userId, provider) { return store.creds[provider] ?? null; }
+export async function getConnection(_db, _userId, provider) { return store.creds[provider] ? { meta: {} } : undefined; }
 export function publicHttpsUrl(raw) {
   try { const u = new URL(String(raw)); return u.protocol === 'https:' && !/^(localhost|127\.|10\.|192\.168\.)/.test(u.hostname) ? u : null; } catch { return null; }
 }

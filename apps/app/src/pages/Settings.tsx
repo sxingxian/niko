@@ -126,13 +126,26 @@ export function Connections() {
     .then((r) => { setList(r.providers.filter((p) => p.group !== 'ai' && p.group !== 'weather')); setApps(r.apps); setRedirects(r.redirectUrls); return r; })
     .catch((e) => { setNote({ ok: false, text: e.message }); return null; }), []);
   useEffect(() => { void load(); }, [load]);
+  const go = useNavigate();
   useEffect(() => {
     const ok = params.get('linked'), bad = params.get('failed');
+    // Connected from Settings · Knowledge (to keep files there): back to Knowledge.
+    let back: string | null = null;
+    try { back = sessionStorage.getItem('kn-return'); if (ok !== null || bad !== null) sessionStorage.removeItem('kn-return'); } catch { /* storage off */ }
+    if (back && ok !== null && back === ok) { go(`/knowledge?linked=${encodeURIComponent(ok)}`, { replace: true }); return; }
     if (ok !== null) setNote({ ok: true, text: 'Linked.' });
     if (bad !== null) setNote({ ok: false, text: 'That sign-in did not complete. Nothing was linked.' });
     if (ok !== null || bad !== null) setParams({}, { replace: true });
   }, [params, setParams]);
 
+  // Opened from another screen to connect one service (Settings · Knowledge's Connect button).
+  useEffect(() => {
+    const want = params.get('connect');
+    if (!want || !list.length) return;
+    setParams({}, { replace: true });
+    const p = list.find((x) => x.id === want);
+    if (p && !p.linked) act(p);
+  }, [params, list]); // eslint-disable-line react-hooks/exhaustive-deps
   const appOf = (p: Prov) => apps.find((a) => a.id === p.app);
   const act = (p: Prov) => {
     setNote(null);

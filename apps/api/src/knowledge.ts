@@ -86,7 +86,9 @@ export async function readWithCloudflare(env: Pick<Env, 'AI'>, name: string, byt
 }
 
 // ---------------------------------------------------------------- files
-export interface KnFile { id: string; name: string; kind: KnKind; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; flagged: boolean; sheets: number; rows: number; columns: number; numbers: { cloudflare: number; device: number }; sha256: string; addedAt: string }
+export interface KnFile { id: string; name: string; kind: KnKind; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; flagged: boolean; sheets: number; rows: number; columns: number; numbers: { cloudflare: number; device: number; own: number }; sha256: string; addedAt: string;
+  /** Where its copy is kept (niko: no copy elsewhere), a link to it, whether it's all there, and any problem with it. */
+  place: string; url: string | null; copied: boolean; copyError: string | null }
 const cleanText = (v: unknown, n: number) => (typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, n) : '');
 const cleanName = (v: unknown) => cleanText(v, 255).replace(/[\\/]/g, '-');
 
@@ -269,8 +271,11 @@ export async function finishFile(k: Kdb, account: string, id: string): Promise<{
 }
 
 export async function listFiles(k: Kdb, account: string): Promise<KnFile[]> {
-  const rows = await k.q<{ id: string; name: string; kind: KnKind; collection: string; bytes: number; status: KnFile['status']; error: string | null; chunk_count: number; flagged: boolean; sheets: number; rows: string; columns: number; cf: number; dev: number; own: number; sha256: string; created_at: string | Date }>(
-    `select d.id, d.name, d.kind, d.collection, d.bytes, d.sha256, d.status, d.error, d.chunk_count, d.flagged, d.created_at,
+  const rows = await k.q<{ id: string; name: string; kind: KnKind; collection: string; bytes: number; status: KnFile['status']; error: string | null; chunk_count: number; flagged: boolean; sheets: number; rows: string; columns: number; cf: number; dev: number; own: number; sha256: string; created_at: string | Date; place: string; remote_error: string | null; url: string | null; copied: boolean }>(
+    `select d.id, d.name, d.kind, d.collection, d.bytes, d.sha256, d.status, d.error, d.chunk_count, d.flagged, d.created_at, d.place, d.remote_error,
+            coalesce(d.remote_url, (select s.remote_url from kn_sheets s where s.document_id = d.id and s.remote_url is not null order by s.name limit 1)) as url,
+            (d.collection = 'Data sources' or d.place <> 'niko' and case when exists (select 1 from kn_sheets s where s.document_id = d.id)
+               then not exists (select 1 from kn_sheets s where s.document_id = d.id and s.remote_version is null) else d.remote_id is not null end) as copied,
             (select count(*)::int from kn_sheets s where s.document_id = d.id) as sheets,
             (select coalesce(sum(s.row_count), 0)::bigint from kn_sheets s where s.document_id = d.id) as rows,
             (select coalesce(max(jsonb_array_length(s.columns)), 0)::int from kn_sheets s where s.document_id = d.id) as columns,
@@ -278,7 +283,8 @@ export async function listFiles(k: Kdb, account: string): Promise<KnFile[]> {
             (select count(*)::int from kn_chunks c where c.document_id = d.id and c.embedding_device is not null) as dev,
             (select count(*)::int from kn_chunks c where c.document_id = d.id and c.embedding_own is not null) as own
      from kn_documents d where d.account_id = $1 order by d.created_at desc limit 1000`, [account]);
-  return rows.map((r) => ({ id: r.id, name: r.name, kind: r.kind, collection: r.collection, bytes: r.bytes, status: r.status, error: r.error, pieces: r.chunk_count, flagged: r.flagged, sheets: r.sheets, rows: Number(r.rows), columns: r.columns, numbers: { cloudflare: r.cf, device: r.dev, own: r.own }, sha256: r.sha256, addedAt: new Date(r.created_at).toISOString() }));
+  return rows.map((r) => ({ id: r.id, name: r.name, kind: r.kind, collection: r.collection, bytes: r.bytes, status: r.status, error: r.error, pieces: r.chunk_count, flagged: r.flagged, sheets: r.sheets, rows: Number(r.rows), columns: r.columns, numbers: { cloudflare: r.cf, device: r.dev, own: r.own }, sha256: r.sha256, addedAt: new Date(r.created_at).toISOString(),
+    place: r.place, url: r.url && /^https:\/\//.test(r.url) ? r.url : null, copied: !!r.copied, copyError: r.remote_error }));
 }
 
 export async function deleteFile(k: Kdb, account: string, id: string): Promise<boolean> {
@@ -359,6 +365,7 @@ export async function clearOwnNumbers(k: Kdb, account: string): Promise<void> {
 export async function purgeAccount(k: Kdb, account: string): Promise<void> {
   await k.q(`delete from kn_documents where account_id = $1`, [account]);
   await k.q(`delete from kn_learned where account_id = $1`, [account]);
+  await k.q(`delete from kn_places where account_id = $1`, [account]);
 }
 
 // ---------------------------------------------------------------- search

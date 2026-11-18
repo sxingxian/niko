@@ -197,7 +197,7 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
 type KnAdminUser = { id: string; name: string; email: string; role: string; status: string; knowledgeLimits: Partial<KnowledgeLimits>; used: { files: number; bytes: number; notes?: number } };
 type KnAdmin = { ready: boolean; usage: { bytes: number; files: number; people: number } | null; split: 'browser' | 'server'; defaults: KnowledgeLimits; users: KnAdminUser[] };
 /** The Knowledge switches built so far, in their groups (the others in AI_OPTION_GROUPS arrive with their stages). */
-const KN_GROUPS: [string, string[]][] = [['Files', ['kn:files']], ['Where they keep files', ['kn:place:niko', 'kn:place:device']], ['Cloudflare', ['kn:cf-read', 'kn:cf-search']], ['Other search sources', ['kn:search-key', 'kn:search-server']], ['Learning', ['kn:learning']]];
+const KN_GROUPS: [string, string[]][] = [['Files', ['kn:files']], ['Where they keep files', ['kn:place:niko', 'kn:place:device', 'kn:place:notion', 'kn:place:gdrive', 'kn:place:onedrive']], ['Cloudflare', ['kn:cf-read', 'kn:cf-search']], ['Other search sources', ['kn:search-key', 'kn:search-server']], ['Learning', ['kn:learning']]];
 const KN_SHOWN = KN_GROUPS.flatMap(([, keys]) => keys);
 const KN_LIMIT_ROWS: [keyof KnowledgeLimits, string, string, number[], (n: number) => string][] = [
   ['files', 'Files', 'How many files each person can keep', KN_FILE_STEPS, (n) => `${n.toLocaleString()} files`],
