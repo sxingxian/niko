@@ -263,7 +263,7 @@ export function Knowledge() {
       <div className="kn-page">
         <div className="kn-main">
           {tabs}
-          <LearnedTab account={account} place={place} learn={prefs.learn} onLearn={(v) => void savePrefs({ learn: v })} />
+          <LearnedTab account={account} place={place} learn={prefs.learn} onLearn={(v) => void savePrefs({ learn: v }).then(() => refreshMe())} situations={prefs.situations} onSituations={(v) => void savePrefs({ situations: v }).then(() => refreshMe())} />
         </div>
         <LearnedAside />
       </div>

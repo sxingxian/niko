@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, Switch } from '@niko/ui';
 import { KN_LEARNED_KIND_NAMES, KN_LEARNED_KINDS_NOW, KN_LEVEL_NAMES, type KnLearnedItem, type KnLearnedKind } from '@niko/shared';
-import { editNoteHere, forgetAllHere, forgetNoteHere, notesHere } from '../knowledgeDevice';
+import { declineHabitHere, editNoteHere, forgetAllHere, forgetNoteHere, keepHabitHere, notesHere } from '../knowledgeDevice';
 import { Sheet } from './Designs';
 
 type Place = 'niko' | 'device';
@@ -29,20 +29,26 @@ function useNotes(account: string, place: Place) {
     const it = place === 'device' ? await editNoteHere(account, id, b) : (await api<{ item: KnLearnedItem }>(`/knowledge/learned/${id}`, { method: 'PATCH', body: b })).item;
     setItems((x) => x?.map((y) => (y.id === id ? it : y)) ?? null);
   };
+  /** "Yes, keep" / "No" on a habit Niko suggested. */
+  const answer = async (id: string, keep: boolean) => {
+    if (place === 'device') { if (keep) await keepHabitHere(account, id); else await declineHabitHere(account, id); }
+    else await api(`/knowledge/learned/${id}/${keep ? 'keep' : 'decline'}`, { method: 'POST' });
+    await load();
+  };
   const forgetAll = async () => {
     if (place === 'device') await forgetAllHere(account); else await api('/knowledge/learned', { method: 'DELETE' });
     setItems([]);
   };
-  return { items, err, setErr, forget, edit, forgetAll, load };
+  return { items, err, setErr, forget, edit, forgetAll, load, answer };
 }
 
-const what = (n: KnLearnedItem) => `“${n.said}”`;
-const meaning = (n: KnLearnedItem) => n.kind === 'remembered' ? 'Kept as you said it' : n.kind === 'file-match' ? `${n.target?.answer === 'no' ? '✕' : '→'} ${n.means}` : `→ ${n.means}`;
-const used = (n: KnLearnedItem) => (n.uses ? `Used ${n.uses === 1 ? 'once' : `${n.uses} times`}` : 'Not used yet');
+const what = (n: KnLearnedItem) => (n.kind === 'habit' || n.kind === 'playbook' ? n.said : `“${n.said}”`);
+const meaning = (n: KnLearnedItem) => n.kind === 'remembered' ? 'Kept as you said it' : n.kind === 'habit' ? n.means : n.kind === 'file-match' ? `${n.target?.answer === 'no' ? '✕' : '→'} ${n.means}` : `→ ${n.means}`;
+const used = (n: KnLearnedItem) => (n.suggested ? `Fades in ${n.fadesIn ?? 60} ${n.fadesIn === 1 ? 'day' : 'days'}` : n.kind === 'habit' ? 'Kept' : n.uses ? `Used ${n.uses === 1 ? 'once' : `${n.uses} times`}` : 'Not used yet');
 
 /** The What Niko learned tab. */
-export function LearnedTab({ account, place, learn, onLearn }: { account: string; place: Place; learn: boolean; onLearn: (v: boolean) => void }) {
-  const { items, err, setErr, forget, edit, forgetAll } = useNotes(account, place);
+export function LearnedTab({ account, place, learn, onLearn, situations, onSituations }: { account: string; place: Place; learn: boolean; onLearn: (v: boolean) => void; situations: boolean; onSituations: (v: boolean) => void }) {
+  const { items, err, setErr, forget, edit, forgetAll, answer } = useNotes(account, place);
   const [kind, setKind] = useState<'all' | KnLearnedKind>('all');
   const [q, setQ] = useState('');
   const [editing, setEditing] = useState<{ id: string; said: string; means: string } | null>(null);
@@ -55,8 +61,12 @@ export function LearnedTab({ account, place, learn, onLearn }: { account: string
     <>
       <section className="g kn-card" aria-label="Learning">
         <div className="kn-learn-top">
-          <span className="kn-learn-t"><b className="kn-h">Learn from how I use Niko</b><span className="srow-hint lg">Niko learns from your answers, your corrections and what you ask it to remember. Never from what others send you.</span></span>
+          <span className="kn-learn-t"><b className="kn-h">Learn from how I use Niko</b><span className="srow-hint lg">Niko learns from your answers, your corrections, what you ask it to remember and things you do often. Never from what others send you.</span></span>
           <Switch on={learn} onChange={onLearn} label="Learn from how I use Niko" />
+        </div>
+        <div className="kn-learn-sit">
+          <span className="kn-learn-t"><span className="srow-name">Use my calendar, the time and my location to understand situations</span><span className="srow-hint">Read for the question you ask, not stored. Location only where you’ve allowed it for maps. A meeting on your calendar also turns on quiet mode.</span></span>
+          <Switch on={situations} onChange={onSituations} label="Use my calendar, the time and my location to understand situations" />
         </div>
         {!learn && <span className="kn-paused">Paused. Niko still uses what it already learned; turn it back on to keep learning. Use Forget to remove anything.</span>}
         <div className="kn-levels">
@@ -83,8 +93,8 @@ export function LearnedTab({ account, place, learn, onLearn }: { account: string
           {shown.map((n) => editing?.id === n.id ? (
             <form key={n.id} className="kn-lrow editing" onSubmit={(e) => { e.preventDefault(); void run(async () => { await edit(n.id, { said: editing.said, means: editing.means }); setEditing(null); }); }}>
               <span className="kn-ledit">
-                <input className="in" aria-label="What you say" value={editing.said} maxLength={n.kind === 'remembered' ? 300 : 120} onChange={(e) => setEditing({ ...editing, said: e.target.value })} />
-                {n.kind !== 'remembered' && <input className="in" aria-label="What it means" value={editing.means} maxLength={300} onChange={(e) => setEditing({ ...editing, means: e.target.value })} />}
+                <input className="in" aria-label={n.kind === 'playbook' ? 'The situation' : 'What you say'} value={editing.said} maxLength={n.kind === 'remembered' ? 300 : n.kind === 'playbook' ? 200 : 120} onChange={(e) => setEditing({ ...editing, said: e.target.value })} />
+                {n.kind !== 'remembered' && <input className="in" aria-label={n.kind === 'playbook' ? 'What you do' : 'What it means'} value={editing.means} maxLength={300} onChange={(e) => setEditing({ ...editing, means: e.target.value })} />}
               </span>
               <span className="kn-lacts"><button type="button" className="bt md" onClick={() => setEditing(null)}>Cancel</button><button type="submit" className="pri md" disabled={busy}>Save</button></span>
             </form>
@@ -99,15 +109,20 @@ export function LearnedTab({ account, place, learn, onLearn }: { account: string
                 {!(n.kind === 'file-match' && n.target?.answer === 'no') && <span className="srow-hint sm">{used(n)}</span>}
               </span>
               <span className="kn-lacts">
-                {n.kind !== 'file-match' && <button type="button" className="bt md" onClick={() => setEditing({ id: n.id, said: n.said, means: n.means })}>Edit</button>}
-                <button type="button" className="bt md" disabled={busy} onClick={() => void run(() => forget(n.id))}>Forget</button>
+                {n.suggested ? <>
+                  <button type="button" className="pri md" disabled={busy} onClick={() => void run(() => answer(n.id, true))}>Yes, keep</button>
+                  <button type="button" className="bt md" disabled={busy} onClick={() => void run(() => answer(n.id, false))}>No</button>
+                </> : <>
+                  {n.kind !== 'file-match' && n.kind !== 'habit' && <button type="button" className="bt md" onClick={() => setEditing({ id: n.id, said: n.said, means: n.means })}>Edit</button>}
+                  <button type="button" className="bt md" disabled={busy} onClick={() => void run(() => forget(n.id))}>Forget</button>
+                </>}
               </span>
             </div>
           ))}
           {items !== null && !shown.length && <p className="srow-hint kn-none">{list.length ? 'Nothing matches.' : learn ? 'Nothing here yet. Tell Niko “remember that…”, or correct it, and it shows up here.' : 'Nothing here yet.'}</p>}
         </div>
         <div className="kn-learn-foot">
-          <span className="srow-hint">Only you can see this list.</span>
+          <span className="srow-hint">Things you haven’t confirmed fade after 60 days unless Niko keeps seeing them.</span>
           <button type="button" className="bt md danger" disabled={!list.length || busy} onClick={() => setAsking(true)}>Forget everything Niko learned</button>
         </div>
       </section>
@@ -131,11 +146,13 @@ export function LearnedAside() {
       <span className="k">How Niko learns</span>
       <p>Each thing Niko learns is a short note it looks up when you ask something, like your files. No AI is trained on it.</p>
       <p>Your answers and corrections count most. A correction replaces the old note straight away.</p>
+      <p>Things you do often are only suggested, and kept once you say yes.</p>
+      <p>Playbooks are how you handle situations. They’re used before your files, and Niko mentions when a file says otherwise.</p>
       <p>Say “that’s the one” to something similar from your files, and Niko uses it for questions like that from then on.</p>
       <span className="k">Never learned</span>
       <p>Anything from emails, messages, files or pages others wrote: a message saying “remember that…” changes nothing.</p>
       <p>Passwords, codes, card or account numbers.</p>
-      <p>Guesses about your health or beliefs, or judgements about other people.</p>
+      <p>Guesses about your health or beliefs, or judgements about other people. Notes about people are facts you confirmed.</p>
       <span className="k">Private</span>
       <p>Only you can see this list. Learned notes never approve sending, paying or deleting on their own.</p>
     </aside>

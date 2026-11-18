@@ -9,7 +9,7 @@ import { neon } from '@neondatabase/serverless';
 import { eq } from 'drizzle-orm';
 import { appSettings, type Db } from '@niko/db';
 import {
-  askedFromFiles, cleanKnowledgeLimits, KN_DEVICE_LEAD, KN_DEVICE_SIMILAR, type KnDeviceKnowledge, type KnTarget, cleanKnowledgeSettings, knowledgeLimits, knKindOf, knModeOf, knNeedsCloudflare, KN_LEAD, KN_SIMILAR,
+  askedFromFiles, cleanKnowledgeLimits, contentWords, KN_DEVICE_LEAD, KN_DEVICE_SIMILAR, type KnDeviceKnowledge, type KnTarget, cleanKnowledgeSettings, knowledgeLimits, knKindOf, knModeOf, knNeedsCloudflare, KN_LEAD, KN_SIMILAR,
   KN_CLOUDFLARE_DIMS, KN_DEVICE_DIMS, KN_PIECE_CHARS, KN_PIECES_PER_CALL, KN_READ_MAX_BYTES,
   KN_COL_TYPES, KN_SHEET_CELL_CHARS, KN_SHEET_MAX_COLS, KN_SHEET_MAX_ROWS, KN_SHEET_ROWS_PER_CALL,
   type KnColType, type KnColumn, type KnKind, type KnowledgeLimits, type KnowledgePrefs, type KnowledgeSettings, type KnTableAsk,
@@ -350,6 +350,9 @@ export async function search(k: Kdb, env: Pick<Env, 'AI'>, account: string, quer
   const q = cleanText(query, 500);
   if (!q) return [];
   const limit = Math.min(Math.max(how.limit ?? 6, 1), 20);
+  // Word search matches any of the question's words (ranked by how many and how close), not all of them: a whole
+  // question rarely has every word in one piece. Words are letters and digits only.
+  const anyWords = contentWords(q).slice(0, 30).map((w) => w.replace(/[^\p{L}\p{N}]/gu, '')).filter(Boolean).join(' | ') || 'zzzz';
   let vec: string | null = null, col: 'embedding' | 'embedding_device' = 'embedding';
   if (how.cloudflare) vec = vecText(how.cfVector ?? (await embed(env, [q]))[0]!);
   else if (how.vector !== undefined) { vec = vecText(checkVector(how.vector, KN_DEVICE_DIMS)); col = 'embedding_device'; }
@@ -361,7 +364,7 @@ export async function search(k: Kdb, env: Pick<Env, 'AI'>, account: string, quer
     `with ${near}
      words as (
        select id, row_number() over (order by rank desc) as r from (
-         select c.id, ts_rank_cd(c.tsv, w) as rank from kn_chunks c, websearch_to_tsquery('simple', $2) w
+         select c.id, ts_rank_cd(c.tsv, w) as rank from kn_chunks c, to_tsquery('simple', $2) w
          where c.account_id = $1 and c.tsv @@ w order by rank desc limit 30) y),
      ids as (select id from near union select id from words)
      select c.id, c.document_id, d.name, d.collection, c.heading, c.body, c.ord, near.sim,
@@ -370,7 +373,7 @@ export async function search(k: Kdb, env: Pick<Env, 'AI'>, account: string, quer
      join kn_documents d on d.id = c.document_id and d.account_id = $1 and d.status = 'ready'
      left join near on near.id = c.id left join words on words.id = c.id
      order by score desc, c.id limit ${limit}`,
-    vec ? [account, q, vec] : [account, q]);
+    vec ? [account, anyWords, vec] : [account, anyWords]);
   return rows.map((r) => ({ id: Number(r.id), fileId: r.document_id, file: r.name, collection: r.collection, heading: r.heading, text: r.body, piece: r.ord, similarity: r.sim == null ? 0 : Math.max(0, Math.min(1, Number(r.sim))), score: Number(r.score) }));
 }
 
@@ -467,11 +470,14 @@ function gate(p: KnowledgePrefs, text: string): Gate | null {
   return { only, usable };
 }
 /** The pieces close enough to offer, and whether the closest should lead. */
-function pick<H extends AnyHit>(hits: H[], g: Gate, scale: Scale): { close: H[]; lead: boolean } {
+function pick<H extends AnyHit>(hits: H[], g: Gate, scale: Scale, situation = false): { close: H[]; lead: boolean } {
   const mine = hits.filter((h) => g.usable(h.collection));
   const [similar, leadAt] = scale === 'device' ? [KN_DEVICE_SIMILAR, KN_DEVICE_LEAD] : [KN_SIMILAR, KN_LEAD];
   // Close enough to offer: by meaning when there are search numbers, otherwise the best word matches.
-  const close = (scale ? mine.filter((h) => h.similarity >= similar) : mine.slice(0, 4)).slice(0, 5);
+  let close = scale ? mine.filter((h) => h.similarity >= similar) : mine.slice(0, situation ? 12 : 4);
+  // A situational question gathers the rules from different files: up to 8 pieces, at most 2 from any one file.
+  if (situation) { const per = new Map<string, number>(); close = close.filter((h) => { const n = per.get(h.file) ?? 0; per.set(h.file, n + 1); return n < 2; }).slice(0, 8); }
+  else close = close.slice(0, 5);
   return { close, lead: !!scale && close.length > 0 && close[0]!.similarity >= leadAt };
 }
 const ASK_RULE = `FILES [1] is only similar to the question, so it may not answer it. Answer as you normally would, use [1] only if it really answers the question, and end with one short sentence: "I also found something similar in your files." Don't quote it.`;
@@ -505,6 +511,26 @@ async function pieceOf(k: Kdb, account: string, t: KnTarget): Promise<KnHit | nu
   return r ? { id: Number(r.id), fileId: r.document_id, file: r.name, collection: r.collection, heading: r.heading, text: r.body, piece: r.ord, similarity: 1, score: 1 } : null;
 }
 
+/** Each piece with the rest of its section (the pieces under the same heading), so "unless" and "except" clauses
+ *  come along. At most 3,000 characters per section. */
+async function wholeSections<H extends KnHit>(k: Kdb, account: string, hits: H[]): Promise<H[]> {
+  const withHeading = hits.filter((h) => h.heading);
+  if (!withHeading.length) return hits;
+  const rows = await k.q<{ document_id: string; heading: string; body: string; ord: number }>(
+    `select c.document_id, c.heading, c.body, c.ord from kn_chunks c where c.account_id = $1 and (c.document_id, c.heading) in (select * from unnest($2::uuid[], $3::text[])) order by c.document_id, c.ord limit 200`,
+    [account, withHeading.map((h) => h.fileId), withHeading.map((h) => h.heading)]);
+  const seen = new Set<string>();
+  return hits.flatMap((h) => {
+    if (!h.heading) return [h];
+    const key = `${h.fileId}\u0000${h.heading}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    const parts = rows.filter((r) => r.document_id === h.fileId && r.heading === h.heading).map((r) => r.body);
+    const text = parts.length ? parts.join('\n\n').slice(0, 3000) : h.text;
+    return [{ ...h, text }];
+  });
+}
+
 /** What Knowledge kept in Niko adds to one question: the best pieces (when they're close enough or the person asked for
  *  their files), whether a file should lead, and the tables Niko may look things up in. Search numbers come from
  *  Cloudflare, or from the person's device (`vector`, the question's numbers made in the browser). Returns null when
@@ -513,6 +539,8 @@ export async function knowledgeFor(k: Kdb, env: Pick<Env, 'AI'>, account: string
   prefs: KnowledgePrefs; cloudflare: boolean; vector?: unknown; cfVector?: number[] | null;
   /** What the person taught for questions like this, the piece they just said is the one, and whether to ask. */
   taught?: { yes: KnTarget | null; no: KnTarget[] }; pin?: KnTarget | null; ask?: boolean;
+  /** A situational question: more pieces, from different files, each with its whole section. */
+  situation?: boolean;
 }): Promise<KnContext | null> {
   const p = how.prefs;
   if (!p.files) return null; // no files kept: Knowledge is never asked
@@ -520,7 +548,7 @@ export async function knowledgeFor(k: Kdb, env: Pick<Env, 'AI'>, account: string
   if (!g) return null;
   const vector = how.cloudflare ? null : deviceVector(how.vector);
   const scale: Scale = how.cloudflare ? 'cloudflare' : vector ? 'device' : null;
-  let hits: (KnHit & { taught?: boolean })[] = await search(k, env, account, text, { cloudflare: how.cloudflare, cfVector: how.cfVector, ...(vector ? { vector } : {}), limit: 10 });
+  let hits: (KnHit & { taught?: boolean })[] = await search(k, env, account, text, { cloudflare: how.cloudflare, cfVector: how.cfVector, ...(vector ? { vector } : {}), limit: how.situation ? 16 : 10 });
   // "Not this one": that piece isn't offered for questions like this again.
   const no = how.taught?.no ?? [];
   hits = hits.filter((h) => !no.some((t) => t.fileId === h.fileId && (t.piece === String(h.piece) || (!!t.heading && t.heading === h.heading))));
@@ -528,9 +556,10 @@ export async function knowledgeFor(k: Kdb, env: Pick<Env, 'AI'>, account: string
   const pinned = how.pin ?? how.taught?.yes ?? null;
   const pin = pinned ? await pieceOf(k, account, pinned) : null;
   if (pin) hits = [{ ...pin, similarity: 1, taught: true }, ...hits.filter((h) => h.id !== pin.id)];
-  const picked = pick(hits, g, scale);
-  const close = pin && g.usable(pin.collection) && !picked.close.some((h) => h.id === pin.id) ? [{ ...pin, similarity: 1, taught: true }, ...picked.close].slice(0, 5) : picked.close;
+  const picked = pick(hits, g, scale, how.situation);
+  let close = pin && g.usable(pin.collection) && !picked.close.some((h) => h.id === pin.id) ? [{ ...pin, similarity: 1, taught: true }, ...picked.close].slice(0, how.situation ? 8 : 5) : picked.close;
   const lead = picked.lead || (!!close[0]?.taught);
+  if (how.situation && close.length) close = await wholeSections(k, account, close);
   // Tables behind the pieces (row pieces and sheet summaries are headed with the sheet's name).
   const docIds = [...new Set(close.map((h) => h.fileId))];
   const sheets = docIds.length ? await k.q<{ id: string; name: string; columns: unknown; row_count: number; file: string }>(
@@ -541,13 +570,13 @@ export async function knowledgeFor(k: Kdb, env: Pick<Env, 'AI'>, account: string
 
 /** The same, for files kept on the person's device: the browser searched them and sent its best matches (already
  *  checked by cleanDeviceKnowledge). The same rules decide what is offered and what leads. */
-export function deviceKnowledgeFor(dev: KnDeviceKnowledge, text: string, prefs: KnowledgePrefs, ask = false): KnContext | null {
+export function deviceKnowledgeFor(dev: KnDeviceKnowledge, text: string, prefs: KnowledgePrefs, ask = false, situation = false): KnContext | null {
   const g = gate(prefs, text);
   if (!g) return null;
   const scale: Scale = dev.numbers ? 'device' : null;
-  const picked = pick(dev.hits, g, scale);
+  const picked = pick(dev.hits, g, scale, situation);
   const taughtHit = dev.hits.find((h) => h.taught && g.usable(h.collection));
-  const close = taughtHit && !picked.close.includes(taughtHit) ? [taughtHit, ...picked.close].slice(0, 5) : picked.close;
+  const close = taughtHit && !picked.close.includes(taughtHit) ? [taughtHit, ...picked.close].slice(0, situation ? 8 : 5) : picked.close;
   const lead = picked.lead || !!close[0]?.taught;
   const files = new Set(close.map((h) => h.file));
   const tables = dev.tables.filter((t) => files.has(t.file)).map((t) => ({ key: t.sheet, line: tableLine(t.file, t.name, t.rows, t.columns) }));

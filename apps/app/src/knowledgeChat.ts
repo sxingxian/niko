@@ -36,9 +36,9 @@ export async function keepDeviceNotes(me: Me | null | undefined, learn: unknown)
   const out: { id: string; kind: string; said: string; means: string }[] = [];
   for (const raw of learn.slice(0, 2)) {
     const x = (raw && typeof raw === 'object' ? raw : {}) as { kind?: unknown; said?: unknown; means?: unknown; how?: unknown };
-    const kind = x.kind === 'person' || x.kind === 'correction' || x.kind === 'remembered' ? x.kind : null;
+    const kind = x.kind === 'person' || x.kind === 'correction' || x.kind === 'remembered' || x.kind === 'playbook' ? x.kind : null;
     if (!kind || typeof x.said !== 'string' || typeof x.means !== 'string') continue;
-    const how = (['told', 'corrected', 'chose', 'remember'] as const).find((h) => h === x.how) ?? 'told';
+    const how = (['told', 'corrected', 'chose', 'remember', 'confirmed', 'agreed'] as const).find((h) => h === x.how) ?? 'told';
     try { const it = await keepNoteHere(me.id, { kind, said: x.said, means: x.means, how: how as KnHow }); out.push({ id: it.id, kind: it.kind, said: it.said, means: it.means }); } catch { /* not kept */ }
   }
   return out;
