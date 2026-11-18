@@ -200,16 +200,22 @@ function KnowledgeCard({ reply, kn, tabbable, onCorrect }: { reply: string; kn: 
 }
 
 const timeOf = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-/** Where an answer's data came from: each source and what was asked, when, and the credit its terms ask for. */
-function DataCard({ items }: { items: DataUsed[] }) {
-  const latest = Math.max(...items.map((d) => d.at));
+/** Where an answer's data came from: each source and what was asked, when, and the credit its terms ask for. Live
+ *  answers say how fresh they are, counting up while shown, and can be asked again. */
+function DataCard({ items, onRefresh, tabbable }: { items: DataUsed[]; onRefresh: () => void; tabbable: boolean }) {
+  const latest = Math.max(...items.map((d) => d.at)), live = items.some((d) => d.live);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { if (!live) return; const t = window.setInterval(() => setNow(Date.now()), 5000); return () => window.clearInterval(t); }, [live]);
+  const secs = Math.max(0, Math.round((now - latest) / 1000));
+  const ago = secs < 60 ? `${Math.max(5, Math.round(secs / 5) * 5)} seconds ago` : secs < 3600 ? `${Math.round(secs / 60)} min ago` : `at ${timeOf(latest)}`;
   return (
     <section className="g kn-src" aria-label="Data sources">
-      <span className="k">{items.length === 1 ? 'Source' : 'Sources'} · {timeOf(latest)}</span>
+      <span className="k">{live ? `Updated ${ago}` : `${items.length === 1 ? 'Source' : 'Sources'} · ${timeOf(latest)}`}</span>
       <ol className="kn-src-list">{items.map((d, i) => (
         <li key={i}><span className="kn-src-n app">{i + 1}</span><span className="kn-src-t"><b>{d.source} · {d.action}</b><span>{[d.live ? 'Live' : `As of ${timeOf(d.at)}`, d.attribution].filter(Boolean).join(' · ')}</span></span></li>
       ))}</ol>
-      <span className="kn-src-note">Niko only asks a source what its actions allow.</span>
+      {live && <div className="kn-src-b"><button type="button" className="sec" tabIndex={tabbable ? 0 : -1} onClick={onRefresh}>Refresh</button></div>}
+      <span className="kn-src-note">{live ? 'Live data always wins over files for times.' : 'Niko only asks a source what its actions allow.'}</span>
     </section>
   );
 }
@@ -347,7 +353,7 @@ export function Home() {
           </div>
           {n.dataUsed?.for === shown.reply && !shown.kn && !followFor(n.followUp, shown.reply) && (
             <div className="card-build" style={{ ['--d' as string]: `${CARD_GAP}s` }}>
-              <DataCard items={n.dataUsed.items} />
+              <DataCard items={n.dataUsed.items} tabbable={open} onRefresh={() => void n.ask(n.dataUsed!.question)} />
               <Outline />
             </div>
           )}

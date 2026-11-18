@@ -14,6 +14,7 @@ import { Designs } from './pages/Designs';
 import { Backgrounds } from './pages/Backgrounds';
 import { Account, Appearance, Connections, Engine, SettingsLayout, Voice } from './pages/Settings';
 import { DataSources } from './pages/DataSources';
+import { LiveInfo } from './pages/LiveInfo';
 import { Weather } from './pages/WeatherSettings';
 import { Knowledge } from './pages/Knowledge';
 
@@ -122,6 +123,7 @@ function Screens() {
           <Route path="/connections/weather" element={<Weather />} />
           <Route path="/engine" element={<Engine />} />
           <Route path="/engine/data" element={<DataSources />} />
+          <Route path="/engine/live" element={<LiveInfo />} />
           <Route path="/knowledge" element={<Knowledge />} />
           <Route path="/account" element={<Account />} />
         </Route>

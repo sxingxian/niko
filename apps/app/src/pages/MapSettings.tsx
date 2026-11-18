@@ -10,9 +10,9 @@ import { useNiko } from '../niko';
 export interface MapLists { maps: MapSource[]; mapCountries: Record<string, MapSource[]>; dirty: boolean; saved: () => void }
 type Draft = { id?: string; provider: MapProvider; label: string; apiKey: string; secret: string; email: string; password: string; baseUrl: string; list: string };
 
-const regionName = (cc: string) => { try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(cc) ?? cc; } catch { return cc; } };
+export const regionName = (cc: string) => { try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(cc) ?? cc; } catch { return cc; } };
 let allCountries: { cc: string; name: string }[] | null = null;
-function countries() {
+export function countries() {
   if (allCountries) return allCountries;
   const out: { cc: string; name: string }[] = [], A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   try { const dn = new Intl.DisplayNames(['en'], { type: 'region' }); for (const a of A) for (const b of A) { const cc = a + b, name = dn.of(cc); if (name && name !== cc && !/unknown|^[A-Z]{2}$/i.test(name) && !['EU', 'EZ', 'UN', 'QO', 'XA', 'XB', 'ZZ'].includes(cc)) out.push({ cc, name }); } } catch { /* none */ }

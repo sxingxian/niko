@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {
   actionUrl, checkValues, cleanAction, cleanActions, cleanBaseUrl, cleanDataAccess, cleanDataPrefs, dataAllowed, dataBlock, dataTags, hostProblem,
-  openApiActions, privateIp, resultText, sampleValues, stripDataTags, cleanWeatherPrefs, weatherOrder, cleanDataDefaults,
+  openApiActions, privateIp, resultText, sampleValues, stripDataTags, cleanWeatherPrefs, weatherOrder, cleanDataDefaults, cleanLivePrefs, liveOrder, placesBlock,
 } from '../packages/shared/src/dataSources.ts';
 import { dns, forgetDns, safeGet } from '../apps/api/src/safefetch.ts';
 import { DataProblem, runAction } from '../apps/api/src/datasources.ts';
@@ -129,6 +129,19 @@ await ok('weather order: Open-Meteo where the plan puts it until the person choo
   assert.equal(dataAllowed(cleanDataDefaults({ om: false }), {}, []).om, false);
   assert.equal(dataAllowed(cleanDataDefaults({ om: false }), cleanDataAccess({ om: true }), []).om, true);
   assert.equal(cleanDataDefaults({ wxFirst: 'others' }).wxFirst, 'others');
+});
+
+await ok('live info: the country’s own list, else Everywhere, else the only country set up; places kept short', () => {
+  const A = 'a'.repeat(8) + '-0000-4000-8000-' + 'a'.repeat(12), B = 'b'.repeat(8) + '-0000-4000-8000-' + 'b'.repeat(12);
+  const p = cleanLivePrefs({ everywhere: [B], countries: { SG: [A, B], sg: [B], XX1: [A] }, places: [{ name: 'Usual stop', value: 'Example Rd stop · 83139' }, { name: '', value: 'x' }] });
+  assert.deepEqual(Object.keys(p.countries), ['SG']);
+  assert.equal(p.places.length, 1);
+  assert.deepEqual(liveOrder(p, 'SG', [A, B]), { list: [A, B], from: 'SG' });
+  assert.deepEqual(liveOrder(p, 'MY', [A, B]), { list: [B], from: null });
+  assert.deepEqual(liveOrder({ ...p, everywhere: [] }, null, [A, B]), { list: [A, B], from: 'SG' }, 'only one country set up: used anywhere');
+  assert.deepEqual(liveOrder(p, 'SG', [B]), { list: [B], from: 'SG' }, 'a service they can no longer use drops out');
+  assert.match(placesBlock(p.places), /Usual stop: Example Rd stop · 83139/);
+  assert.equal(placesBlock([]), '');
 });
 
 // ---------------------------------------------------------------- the server side, with the network stood in for

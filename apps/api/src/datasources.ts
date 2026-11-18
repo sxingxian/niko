@@ -4,7 +4,7 @@
 import { and, eq, isNull, or, sql } from 'drizzle-orm';
 import { appSettings, dataSourceKeys, dataSources, usageCounts, users, type Db } from '@niko/db';
 import {
-  actionUrl, checkValues, cleanActions, cleanWeatherPrefs, OPEN_METEO, weatherOrder, type WeatherPrefs, cleanBaseUrl, cleanDataAccess, cleanDataDefaults, cleanDataPrefs, dataAllowed, DATA_CACHE_S, DATA_LIMITS,
+  actionUrl, checkValues, cleanActions, cleanLivePrefs, type LivePrefs, cleanWeatherPrefs, OPEN_METEO, weatherOrder, type WeatherPrefs, cleanBaseUrl, cleanDataAccess, cleanDataDefaults, cleanDataPrefs, dataAllowed, DATA_CACHE_S, DATA_LIMITS,
   resultText, type DataAction, type DataAuth, type DataDefaults, type DataKeyMode, type DataOffer, type DataSourceInfo, type DataUse,
 } from '@niko/shared';
 import type { Env } from './env';
@@ -172,4 +172,27 @@ export async function saveWeather(db: Db, userId: string, w: Partial<WeatherPref
   const weather = cleanWeatherPrefs({ ...p.weather, ...w, saved: true });
   await db.update(users).set({ dataPrefs: { ...p, weather } as unknown as Record<string, unknown> }).where(eq(users.id, userId));
   return weather;
+}
+
+// ---------------------------------------------------------------- live info (Engine · Live info)
+/** This person's live services (data sources used as live information that they turned on or added), the order for
+ *  everywhere and each country, and their places. */
+export async function liveFor(db: Db, user: Who) {
+  const s = await sourcesFor(db, user);
+  const live = [...s.offered.filter((x) => x.on && (x.info.auth === 'none' || x.info.hasKey)), ...s.mine.filter((x) => x.on)].filter((x) => x.info.use === 'live');
+  const p = s.prefs.live;
+  const ids = live.map((x) => x.row.id);
+  const lists = { everywhere: p.everywhere.filter((id) => ids.includes(id)), countries: Object.fromEntries(Object.entries(p.countries).map(([cc, l]) => [cc, l.filter((id) => ids.includes(id))])) };
+  const usedIn = (id: string) => [...(lists.everywhere.includes(id) ? ['Everywhere'] : []), ...Object.entries(lists.countries).filter(([, l]) => l.includes(id)).map(([cc]) => cc)];
+  return {
+    services: live.map((x) => ({ id: x.row.id, name: x.info.name, what: x.info.actions.filter((a) => a.on).map((a) => a.name).slice(0, 4).join(' · '), own: x.info.own, usedIn: usedIn(x.row.id) })),
+    ...lists, places: p.places, canAdd: s.allowed.own, offered: s.offered.some((x) => x.info.use === 'live'),
+  };
+}
+export async function saveLive(db: Db, userId: string, l: Partial<LivePrefs>) {
+  const fresh = (await db.select({ p: users.dataPrefs }).from(users).where(eq(users.id, userId)).limit(1))[0];
+  const p = cleanDataPrefs(fresh?.p);
+  const live = cleanLivePrefs({ ...p.live, ...l });
+  await db.update(users).set({ dataPrefs: { ...p, live } as unknown as Record<string, unknown> }).where(eq(users.id, userId));
+  return live;
 }

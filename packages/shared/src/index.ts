@@ -441,6 +441,8 @@ export interface Me {
   weather?: boolean;
   /** Engine · Data sources is shown: the plan includes a source or lets them add their own. */
   data?: boolean;
+  /** Engine · Live info is shown: the plan includes a live service or lets them add their own. */
+  live?: boolean;
   /** AI options the admin has turned off for this account (hidden here, refused by the server). */
   aiOff?: string[];
   /** The admin's limits for new items on Home, as they apply to this account. */
