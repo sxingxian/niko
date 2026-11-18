@@ -6,7 +6,7 @@ import { aiAllowed, stripTags, PAGE_SIZES, SEND_COUNTDOWN_SECONDS, voiceName, vo
 /** The first voice this account may use (the admin may have turned some off); the device voice if none. */
 const firstVoice = (m: Me | null | undefined) => { const off = m?.aiOff ?? []; return off.includes('sec:voices') ? 'device' : voiceOrder(m?.engine).find((v) => v.startsWith('vkey:') || aiAllowed(off, voiceOption(v))) ?? 'device'; };
 import { Backdrop, api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
-import { useNiko, type FollowUp, type KnowledgeAnswer } from '../niko';
+import { useNiko, type DataUsed, type FollowUp, type KnowledgeAnswer } from '../niko';
 import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
 import { isStacked } from '../flow';
 import { PictureCard } from './Picture';
@@ -199,6 +199,21 @@ function KnowledgeCard({ reply, kn, tabbable, onCorrect }: { reply: string; kn: 
   );
 }
 
+const timeOf = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+/** Where an answer's data came from: each source and what was asked, when, and the credit its terms ask for. */
+function DataCard({ items }: { items: DataUsed[] }) {
+  const latest = Math.max(...items.map((d) => d.at));
+  return (
+    <section className="g kn-src" aria-label="Data sources">
+      <span className="k">{items.length === 1 ? 'Source' : 'Sources'} · {timeOf(latest)}</span>
+      <ol className="kn-src-list">{items.map((d, i) => (
+        <li key={i}><span className="kn-src-n app">{i + 1}</span><span className="kn-src-t"><b>{d.source} · {d.action}</b><span>{[d.live ? 'Live' : `As of ${timeOf(d.at)}`, d.attribution].filter(Boolean).join(' · ')}</span></span></li>
+      ))}</ol>
+      <span className="kn-src-note">Niko only asks a source what its actions allow.</span>
+    </section>
+  );
+}
+
 export function Home() {
   const n = useNiko();
   const wide = useWide();
@@ -321,7 +336,7 @@ export function Home() {
             {shown.wx ? <WeatherCard card={shown.wx} onClose={n.dismissReply} tabbable={open} /> : (
             <section className="g">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span className="k" style={n.voiceNote?.for === shown.reply && !n.quiet ? { color: '#a8f0c6' } : undefined}>{n.voiceNote?.for === shown.reply && !n.quiet ? 'Niko · that was you' : n.quiet ? `Niko · quiet${n.quiet.why === 'meeting' ? ` · ${n.quiet.title ?? 'meeting'} now` : ''}` : shown.kn?.only || (n.knowledge?.for === shown.reply && n.knowledge.k.taught) ? 'Niko · from your files' : shown.kn?.lead ? 'Niko · your files lead' : 'Niko'}</span>
+                <span className="k" style={(n.voiceNote?.for === shown.reply || n.dataUsed?.for === shown.reply) && !n.quiet ? { color: '#a8f0c6' } : undefined}>{n.voiceNote?.for === shown.reply && !n.quiet ? 'Niko · that was you' : n.dataUsed?.for === shown.reply && !n.quiet ? (n.dataUsed.items.some((d) => d.live) ? 'Niko · live data' : 'Niko · data site') : n.quiet ? `Niko · quiet${n.quiet.why === 'meeting' ? ` · ${n.quiet.title ?? 'meeting'} now` : ''}` : shown.kn?.only || (n.knowledge?.for === shown.reply && n.knowledge.k.taught) ? 'Niko · from your files' : shown.kn?.lead ? 'Niko · your files lead' : 'Niko'}</span>
                 <button className="ib" style={{ width: 44, height: 44, margin: '-8px -10px -8px 0' }} onClick={n.dismissReply} aria-label="Hide the answer" tabIndex={open ? 0 : -1}><Icon name="x" /></button>
               </div>
               <p className="reply"><Words text={shown.reply} start={wide ? 1.0 : 0.35} /></p>
@@ -330,6 +345,12 @@ export function Home() {
             )}
             <Outline />
           </div>
+          {n.dataUsed?.for === shown.reply && !shown.kn && !followFor(n.followUp, shown.reply) && (
+            <div className="card-build" style={{ ['--d' as string]: `${CARD_GAP}s` }}>
+              <DataCard items={n.dataUsed.items} />
+              <Outline />
+            </div>
+          )}
           {(shown.kn || followFor(n.followUp, shown.reply)) && (
             <div className="card-build" style={{ ['--d' as string]: `${CARD_GAP}s` }}>
               <KnowledgeCard reply={shown.reply} kn={n.knowledge?.for === shown.reply ? n.knowledge.k : shown.kn} tabbable={open} onCorrect={() => { setText('No, '); setTyping(true); }} />

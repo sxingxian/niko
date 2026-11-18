@@ -457,3 +457,27 @@ body { background: #07090d; }
 .kn-sel { width: 180px; height: 44px; border-radius: 14px; font-size: 14px; }
 .kn-foot { margin-top: 14px; font-size: 12px; line-height: 1.5; }
 @media (max-width: 900px) { .shell main header.kn-adm-head { flex-direction: column; align-items: stretch; } .kn-db { width: auto; } }
+
+/* ---------------------------------------------------------------- Data sources */
+.dsa-tabs { display: flex; gap: 6px; }
+.dsa-table { display: flex; flex-direction: column; }
+.dsa-tr { display: grid; grid-template-columns: minmax(0, 1.3fr) 110px minmax(0, 1fr) minmax(0, 1fr) 44px; gap: 16px; align-items: center; min-height: 64px; border-top: 1px solid rgba(255,255,255,.1); }
+.dsa-tr.head { min-height: 34px; border-top: 0; }
+.dsa-tr.head .k { font-size: 11px; }
+.dsa-t { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.dsa-t b { font-weight: 500; }
+.dsa-t .sub { font-size: 12px; }
+.dsa-c { font-size: 13px; color: #e6eaf1; }
+.dsa-terms { display: flex; align-items: center; gap: 8px; font: 400 13px system-ui, sans-serif; color: #ffb86b; }
+.dsa-terms i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+.dsa-terms.is-ok { color: #7fe3a8; }
+.dsa-more { position: relative; justify-self: end; }
+.dsa-menu { position: absolute; right: 0; top: 40px; z-index: 5; display: flex; flex-direction: column; padding: 6px; border-radius: 14px; background: #11161e; min-width: 140px; }
+.dsa-menu button { height: 40px; padding: 0 12px; border: 0; border-radius: 10px; background: transparent; color: #fff; text-align: left; cursor: pointer; font: inherit; font-size: 14px; }
+.dsa-menu button:hover { background: rgba(255,255,255,.08); }
+.dsa-menu button.danger { color: #ff9b9b; }
+.dsa-tests { padding: 0 0 14px; }
+.dsa-empty { display: flex; flex-direction: column; gap: 8px; padding: 28px; border-radius: 18px; border: 1px dashed rgba(255,255,255,.25); align-items: center; text-align: center; }
+.dsa-empty b { font-weight: 500; font-size: 18px; }
+.dsa-gh { color: #fff !important; padding: 16px 0 4px; }
+@media (max-width: 900px) { .dsa-tr { grid-template-columns: minmax(0, 1fr) auto; } .dsa-tr > :nth-child(2), .dsa-tr > :nth-child(3) { display: none; } .dsa-tr.head { display: none; } }

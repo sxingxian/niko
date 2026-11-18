@@ -59,6 +59,11 @@ export const users = pgTable('users', {
   knowledge: jsonb('knowledge').notNull().default({}).$type<Record<string, unknown>>(),
   /** This account's changes to the admin's default Knowledge limits. Set by an admin only. */
   knowledgeLimits: jsonb('knowledge_limits').notNull().default({}).$type<Record<string, unknown>>(),
+  // ---- data sources (see migration 0016)
+  /** The admin's changes to the data-source defaults for this person. Set by an admin only. */
+  dataAccess: jsonb('data_access').notNull().default({}).$type<Record<string, unknown>>(),
+  /** This person's own choices on Engine · Data sources. */
+  dataPrefs: jsonb('data_prefs').notNull().default({}).$type<Record<string, unknown>>(),
   createdAt: ts('created_at').notNull().defaultNow(),
   lastActiveAt: ts('last_active_at'),
 });
@@ -282,6 +287,31 @@ export const providedKeys = pgTable('provided_keys', {
   createdAt: ts('created_at').notNull().defaultNow(),
   updatedAt: ts('updated_at').notNull().defaultNow(),
 });
+/** Data sites Niko may ask: added by the admin (ownerId null) or by one person for themselves. */
+export const dataSources = pgTable('data_sources', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  ownerId: uuid('owner_id'),
+  name: text('name').notNull(),
+  useAs: text('use_as').notNull().default('general'),
+  baseUrl: text('base_url').notNull(),
+  auth: text('auth').notNull().default('none'),
+  authName: text('auth_name').notNull().default(''),
+  keyMode: text('key_mode').notNull().default('one'),
+  keyEnc: text('key_enc'),
+  actions: jsonb('actions').notNull().default([]).$type<unknown[]>(),
+  termsOk: boolean('terms_ok').notNull().default(false),
+  termsNote: text('terms_note').notNull().default(''),
+  attribution: text('attribution').notNull().default(''),
+  offer: text('offer').notNull().default('nobody'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+/** A person's own key for an admin source that asks each person to add theirs. */
+export const dataSourceKeys = pgTable('data_source_keys', {
+  sourceId: uuid('source_id').notNull(),
+  userId: uuid('user_id').notNull(),
+  keyEnc: text('key_enc').notNull(),
+}, (t) => [primaryKey({ columns: [t.sourceId, t.userId] })]);
 /** How much each person used each month, per kind and service: one number, never what was said. */
 export const usageCounts = pgTable('usage_counts', {
   userId: uuid('user_id').notNull(),

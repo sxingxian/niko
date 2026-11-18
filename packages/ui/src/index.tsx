@@ -5,6 +5,7 @@ import { runBackground, type BackgroundHandle } from './backgrounds';
 export { sampleDesign } from './designs';
 
 export * from './core';
+export * from './dataSource';
 
 /** Starts the chosen design on a canvas: Nebula is the original core (startCore); the others come from designs.js and
  * behave the same way (states, voice level, sideways shift, the shared hue). */

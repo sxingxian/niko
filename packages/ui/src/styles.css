@@ -192,3 +192,60 @@ html { -webkit-tap-highlight-color: transparent; }
   .srow-c:has(select) { flex: 1 1 100%; }
   .segs-b { padding: 0 12px; font-size: 13px; }
 }
+
+/* ---------------------------------------------------------------- data sources: the add/change form (app and admin) */
+dialog.ds-sheet { border: 1px solid rgba(255,255,255,.2); border-radius: 28px; background: #0c1018; color: #fff; padding: 26px; width: min(720px, calc(100% - 24px)); max-height: calc(100dvh - 32px); overflow-y: auto; box-shadow: 0 30px 80px rgba(0,0,0,.6); }
+dialog.ds-sheet::backdrop { background: rgba(4,5,10,.6); }
+.ds-sheet-in { display: flex; flex-direction: column; gap: 16px; }
+.ds-sheet-h { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.ds-sheet-h b { font-weight: 500; font-size: 20px; }
+.ds-steps { display: flex; gap: 6px; flex-wrap: wrap; }
+.ds-steps button { height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,.2); background: transparent; color: #c3cad6; font-size: 13px; cursor: pointer; }
+.ds-steps button[aria-current='step'] { background: #fff; color: #05070d; border-color: #fff; }
+.ds-steps button:disabled { opacity: .45; cursor: default; }
+.ds-step { display: flex; flex-direction: column; gap: 12px; }
+.ds-step .in { height: 44px; font-size: 14px; }
+.ds-step select.in { background: #11161e; }
+.ds-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ds-hint { font: 400 12px/1.45 system-ui, sans-serif; color: #b9c2cf; }
+.ds-err { margin: 0; font: 400 13px system-ui, sans-serif; color: #ffb3aa; }
+.ds-row-b { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ds-row-b .sec, .ds-row-b .pri, .ds-end .sec, .ds-end .pri { height: 44px; font-size: 14px; padding: 0 18px; }
+.ds-row-b .sm { height: 38px; font-size: 13px; padding: 0 14px; }
+.ds-grow { flex: 1; }
+.ds-end { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 4px; }
+.ds-end .left { margin-right: auto; }
+.ds-check { display: flex; align-items: flex-start; gap: 10px; font: 400 14px/1.45 system-ui, sans-serif; color: #e6eaf1; cursor: pointer; }
+.ds-check input { margin-top: 3px; width: 16px; height: 16px; accent-color: #fff; flex: none; }
+.ds-check.sm { font-size: 12px; align-items: center; } .ds-check.sm input { margin-top: 0; }
+.ds-edit { display: flex; flex-direction: column; gap: 10px; padding: 16px; border-radius: 18px; background: rgba(0,0,0,.28); border: 1px solid rgba(255,255,255,.14); }
+.ds-param { display: grid; grid-template-columns: 1.1fr .9fr 1.1fr 1.2fr 1fr auto 32px; gap: 6px; align-items: center; }
+.ds-param .in { height: 40px; font-size: 13px; padding: 0 10px; }
+.ds-mm { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.ds-x { width: 32px; height: 32px; border-radius: 50%; border: 1px solid rgba(255,255,255,.2); background: transparent; color: #c3cad6; cursor: pointer; font-size: 16px; line-height: 1; }
+.ds-x:hover { color: #fff; border-color: rgba(255,255,255,.5); }
+.ds-lnk { border: 0; background: transparent; color: #9fdcf3; font-size: 13px; cursor: pointer; padding: 6px 4px; }
+.ds-actions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.ds-actions li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid rgba(255,255,255,.08); }
+.ds-actions li.off { opacity: .55; }
+.ds-a-t { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 15px; }
+.ds-a-t .ds-hint { overflow-wrap: anywhere; }
+.ds-a-b { display: flex; gap: 8px; align-items: center; }
+.ds-tag { font: 500 11px 'JetBrains Mono', monospace; letter-spacing: .06em; padding: 3px 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,.25); background: transparent; color: #e6eaf1; white-space: nowrap; cursor: pointer; }
+span.ds-tag { cursor: default; }
+.ds-tag.keep { color: #a8f0c6; border-color: rgba(168,240,198,.5); }
+.ds-tests { display: flex; flex-direction: column; gap: 8px; padding: 14px; border-radius: 16px; background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.12); font: 400 14px system-ui, sans-serif; }
+.ds-tests span { display: flex; align-items: center; gap: 8px; }
+.ds-tests i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.ds-tests .is-ok { color: #a8f0c6; } .ds-tests .is-ok i { background: #a8f0c6; }
+.ds-tests .is-bad { color: #ffd38a; } .ds-tests .is-bad i { background: #ffd38a; }
+.ds-radios { display: flex; flex-direction: column; gap: 10px; }
+.ds-radios label { display: flex; align-items: center; gap: 10px; font-size: 15px; cursor: pointer; }
+.ds-radios input { width: 16px; height: 16px; accent-color: #fff; }
+@media (max-width: 700px) {
+  dialog.ds-sheet { padding: 20px 16px; border-radius: 24px; }
+  .ds-two { grid-template-columns: 1fr; }
+  .ds-param { grid-template-columns: 1fr 1fr; }
+  .ds-param .ds-x { justify-self: end; }
+  .ds-actions li { grid-template-columns: 1fr; }
+}
