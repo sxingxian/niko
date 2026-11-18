@@ -71,8 +71,10 @@ export interface KnowledgePrefs {
   telegram: boolean;
   /** Reply drafts can use Knowledge (off keeps drafts quick: they read only the message). */
   drafts: boolean;
+  /** How many files are kept in Niko, kept here by the server so an account without files never asks Knowledge. */
+  files: number;
 }
-export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false };
+export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false, files: 0 };
 const isMode = (v: unknown): v is KnMode => v === 'files' || v === 'only' || v === 'off';
 /** How Niko answers from one collection. */
 export const knModeOf = (p: KnowledgePrefs, collection: string): KnMode => p.modes[collection] ?? p.mode;
@@ -87,6 +89,7 @@ export function cleanKnowledgePrefs(v: unknown): KnowledgePrefs {
     search: o.search === 'device' ? 'device' : d.search,
     telegram: typeof o.telegram === 'boolean' ? o.telegram : d.telegram,
     drafts: typeof o.drafts === 'boolean' ? o.drafts : d.drafts,
+    files: typeof o.files === 'number' && Number.isInteger(o.files) && o.files >= 0 ? o.files : d.files,
   };
 }
 
@@ -103,3 +106,33 @@ export type KnColType = 'text' | 'number' | 'date' | 'yesno';
 export const KN_COL_TYPES: KnColType[] = ['text', 'number', 'date', 'yesno'];
 export const KN_COL_TYPE_NAMES: Record<KnColType, string> = { text: 'Text', number: 'Number', date: 'Date', yesno: 'Yes / no' };
 export interface KnColumn { name: string; type: KnColType }
+
+// ---------------------------------------------------------------- answering from files
+/** How close (0 to 1, from Cloudflare's search numbers) a piece must be for a file to lead the answer, and to be
+ *  offered at all. bge-m3 puts unrelated text around 0.3 to 0.45 and a real answer usually above 0.6. */
+export const KN_LEAD = 0.62;
+export const KN_SIMILAR = 0.48;
+/** "From my files", "according to my handbook", "in my Knowledge": the person wants their files only, this once. */
+export function askedFromFiles(text: string, collections: string[] = []): boolean {
+  if (/\b(from|in|using|according to|based on|check|search|look in)\s+(my|our)\s+(own\s+)?(files?|knowledge|documents?|docs|notes|records|handbook|spreadsheets?|sheets?)\b/i.test(text)) return true;
+  const t = text.toLowerCase();
+  return collections.some((c) => c.length > 2 && c.toLowerCase() !== 'general' && new RegExp(`\\b(from|in|according to)\\s+(my|our|the)\\s+${c.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(t));
+}
+
+/** A look-up Niko asks for in a spreadsheet, as [[table:T1|sum|Spend|Active=Yes;Region~north]]. Only these operations
+ *  exist, run by Niko's own code; the AI never writes a query itself. */
+export type KnTableOp = 'count' | 'sum' | 'avg' | 'min' | 'max' | 'list';
+export type KnCmp = '=' | '!=' | '~' | '>' | '<' | '>=' | '<=';
+export interface KnTableAsk { table: string; op: KnTableOp; column: string; filters: { column: string; cmp: KnCmp; value: string }[] }
+const TABLE_TAG = /\[\[table:(T\d{1,2})\|(count|sum|avg|min|max|list)\|([^|\]\n]{1,120})(?:\|([^\]\n]{0,400}))?\]\]/gi;
+export function tableTags(reply: string): KnTableAsk[] {
+  const out: KnTableAsk[] = [];
+  for (const m of reply.matchAll(TABLE_TAG)) {
+    if (out.length >= 3) break;
+    const filters = (m[4] ?? '').split(';').map((f) => /^\s*([^=!~<>]{1,120}?)\s*(!=|>=|<=|=|~|>|<)\s*(.{0,200}?)\s*$/.exec(f)).filter((x): x is RegExpExecArray => !!x)
+      .slice(0, 5).map((x) => ({ column: x[1]!.trim(), cmp: x[2] as KnCmp, value: x[3]!.trim().replace(/^["']|["']$/g, '') }));
+    out.push({ table: m[1]!.toUpperCase(), op: m[2]!.toLowerCase() as KnTableOp, column: m[3]!.trim(), filters });
+  }
+  return out;
+}
+export const stripTableTags = (reply: string) => reply.replace(TABLE_TAG, '').trim();

@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, sessions, users, type Db } from '@niko/db';
-import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, type MapAskMode, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource, type WeatherCard, plainText, stripTags } from '@niko/shared';
+import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, type MapAskMode, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource, type WeatherCard, plainText, stripTags, cleanKnowledgePrefs, knowledgeAccess, stripTableTags, tableTags } from '@niko/shared';
 import { accessState, APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -30,6 +30,7 @@ import { designs } from './designs';
 import { designFor } from '../designs';
 import { backgrounds } from './backgrounds';
 import { knowledge } from './knowledge';
+import { knowledgeDb, knowledgeFor, lookupSheet, type KnContext } from '../knowledge';
 import { backgroundFor } from '../backgrounds';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
@@ -880,7 +881,7 @@ function screenText(v: unknown): string {
   return `<SCREEN>\nRoute from ${clean(m.from, 120) || 'the user’s location'} to ${clean(m.to, 120)} by ${mode}: about ${mins} min, ${km.toFixed(1)} km.${lines.length ? `\nSteps:\n${lines.join('\n')}` : ''}\n</SCREEN>\n`;
 }
 app.post('/chat', async (c) => {
-  const b = await c.req.json<{ message?: string; tz?: number; purpose?: string; where?: unknown; screen?: unknown }>();
+  const b = await c.req.json<{ message?: string; tz?: number; purpose?: string; where?: unknown; screen?: unknown; provider?: string }>();
   const text = String(b.message ?? '').trim().slice(0, b.purpose === 'draft' ? 5000 : 2000); // a draft being rewritten is sent along with the request
   // A draft for the workspace is a one-off: it neither sees nor joins the spoken conversation.
   const oneOff = b.purpose === 'draft';
@@ -913,11 +914,21 @@ app.post('/chat', async (c) => {
     } catch (e) { console.warn(`weather: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
   }
   const off = await offFor(db, u);
+  // Knowledge: the person's own files, when they have any and their plan includes it. Reply drafts use them only when
+  // the person chose that (Telegram replies and other drafts each have their own switch). A problem here never stops
+  // the answer: Niko just answers without files.
+  let kn: KnContext | null = null;
+  const knPrefs = cleanKnowledgePrefs((u as { knowledge?: unknown }).knowledge);
+  const knAccess = knowledgeAccess((x) => aiAllowed(off, x));
+  const knDraftOk = /^telegram/.test(String(b.provider ?? '')) ? knPrefs.telegram : knPrefs.drafts;
+  const kdb = knAccess.niko && knPrefs.files > 0 && (!oneOff || knDraftOk) ? knowledgeDb(c.env) : null;
+  if (kdb) kn = await knowledgeFor(kdb, c.env, u.id, text, { prefs: knPrefs, cloudflare: knAccess.cloudflareSearch && knPrefs.search === 'cloudflare' })
+    .catch((e) => { console.warn(`knowledge: ${String((e as Error)?.message ?? e).slice(0, 200)}`); return null; });
   const mapRule = oneOff ? '' : !mapsOn(off) ? NOT_ON_ACCOUNT_MAP_RULE : await mapsUsable(c.env, db, u, off) ? MAP_RULE : NO_MAP_RULE;
   const wxRule = wx ? `\n${WEATHER_RULE}${weather ? '' : '\nNo forecast for the user’s own location is given. If they ask about the weather where they are, say their location is off, and that they can allow it in the browser or set a home place for Open-Meteo in Connections.'}` : '';
   const onScreen = oneOff ? '' : screenText(b.screen);
   const msgs = [
-    { role: 'system', content: `${onScreen}${SYSTEM}${oneOff ? '\nThis request is for the text of a message the user will send: write only that text, and never any [[…]] tag (no screen, scroll, page, map or picture tags).' : `\n${off.includes('sec:images') ? NOT_ON_ACCOUNT_IMAGE_RULE : imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}\n${mapRule}`}${wxRule}${onScreen ? `\n${STEPS_RULE}` : ''}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${weather}` },
+    { role: 'system', content: `${onScreen}${SYSTEM}${oneOff ? '\nThis request is for the text of a message the user will send: write only that text, and never any [[…]] tag (no screen, scroll, page, map or picture tags).' : `\n${off.includes('sec:images') ? NOT_ON_ACCOUNT_IMAGE_RULE : imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}\n${mapRule}`}${wxRule}${onScreen ? `\n${STEPS_RULE}` : ''}${kn ? `\n${kn.rules}` : ''}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${kn ? `\n${kn.block}` : ''}${weather}` },
     ...history.map((h) => ({ role: h.role, content: h.content })),
     { role: 'user', content: text },
   ];
@@ -925,6 +936,18 @@ app.post('/chat', async (c) => {
   let reply = '', used = 'workers-ai', first = 'workers-ai';
   try {
     ({ reply, used, first } = await think(c.env, db, u, msgs, off));
+    // Niko asked to count, add up or list rows in a spreadsheet: run the look-ups and ask again with the results.
+    const asks = kn && kdb && Object.keys(kn.tables).length ? tableTags(reply) : [];
+    if (asks.length) {
+      const results = await Promise.all(asks.map(async (a) => {
+        const id = kn!.tables[a.table];
+        try { return id ? await lookupSheet(kdb!, u.id, id, a) : `There is no table ${a.table}.`; }
+        catch (e) { console.warn(`knowledge table: ${String((e as Error)?.message ?? e).slice(0, 200)}`); return `The look-up in ${a.table} couldn’t be done just now.`; }
+      }));
+      const again = [{ ...msgs[0]!, content: `${msgs[0]!.content}\n<TABLE RESULTS>\n${results.join('\n')}\n</TABLE RESULTS>\nAnswer now from these results; do not use the table tag again.` }, ...msgs.slice(1)];
+      ({ reply, used, first } = await think(c.env, db, u, again, off));
+    }
+    reply = stripTableTags(reply);
     // Niko asked for the weather somewhere else: look the places up and ask again with their forecasts.
     const asked = wx ? weatherTags(reply) : [];
     if (asked.length) {
@@ -950,7 +973,8 @@ app.post('/chat', async (c) => {
   else reply = plainText(reply) || reply;
   if (!oneOff) await db.insert(chatTurns).values([{ userId: u.id, role: 'user', content: text }, { userId: u.id, role: 'assistant', content: reply }]);
   const card = wxCard ? await (wxCard as Promise<WeatherCard | null>) : null;
-  return c.json({ reply, engine: used, switched: used !== first, ...(oneOff ? {} : { brief }), ...(card ? { weather: card } : {}) });
+  const knowledge = kn && !oneOff && kn.sources.length ? { lead: kn.lead, only: kn.only, sources: kn.sources.slice(0, 4).map(({ n, file, heading, collection }) => ({ n, file, heading, collection })) } : null;
+  return c.json({ reply, engine: used, switched: used !== first, ...(oneOff ? {} : { brief }), ...(card ? { weather: card } : {}), ...(knowledge ? { knowledge } : {}) });
 });
 
 // ---------------------------------------------------------------- sending, with the countdown rule enforced here

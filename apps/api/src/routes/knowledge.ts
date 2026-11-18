@@ -27,6 +27,14 @@ const fail = (c: C, e: unknown) => {
   if (e instanceof KnError) return c.json({ error: e.message, ...e.extra }, e.status);
   throw e;
 };
+/** Keeps the number of files with the account (main database), so answering never asks Knowledge for an account that
+ *  has no files. */
+async function syncCount(c: C, k: Kdb) {
+  const u = c.get('user');
+  const files = (await usage(k, u.id)).files;
+  const prefs = { ...cleanKnowledgePrefs((u as { knowledge?: unknown }).knowledge), files };
+  await c.get('db').update(users).set({ knowledge: prefs as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
+}
 /** Files kept in Niko need the Knowledge database, Knowledge files and the Niko place. */
 async function store(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: KnowledgePrefs } | Response> {
   const k = knowledgeDb(c.env);
@@ -52,7 +60,9 @@ knowledge.put('/prefs', async (c) => {
   const u = c.get('user');
   const { access } = await who(c);
   if (!access.files) return c.json({ error: NOT_ON_ACCOUNT }, 403);
-  const prefs = cleanKnowledgePrefs({ ...cleanKnowledgePrefs((u as { knowledge?: unknown }).knowledge), ...b });
+  const before = cleanKnowledgePrefs((u as { knowledge?: unknown }).knowledge);
+  // The file count is kept by the server, never taken from the request.
+  const prefs = { ...cleanKnowledgePrefs({ ...before, ...b }), files: before.files };
   // A choice the account doesn't have is kept to what it does have.
   if (prefs.place === 'niko' && !access.niko && access.device) prefs.place = 'device';
   if (prefs.place === 'device' && !access.device && access.niko) prefs.place = 'niko';
@@ -103,6 +113,7 @@ knowledge.post('/files/:id/done', async (c) => {
   const s = await store(c); if (s instanceof Response) return s;
   try {
     const r = await finishFile(s.k, c.get('user').id, c.req.param('id'));
+    await syncCount(c, s.k);
     await audit(c, 'knowledge.file-added', { pieces: r.pieces }, c.get('user').id);
     return c.json({ ok: true, ...r });
   } catch (e) { return fail(c, e); }
@@ -133,7 +144,7 @@ knowledge.patch('/files/:id', async (c) => {
 knowledge.delete('/files/:id', async (c) => {
   const s = await store(c); if (s instanceof Response) return s;
   const gone = await deleteFile(s.k, c.get('user').id, c.req.param('id'));
-  if (gone) await audit(c, 'knowledge.file-removed', {}, c.get('user').id);
+  if (gone) { await syncCount(c, s.k); await audit(c, 'knowledge.file-removed', {}, c.get('user').id); }
   return c.json({ ok: true });
 });
 
