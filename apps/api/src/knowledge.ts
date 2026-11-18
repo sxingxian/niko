@@ -16,14 +16,36 @@ import {
 } from '@niko/shared';
 import type { Env } from './env';
 
-/** The Knowledge database: plain SQL with parameters, nothing else. Tests stand in a local PostgreSQL. */
-export interface Kdb { q<T = Record<string, unknown>>(text: string, params?: unknown[]): Promise<T[]> }
+/** The Knowledge database: plain SQL with parameters, nothing else. Tests stand in a local PostgreSQL.
+ *  Row-level security (knowledge migration 0006) lets each query see only one account's rows: `as(account)` gives a
+ *  connection that, in the same transaction as every query, switches to a role that can't bypass it and sets
+ *  niko.account, so even a query missing its "account_id = $1" can't read another person's files. The plain
+ *  connection is the owner's, for the admin's counts and work across accounts. */
+export interface Kdb { q<T = Record<string, unknown>>(text: string, params?: unknown[]): Promise<T[]>; as?: (account: string) => Kdb }
 export function knowledgeDb(env: Pick<Env, 'KNOWLEDGE_DATABASE_URL'>): Kdb | null {
   const url = env.KNOWLEDGE_DATABASE_URL?.trim();
   if (!url) return null;
   const sql = neon(url);
-  return { q: async <T>(text: string, params: unknown[] = []) => (await sql.query(text, params)) as T[] };
+  // One person's queries: the restricted role (which can't bypass row-level security, unlike Neon's owner role), the
+  // account, and the query, in one request as one transaction, so neither can leak to another query.
+  const as = (account: string): Kdb => {
+    if (!/^[0-9a-f-]{36}$/.test(account)) throw new Error('knowledge: not an account id');
+    return {
+      q: async <T>(text: string, params: unknown[] = []) => {
+        const res = await sql.transaction([sql.query('set local role niko_kn_app'), sql.query(`select set_config('niko.account', $1, true)`, [account]), sql.query(text, params)]);
+        return res[2] as T[];
+      },
+      as,
+    };
+  };
+  // The owner's connection: migrations, the admin's counts and work across accounts.
+  return { q: async <T>(text: string, params: unknown[] = []) => (await sql.query(text, params)) as T[], as };
 }
+/** One person's view of the Knowledge database (see Kdb). */
+export const accountKnowledge = (env: Pick<Env, 'KNOWLEDGE_DATABASE_URL'>, account: string): Kdb | null => {
+  const k = knowledgeDb(env);
+  return k?.as ? k.as(account) : k;
+};
 
 /** A problem to show the person as it is. */
 export class KnError extends Error {

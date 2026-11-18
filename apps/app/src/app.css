@@ -1300,3 +1300,11 @@ a.bt { text-decoration: none; display: inline-flex; align-items: center; justify
   .kn-store-b { flex-direction: column; align-items: stretch; }
   .kn-store-acts > * { flex: 1; }
 }
+/* Removing a file kept elsewhere: what to do with its copy. */
+.kn-opts { display: flex; flex-direction: column; gap: 10px; }
+.kn-opt { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border-radius: 14px; border: 1px solid rgba(255,255,255,.16); cursor: pointer; }
+.kn-opt.on { border-color: #9fdcf3; }
+.kn-opt input { margin-top: 3px; width: 18px; height: 18px; accent-color: #9fdcf3; flex: none; }
+.kn-opt > span { display: flex; flex-direction: column; gap: 3px; }
+.kn-opt-t { font-size: 15px; }
+.kn-dlg-b .pri.danger { background: #ffb3a8; border-color: #ffb3a8; color: #2a0905; }

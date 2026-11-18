@@ -1521,7 +1521,9 @@ await ok('a service out of its daily quota is skipped until it resets; the skip 
   assert.equal(r.status, 200, JSON.stringify(r.data)); assert.match(r.data.reply, /included key/); // the Groq stand-in's answer
   assert.deepEqual(aiCalls.map((c) => c.host), ['api.mistral.ai', 'api.groq.com'], 'one after the other');
   const e = (await user('nur@example.com')).engine;
-  assert.ok(e.rest[`key:${k1}`].until - Date.now() > 3_600_000, 'skipped for hours, not 31 seconds');
+  // Until the daily reset (UTC midnight, plus half a minute), not 31 seconds; just before midnight that's under an hour.
+  const reset = (() => { const d = new Date(); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1); })();
+  assert.ok(e.rest[`key:${k1}`].until >= reset, 'skipped until the daily reset, not 31 seconds');
   const { rest: _r, ...after } = e, { rest: _b, ...was } = before;
   assert.deepEqual(after, was, 'other settings untouched');
   aiCalls.length = 0;

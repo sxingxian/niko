@@ -8,7 +8,7 @@ import { aiAllowed, cleanKnowledgePrefs, datasetTable, DATA_REFRESH_MS, knowledg
 import type { Env } from './env';
 import { offFor } from './access';
 import { DataProblem, fetchWhole, sourcesFor, type SourceRow } from './datasources';
-import { addPieces, addSheet, deleteFile, finishFile, knowledgeDb, limitsFor, startFile, usage, type Kdb } from './knowledge';
+import { accountKnowledge, addPieces, addSheet, deleteFile, finishFile, knowledgeDb, limitsFor, startFile, usage, type Kdb } from './knowledge';
 import { sha256 } from './lib/crypto';
 
 type Who = { id: string; role: string; aiAccess?: unknown; dataAccess?: unknown; dataPrefs?: unknown; knowledge?: unknown; knowledgeLimits?: unknown };
@@ -20,7 +20,7 @@ export async function datasetsOk(env: Env, db: Db, user: Who): Promise<Kdb | nul
   const off = await offFor(db, user as { role: string; aiAccess?: unknown });
   const access = knowledgeAccess((k) => aiAllowed(off, k));
   if (!access.files || !access.niko || knPlaceOf(cleanKnowledgePrefs(user.knowledge), access) !== 'niko') return null;
-  return knowledgeDb(env);
+  return accountKnowledge(env, user.id);
 }
 export async function datasetsOf(db: Db, userId: string) {
   return db.select().from(dataDatasets).where(eq(dataDatasets.userId, userId));
@@ -63,7 +63,7 @@ export async function importDataset(env: Env, db: Db, user: Who, k: Kdb, row: So
 export async function removeDatasets(env: Env, db: Db, userId: string, sourceId: string): Promise<void> {
   const rows = await db.select().from(dataDatasets).where(and(eq(dataDatasets.userId, userId), eq(dataDatasets.sourceId, sourceId)));
   if (!rows.length) return;
-  const k = knowledgeDb(env);
+  const k = accountKnowledge(env, userId);
   if (k) {
     const ids = rows.map((r) => r.documentId).filter((x): x is string => !!x);
     if (ids.length) await k.q(`delete from kn_documents where account_id = $1 and id = any($2::uuid[])`, [userId, ids]).catch(() => undefined);

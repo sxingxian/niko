@@ -1,7 +1,7 @@
 // Splitting Knowledge into the pieces Niko searches and the tables it counts with. The browser does this when a file
 // is added (so the free Workers plan's CPU allowance is enough); the server does the same when a file kept in Notion,
 // Google Drive, OneDrive or their own storage was changed there and is read again.
-import { KN_PIECE_CHARS, KN_SHEET_CELL_CHARS, KN_SHEET_MAX_COLS, KN_SHEET_MAX_ROWS, KN_SHEET_ROW_PIECES_MAX, type KnColType, type KnColumn } from './knowledge';
+import { KN_PIECE_CHARS, KN_SHEET_CELL_CHARS, KN_SHEET_MAX_COLS, KN_SHEET_MAX_ROWS, KN_SHEET_ROW_PIECES_MAX, knIsSheet, type KnColType, type KnColumn, type KnKind } from './knowledge';
 
 export interface Piece { heading: string | null; body: string }
 export interface Sheet { name: string; columns: KnColumn[]; rows: string[][]; header: boolean }
@@ -196,3 +196,37 @@ const csvCell = (v: string) => {
 };
 /** A sheet as CSV, with its column names as the first row. */
 export const sheetCsv = (columns: { name: string }[], rows: string[][]) => [columns.map((c) => c.name), ...rows].map((r) => r.map((c) => csvCell(c ?? '')).join(',')).join('\r\n') + '\r\n';
+
+// ---------------------------------------------------------------- reading safely
+/** XML that declares entities or points at outside files (a DOCTYPE with ENTITY, SYSTEM or PUBLIC) can blow up when
+ *  expanded or reach outside the file, so it isn't read at all. */
+export function xmlProblem(text: string): string | null {
+  const head = text.slice(0, 200_000);
+  const doctype = /<!DOCTYPE[\s\S]*?(\[[\s\S]*?\]\s*)?>/i.exec(head)?.[0] ?? '';
+  return /<!ENTITY|\bSYSTEM\b|\bPUBLIC\b/i.test(doctype) || /<!ENTITY/i.test(head)
+    ? 'That XML file declares entities or points at other files, which Niko doesn’t read, for safety. Save it without its DOCTYPE and add it again.'
+    : null;
+}
+/** What reading a file gives, before it's sent to Niko or kept on the device. */
+export interface PreparedText { pieces: Piece[]; sheets: Sheet[]; flagged: boolean; text: string }
+/**
+ * The CPU-heavy part of reading a file, from its text: CSV and TSV become sheets, JSON lists become sheets (anything
+ * else, path lines), Markdown and plain text are split under their headings, and Cloudflare's text of a spreadsheet
+ * gives its tables. HTML and XML are turned into Markdown first (that needs the browser's DOMParser), then come here
+ * as 'md'. Runs in a background thread in the browser (apps/app/src/knowledgeRead.worker.ts), and on the server when
+ * splitting there is switched on.
+ */
+export function prepareText(kind: KnKind, name: string, raw: string, fromCloudflare = false): PreparedText {
+  let text = '';
+  let sheets: Sheet[] = [];
+  const base = name.replace(/\.[^.]+$/, '');
+  if (fromCloudflare) {
+    text = raw;
+    if (knIsSheet(kind)) { sheets = markdownTables(text).map((t) => toSheet(t.name, t.rows)); if (sheets.length) text = ''; }
+  } else if (kind === 'csv' || kind === 'tsv') sheets = [toSheet(base, parseDelimited(raw, kind === 'csv' ? ',' : '\t'))];
+  else if (kind === 'json') ({ sheets, text } = fromJson(name, raw));
+  else text = raw;
+  const pieces = [...splitText(text), ...sheets.flatMap((s) => (s.rows.length > KN_SHEET_ROW_PIECES_MAX ? [sheetSummary(s)] : rowPieces(s)))];
+  if (!pieces.length && !sheets.some((s) => s.rows.length)) throw new Error('No text was found in that file.');
+  return { pieces, sheets: sheets.filter((s) => s.rows.length), flagged: looksLikeInstructions(text) || sheets.some((s) => s.rows.some((r) => looksLikeInstructions(r.join(' ')))), text };
+}

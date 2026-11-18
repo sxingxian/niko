@@ -34,7 +34,7 @@ import { data } from './data';
 import { refreshUsed } from '../datasets';
 import { ownEmbedder } from '../ownEmbed';
 import { DataProblem, liveFor, openMeteoKey, runAction, sourcesFor, usableFor, weatherFor } from '../datasources';
-import { deviceKnowledgeFor, embed, knowledgeDb, knowledgeFor, lookupSheet, type KnContext } from '../knowledge';
+import { accountKnowledge, deviceKnowledgeFor, embed, knowledgeFor, lookupSheet, type KnContext } from '../knowledge';
 import { JUDGE_RULE, learnedBlock, LEARNED_RULE, notesFor, PEOPLE_RULE, QUIET_RULE, saveNote, SAVE_RULE, SITUATION_RULE, situationBlock, taughtFor } from '../learned';
 import { backgroundFor } from '../backgrounds';
 import {
@@ -960,8 +960,8 @@ app.post('/chat', async (c) => {
   const knCf = knSearchOf(knPrefs, knAccess, 'niko') === 'cloudflare';
   // Files kept on the person's device: the browser searched them (and its notes) and sent its best matches.
   const knDevice = knPlace === 'device' && (knOk || knAccess.learning) ? cleanDeviceKnowledge(b.knowledge) : null;
-  const kdb = knOk && knPlace === 'niko' && knAccess.niko && knPrefs.files > 0 ? knowledgeDb(c.env) : null;
-  const ndb = knAccess.learning && knPlace === 'niko' && knPrefs.notes > 0 ? knowledgeDb(c.env) : null;
+  const kdb = knOk && knPlace === 'niko' && knAccess.niko && knPrefs.files > 0 ? accountKnowledge(c.env, u.id) : null;
+  const ndb = knAccess.learning && knPlace === 'niko' && knPrefs.notes > 0 ? accountKnowledge(c.env, u.id) : null;
   // Cloudflare's search numbers for the question, made once for files and notes.
   const cfVector = (kdb || ndb) && knCf ? await embed(c.env, [text]).then((v) => v[0] ?? null).catch(() => null) : null;
   // Their own search service (one of their AI keys or their model server): the question's numbers, or words only.
@@ -1088,7 +1088,7 @@ app.post('/chat', async (c) => {
   // New notes: kept in Niko, or handed to the browser to keep when the person's Knowledge is on this device.
   let learnedNow: { id: string; kind: string; said: string; means: string }[] = [];
   if (toLearn.length && knPlace === 'niko') {
-    const ldb = ndb ?? knowledgeDb(c.env);
+    const ldb = ndb ?? accountKnowledge(c.env, u.id);
     if (ldb) {
       for (const a of toLearn) {
         try { const it = await saveNote(ldb, c.env, u.id, { kind: a.kind, said: a.said, means: a.means, how: a.how }, { cloudflare: knCf }); learnedNow.push({ id: it.id, kind: it.kind, said: it.said, means: it.means }); }

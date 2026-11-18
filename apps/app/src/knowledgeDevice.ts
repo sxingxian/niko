@@ -415,7 +415,7 @@ export async function moveToDevice(account: string, files: ServerFile[], onStep?
       sheets.push({ name: s.name, columns: s.columns, header: s.header, rows });
     }
     await keep(account, { name: f.name, kind: f.kind, bytes: f.bytes, sha256: f.sha256, collection: f.collection, flagged: f.flagged, pieces, vectors: await numbersFor(pieces), sheets });
-    await api(`/knowledge/files/${f.id}?keep=1`, { method: 'DELETE' });
+    await api(`/knowledge/files/${f.id}`, { method: 'DELETE' });
   }
   // What Niko learned moves too (taught matches point at the old copies, so they're left behind and removed).
   const learned = await api<{ items: KnLearnedItem[] }>('/knowledge/learned').catch(() => null);
