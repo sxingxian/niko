@@ -100,16 +100,33 @@ async function keyFor(env: Env, db: Db, row: SourceRow, userId: string): Promise
 const edge = () => (globalThis as { caches?: { default?: Cache } }).caches?.default;
 
 export interface DataResult { text: string; at: number; source: string; attribution: string; cached: boolean }
+/** The address and headers for one call, with the right key (never echoed in errors). */
+async function request(env: Env, db: Db, userId: string, row: SourceRow, action: DataAction, values: Record<string, string>) {
+  const { key, personal } = await keyFor(env, db, row, userId);
+  if (row.auth !== 'none' && !key) throw new DataProblem(row.keyMode === 'own' && !row.ownerId ? `${row.name} needs your key first.` : `${row.name} has no key saved.`);
+  let url = actionUrl(row.baseUrl, action, values);
+  const headers: Record<string, string> = {};
+  if (row.auth === 'header' && key) headers[row.authName] = key;
+  if (row.auth === 'query' && key) { const u = new URL(url); u.searchParams.set(row.authName, key); url = u.toString(); }
+  return { url, headers, personal };
+}
+const countCall = (db: Db, userId: string, sourceId: string) => db.execute(sql`insert into usage_counts (user_id, month, kind, entry, n) values (${userId}, ${monthOf()}, 'data', ${sourceId}, 1)
+    on conflict (user_id, month, kind, entry) do update set n = usage_counts.n + 1`).catch(() => undefined);
+/** The whole answer to one action (for datasets): checked values, the right key, counted as a call. */
+export async function fetchWhole(env: Env, db: Db, userId: string, row: SourceRow, action: DataAction, given: Record<string, unknown>) {
+  const checked = checkValues(action, given);
+  if ('problem' in checked) throw new DataProblem(checked.problem);
+  const r = await request(env, db, userId, row, action, checked.values);
+  let got;
+  try { got = await safeGet(r.url, r.headers); } catch (e) { throw new DataProblem(e instanceof FetchProblem ? e.message : 'The source couldn’t be reached.', 502); }
+  await countCall(db, userId, row.id);
+  return got;
+}
 /** Runs one action. `limit` is the person's monthly calls (0: no limit); cached answers aren't counted. */
 export async function runAction(env: Env, db: Db, userId: string, row: SourceRow, action: DataAction, given: Record<string, unknown>, limit: number, opts: { test?: boolean } = {}): Promise<DataResult> {
   const checked = checkValues(action, given);
   if ('problem' in checked) throw new DataProblem(checked.problem);
-  const { key, personal } = await keyFor(env, db, row, userId);
-  if (row.auth !== 'none' && !key) throw new DataProblem(row.keyMode === 'own' && !row.ownerId ? `${row.name} needs your key first.` : `${row.name} has no key saved.`);
-  let url = actionUrl(row.baseUrl, action, checked.values);
-  const headers: Record<string, string> = {};
-  if (row.auth === 'header' && key) headers[row.authName] = key;
-  if (row.auth === 'query' && key) { const u = new URL(url); u.searchParams.set(row.authName, key); url = u.toString(); }
+  const { url, headers, personal } = await request(env, db, userId, row, action, checked.values);
   // Answers from the admin's own key (or no key) hold nothing personal and are shared briefly; others are per person.
   const scope = personal ? userId : 'shared';
   const ck = new Request(`https://niko-cache.invalid/data/${await sha256(`${row.id}|${row.updatedAt.getTime()}|${action.id}|${JSON.stringify(checked.values)}|${scope}`)}`);
@@ -125,8 +142,7 @@ export async function runAction(env: Env, db: Db, userId: string, row: SourceRow
   try { got = await safeGet(url, headers); }
   catch (e) { throw new DataProblem(e instanceof FetchProblem ? e.message : 'The source couldn’t be reached.', 502); }
   const text = resultText(got.body, got.kind), at = Date.now();
-  await db.execute(sql`insert into usage_counts (user_id, month, kind, entry, n) values (${userId}, ${monthOf()}, 'data', ${row.id}, 1)
-    on conflict (user_id, month, kind, entry) do update set n = usage_counts.n + 1`).catch(() => undefined);
+  await countCall(db, userId, row.id);
   if (!opts.test) await edge()?.put(ck, new Response(JSON.stringify({ text, at }), { headers: { 'cache-control': `max-age=${action.live ? DATA_CACHE_S.live : DATA_CACHE_S.other}` } })).catch(() => undefined);
   return { text, at, source: row.name, attribution: row.attribution, cached: false };
 }

@@ -312,6 +312,16 @@ export const dataSourceKeys = pgTable('data_source_keys', {
   userId: uuid('user_id').notNull(),
   keyEnc: text('key_enc').notNull(),
 }, (t) => [primaryKey({ columns: [t.sourceId, t.userId] })]);
+/** A dataset from a data source kept in one person's Knowledge (the table is in Knowledge's own database). */
+export const dataDatasets = pgTable('data_datasets', {
+  userId: uuid('user_id').notNull(),
+  sourceId: uuid('source_id').notNull(),
+  actionId: text('action_id').notNull(),
+  documentId: uuid('document_id'),
+  fetchedAt: ts('fetched_at'),
+  rows: integer('rows').notNull().default(0),
+  problem: text('problem'),
+}, (t) => [primaryKey({ columns: [t.userId, t.sourceId, t.actionId] })]);
 /** How much each person used each month, per kind and service: one number, never what was said. */
 export const usageCounts = pgTable('usage_counts', {
   userId: uuid('user_id').notNull(),

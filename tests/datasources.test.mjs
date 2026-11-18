@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {
   actionUrl, checkValues, cleanAction, cleanActions, cleanBaseUrl, cleanDataAccess, cleanDataPrefs, dataAllowed, dataBlock, dataTags, hostProblem,
-  openApiActions, privateIp, resultText, sampleValues, stripDataTags, cleanWeatherPrefs, weatherOrder, cleanDataDefaults, cleanLivePrefs, liveOrder, placesBlock,
+  openApiActions, privateIp, resultText, sampleValues, stripDataTags, cleanWeatherPrefs, weatherOrder, cleanDataDefaults, cleanLivePrefs, liveOrder, placesBlock, datasetTable, actionLine,
 } from '../packages/shared/src/dataSources.ts';
 import { dns, forgetDns, safeGet } from '../apps/api/src/safefetch.ts';
 import { DataProblem, runAction } from '../apps/api/src/datasources.ts';
@@ -142,6 +142,24 @@ await ok('live info: the country’s own list, else Everywhere, else the only co
   assert.deepEqual(liveOrder(p, 'SG', [B]), { list: [B], from: 'SG' }, 'a service they can no longer use drops out');
   assert.match(placesBlock(p.places), /Usual stop: Example Rd stop · 83139/);
   assert.equal(placesBlock([]), '');
+});
+
+await ok('datasets: kept as tables (CSV, TSV, records in JSON), never asked live, fetched without a question', () => {
+  const csv = datasetTable('town,price,date,ok\n"Tampines, East",450000,2026-01-02,yes\n"Say ""hi""",1.5,2026-02-01,no\n', 'csv');
+  assert.deepEqual(csv.columns, [{ name: 'town', type: 'text' }, { name: 'price', type: 'number' }, { name: 'date', type: 'date' }, { name: 'ok', type: 'yesno' }]);
+  assert.deepEqual(csv.rows[0], ['Tampines, East', '450000', '2026-01-02', 'yes']);
+  assert.equal(csv.rows[1][0], 'Say "hi"');
+  assert.equal(datasetTable('a\tb\n1\t2', 'csv').columns.length, 2);
+  const js = datasetTable(JSON.stringify({ result: { records: [{ month: '2026-01', n: 3 }, { month: '2026-02', n: 4, extra: { x: 1 } }] } }), 'json');
+  assert.deepEqual(js.columns.map((c) => c.name), ['month', 'n', 'extra']);
+  assert.equal(js.rows[1][2], '{"x":1}');
+  assert.ok('problem' in datasetTable('{"a":1}', 'json'));
+  assert.ok('problem' in datasetTable('only,a,header', 'csv'));
+  const a = cleanAction({ name: 'Resale prices', path: '/prices', dataset: 'week', params: [{ name: 'year', type: 'integer', required: true, sample: '2025' }] });
+  assert.equal(a.dataset, 'week'); assert.equal(a.live, false);
+  assert.match(actionLine(a), /dataset in Knowledge · refreshed weekly when used/);
+  assert.ok('problem' in cleanAction({ name: 'X', path: '/x', dataset: 'day', params: [{ name: 'q', type: 'text', required: true }] }), 'a needed value with nothing to fill it');
+  assert.doesNotMatch(dataBlock([{ tag: 'D1', name: 'S', actions: [a] }]), /resale/i, 'datasets aren’t offered as live actions');
 });
 
 // ---------------------------------------------------------------- the server side, with the network stood in for

@@ -8,21 +8,26 @@ import { cleanActions, cleanDataPrefs, DATA_LIMITS, sampleValues, type DataActio
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
 import { seal } from '../lib/crypto';
+import { datasetsOf, datasetsOk, importDataset, removeDatasets } from '../datasets';
+import { KnError } from '../knowledge';
 import { cleanInput, DataProblem, dataCalls, liveFor, runAction, saveLive, saveWeather, sourcesFor, weatherFor, type SourceInput, type SourceRow } from '../datasources';
 import { credentials } from '../providers';
 import { geocode } from '../weather';
 
 export const data = new Hono<AppEnv>();
 type C = Context<AppEnv>;
-const fail = (c: C, e: unknown) => { if (e instanceof DataProblem) return c.json({ error: e.message }, e.status); throw e; };
+const fail = (c: C, e: unknown) => { if (e instanceof DataProblem) return c.json({ error: e.message }, e.status); if (e instanceof KnError) return c.json({ error: e.message }, e.status); throw e; };
+const later = (c: C, p: Promise<unknown>) => { try { c.executionCtx.waitUntil(p.catch(() => undefined)); } catch { void p.catch(() => undefined); } };
 const NOT_ON = 'That isn’t included in your plan.';
 
 data.get('/', async (c) => {
   const u = c.get('user');
   const s = await sourcesFor(c.get('db'), u);
   const used = (await dataCalls(c.get('db'), u.id)).byUser[u.id] ?? 0;
+  const ds = await datasetsOf(c.get('db'), u.id);
   return c.json({
     canAdd: s.allowed.own, calls: { limit: s.allowed.calls, used },
+    datasets: { ok: !!(await datasetsOk(c.env, c.get('db'), u).catch(() => null)), kept: ds.map((d) => ({ source: d.sourceId, action: d.actionId, at: d.fetchedAt?.getTime() ?? null, rows: d.rows, problem: d.problem })) },
     offered: s.offered.map((x) => ({ ...x.info, on: x.on })),
     mine: s.allowed.own || s.mine.length ? s.mine.map((x) => ({ ...x.info, on: x.on })) : [],
     actionsOff: s.prefs.actionsOff,
@@ -52,6 +57,9 @@ data.put('/included/:id', async (c) => {
   const on = b.on === true;
   if (on && it.row.keyMode === 'own' && it.row.auth !== 'none' && !key && !it.info.hasKey) return c.json({ error: `${it.row.name} needs your key.` }, 400);
   await savePrefs(c, (p) => { p.on = on ? [...new Set([...p.on, it.row.id])] : p.on.filter((x) => x !== it.row.id); });
+  // Datasets: fetched into Knowledge when turned on (in the background), removed when turned off.
+  if (on) importAll(c, it.row, it.info.actions);
+  else await removeDatasets(c.env, db, u.id, it.row.id);
   if (!on && it.row.keyMode === 'own') await db.delete(dataSourceKeys).where(and(eq(dataSourceKeys.sourceId, it.row.id), eq(dataSourceKeys.userId, u.id)));
   await audit(c, on ? 'data.on' : 'data.off', { source: it.row.name }, u.id);
   return c.json({ ok: true });
@@ -83,6 +91,7 @@ data.post('/sources', async (c) => {
     const v = await cleanInput(c.env, await c.req.json<SourceInput>(), { admin: false });
     if (v.termsOk !== true) return c.json({ error: 'Confirm that the source’s terms let you use it this way.' }, 400);
     const [row] = await db.insert(dataSources).values({ ...v, ownerId: u.id } as typeof dataSources.$inferInsert).returning();
+    importAll(c, row!, cleanActions(row!.actions) as DataAction[]);
     await audit(c, 'data.own.add', { source: row!.name }, u.id);
     return c.json({ ok: true, id: row!.id });
   } catch (e) { return fail(c, e); }
@@ -101,6 +110,7 @@ data.put('/sources/:id', async (c) => {
 data.delete('/sources/:id', async (c) => {
   const before = await mineOr404(c);
   if (!before) return c.json({ error: 'No such source.' }, 404);
+  await removeDatasets(c.env, c.get('db'), c.get('user').id, before.id);
   await c.get('db').delete(dataSources).where(eq(dataSources.id, before.id));
   await audit(c, 'data.own.remove', { source: before.name }, c.get('user').id);
   return c.json({ ok: true });
@@ -169,4 +179,29 @@ data.put('/live', async (c) => {
   const countries = b.countries && typeof b.countries === 'object' ? Object.fromEntries(Object.entries(b.countries as Record<string, unknown>).map(([cc, l]) => [cc.toUpperCase(), keep(l)])) : now.countries;
   await saveLive(db, u.id, { everywhere: b.everywhere !== undefined ? keep(b.everywhere) : now.everywhere, countries, places: b.places !== undefined ? b.places as never : now.places });
   return c.json(await liveFor(db, u));
+});
+
+// ---------------------------------------------------------------- datasets in Knowledge
+function importAll(c: C, row: SourceRow, actions: DataAction[]) {
+  const sets = actions.filter((a) => a.on && a.dataset);
+  if (!sets.length) return;
+  const u = c.get('user'), db = c.get('db');
+  later(c, (async () => {
+    const k = await datasetsOk(c.env, db, u);
+    if (!k) return;
+    for (const a of sets.slice(0, 3)) await importDataset(c.env, db, u, k, row, a).catch((e) => console.warn(`dataset: ${String((e as Error)?.message ?? e).slice(0, 160)}`));
+  })());
+}
+/** Fetches one dataset into Knowledge now (Import now / Refresh now). */
+data.post('/datasets/:source/:action', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  if (await tooMany(c, `data-ds:${u.id}`, 20, 60)) return c.json({ error: 'Too many imports in an hour. Try again later.' }, 429);
+  const k = await datasetsOk(c.env, db, u);
+  if (!k) return c.json({ error: 'Datasets need Knowledge files kept in Niko.' }, 403);
+  const s = await sourcesFor(db, u);
+  const src = [...s.offered.filter((x) => x.on), ...s.mine.filter((x) => x.on)].find((x) => x.row.id === c.req.param('source'));
+  const act = src?.info.actions.find((a) => a.id === c.req.param('action') && a.on && a.dataset);
+  if (!src || !act) return c.json({ error: 'No such dataset.' }, 404);
+  try { const r = await importDataset(c.env, db, u, k, src.row, act); await audit(c, 'data.dataset', { source: src.row.name, action: act.name, rows: r.rows }, u.id); return c.json({ ok: true, rows: r.rows }); }
+  catch (e) { return fail(c, e); }
 });
