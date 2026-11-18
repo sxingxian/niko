@@ -13,6 +13,7 @@ import { Home, Workspace } from './pages/Core';
 import { Designs } from './pages/Designs';
 import { Backgrounds } from './pages/Backgrounds';
 import { Account, Appearance, Connections, Engine, SettingsLayout, Voice } from './pages/Settings';
+import { Knowledge } from './pages/Knowledge';
 
 function Private({ children }: { children: ReactNode }) {
   const { me, locked } = useNiko();
@@ -117,6 +118,7 @@ function Screens() {
           <Route path="/voice" element={<Voice />} />
           <Route path="/connections" element={<Connections />} />
           <Route path="/engine" element={<Engine />} />
+          <Route path="/knowledge" element={<Knowledge />} />
           <Route path="/account" element={<Account />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

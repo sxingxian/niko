@@ -431,3 +431,9 @@ body { background: #07090d; }
 .dz-see li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: start; }
 .dz-see b { font-weight: 600; font-size: 16px; text-align: right; max-width: 220px; }
 .dz-amini.wide { width: 70px; background: #05070d; }
+
+/* Knowledge */
+.kn-db { display: flex; flex-direction: column; gap: 6px; padding: 18px 22px; margin-bottom: 18px; }
+.kn-db b { font-size: 18px; font-weight: 500; }
+.kn-db code { font: 500 12px 'JetBrains Mono', monospace; }
+.ai-items.dim .lim-row { opacity: .45; }

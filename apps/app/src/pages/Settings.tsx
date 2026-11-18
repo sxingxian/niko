@@ -8,7 +8,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from
 import { AI_PRESETS, aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, presetOf, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
 import { backgroundInfo, designInfo, type CalendarLink } from '@niko/shared';
 import { cleanGlancePrefs, GLANCE_LIMIT_DEFAULTS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_REMIND_STEPS, GLANCE_STEPS, glanceEvery, type GlancePart, type GlancePrefs } from '@niko/shared';
-import { AI_OPTION_GROUPS, aiAllowed, brainOption, hearOption, imageOption, voiceOption } from '@niko/shared';
+import { AI_OPTION_GROUPS, aiAllowed, brainOption, hearOption, imageOption, knowledgeAccess, voiceOption } from '@niko/shared';
 import { IMAGE_PROVIDERS, imageOrder, imagePresetOf, MAX_IMAGE_KEYS, type ImageKeyInfo, type ImageProvider, type ImageSource } from '@niko/shared';
 import { HEAR_PROVIDERS, hearOrder, hearPresetOf, MAX_HEAR_KEYS, type HearKeyInfo, type HearProvider, type HearSource } from '@niko/shared';
 import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, PAGE_SIZES, VOICE_NAMES, VOICE_PROVIDERS, VOICE_SOURCES, voiceName, voiceOrder, voicePresetOf, WORKERS_VOICES, type VoiceKeyInfo, type VoiceProvider, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
@@ -30,7 +30,7 @@ type MyApp = AppDef & { configured: boolean; hint: string | null; uses: string[]
 type Note = { ok: boolean; text: string } | null;
 
 // ---------------------------------------------------------------- shell
-const SETTINGS: [string, string, string][] = [['/appearance', 'Appearance', 'palette'], ['/voice', 'Voice', 'wave'], ['/connections', 'Connections', 'plug'], ['/engine', 'Engine', 'spark'], ['/account', 'Account', 'user']];
+const SETTINGS: [string, string, string][] = [['/appearance', 'Appearance', 'palette'], ['/voice', 'Voice', 'wave'], ['/connections', 'Connections', 'plug'], ['/engine', 'Engine', 'spark'], ['/knowledge', 'Knowledge', 'note'], ['/account', 'Account', 'user']];
 
 /** Route layout: the sidebar stays put while the page beside it changes. */
 export function SettingsLayout() {
@@ -53,7 +53,8 @@ export function SettingsLayout() {
         <Link to="/" className="set-back"><span aria-hidden="true">←</span> Back to Niko</Link>
         <div className="set-brand"><span className="wordmark">NIKO</span><span className="k pill">Settings</span></div>
         <nav ref={navRef} aria-label="Settings sections" className="set-nav">
-          {SETTINGS.map(([to, name]) => <NavLink key={to} to={to} className="nv">{name}</NavLink>)}
+          {/* Knowledge shows only for accounts that have it, with no word about why for those that don't. */}
+          {SETTINGS.filter(([to]) => to !== '/knowledge' || knowledgeAccess((k) => aiAllowed(me?.aiOff ?? [], k)).files).map(([to, name]) => <NavLink key={to} to={to} className="nv">{name}</NavLink>)}
         </nav>
         <div className="set-foot">
           <span>Signed in as {me?.name || me?.email}</span>
@@ -65,7 +66,7 @@ export function SettingsLayout() {
   );
 }
 
-function SettingsPage({ title, sub, action, children }: { title: string; sub: string; action?: ReactNode; children: ReactNode }) {
+export function SettingsPage({ title, sub, action, children }: { title: string; sub: string; action?: ReactNode; children: ReactNode }) {
   return (
     <>
       <header className="set-head">
@@ -77,7 +78,7 @@ function SettingsPage({ title, sub, action, children }: { title: string; sub: st
   );
 }
 
-function NoteLine({ note }: { note: Note }) {
+export function NoteLine({ note }: { note: Note }) {
   return note ? <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p> : null;
 }
 

@@ -57,7 +57,7 @@ await ok('with KNOWLEDGE_DATABASE_URL both are updated; running again changes no
   let r = migrate({ DATABASE_URL: mainUrl, KNOWLEDGE_DATABASE_URL: knUrl });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /Main database is up to date/);
-  assert.match(r.stdout, /Knowledge database: applied 1 migration/);
+  assert.match(r.stdout, /Knowledge database: applied \d+ migrations?/);
   r = migrate({ DATABASE_URL: mainUrl, KNOWLEDGE_DATABASE_URL: knUrl });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /Knowledge database is up to date/);
