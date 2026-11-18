@@ -691,6 +691,40 @@ var SPIN = { idle: 0.12, listening: 0.16, thinking: 0.7, speaking: 0.22 };
 var SHIFT_S = 1.0;
 function smooth(v) { return v * v * v * (v * (v * 6 - 15) + 10); }
 
+/** Samples a design for the screen-to-screen flow: runs its own drawing into a recorder instead of a canvas, and returns
+ * every dot it would draw (centre, size, colour) and every line, in units of the core's radius (0.29 of the canvas
+ * height, as everywhere in the app). The order is the same every frame, so dot i can be followed across the screen. */
+export function sampleDesign(design, small) {
+  var style = STYLES[design] ? design : 'prism';
+  var D = STYLES[style].init(Math.random, !!small);
+  D.small = !!small; D.ay = 0.6; D.dpr = 1;
+  var w = { idle: 1, listening: 0, thinking: 0, speaking: 0 };
+  return {
+    take: function (t, dt, hue) {
+      var S = 600, R = S * 0.29, pts = [], segs = [], fs = '', ss = '', path = [], arcAt = null;
+      var rec = {
+        set fillStyle(v) { fs = v; }, get fillStyle() { return fs; },
+        set strokeStyle(v) { ss = v; }, get strokeStyle() { return ss; },
+        lineWidth: 1, globalCompositeOperation: '', globalAlpha: 1,
+        setTransform: function () {}, clearRect: function () {}, closePath: function () {},
+        createRadialGradient: function () { return { addColorStop: function () {} }; },
+        beginPath: function () { path = []; arcAt = null; },
+        moveTo: function (x, y) { path.push([x, y, 0]); }, lineTo: function (x, y) { path.push([x, y, 1]); },
+        arc: function (x, y, r) { arcAt = [x, y, r]; },
+        fill: function () { if (arcAt && typeof fs === 'string') pts.push({ x: (arcAt[0] - S / 2) / R, y: (arcAt[1] - S / 2) / R, s: arcAt[2] * 2, c: fs }); arcAt = null; },
+        stroke: function () {
+          if (arcAt) { arcAt = null; return; }
+          for (var i = 1; i < path.length; i++) if (path[i][2]) segs.push({ x1: (path[i - 1][0] - S / 2) / R, y1: (path[i - 1][1] - S / 2) / R, x2: (path[i][0] - S / 2) / R, y2: (path[i][1] - S / 2) / R, c: ss });
+        },
+        fillRect: function (x, y, ww, h) { if (typeof fs === 'string' && ww < 24) pts.push({ x: (x + ww / 2 - S / 2) / R, y: (y + h / 2 - S / 2) / R, s: ww, c: fs }); },
+      };
+      D.dt = dt; D.w = w; D.lv = 0; D.ay += dt * 0.12;
+      STYLES[style].draw(rec, S, S, t, { spin: 0.12, l: 0, k: 0, s: 0 }, hsl(hue, 90, 74), D);
+      return { pts: pts, segs: segs };
+    },
+  };
+}
+
 /** The designs this file can draw. */
 export var DESIGN_STYLES = Object.keys(STYLES);
 

@@ -2,8 +2,11 @@
 // workspace ring, every fifth particle landing on the ring to become its ticks; going back plays it in reverse.
 // Between Inbox, Calendar and Notes ('swap') the ring and its core break up into a loose cloud and the same build runs again.
 // Drawn on one full-screen canvas above the pages; the pages' own cores fade in underneath when it ends.
+// Nebula makes this journey with its own particles (below, unchanged). Every other design makes the same journey with
+// its own dots (designFlow): same timing, same paths, every fifth dot landing on the ring. The ring itself is the
+// workspace page's (drawn in by app.css, moved by startRing) and is the same for every design.
 import { useEffect, useRef } from 'react';
-import { currentHue, sphereOf, spots } from '@niko/ui';
+import { currentHue, sampleDesign, sphereOf, spots } from '@niko/ui';
 
 export const FLOW_SECONDS = 2.2;
 /** How long the old screen stays (fading out) before the new one is mounted. */
@@ -42,11 +45,12 @@ function ringNow(): { core: Sphere; ring: number } | null {
   return { core, ring: box.getBoundingClientRect().width * 292 / 600 };
 }
 
-export function FlowLayer({ dir, loose, startedAt, onDone }: { dir: 'in' | 'out' | 'swap'; loose?: boolean; startedAt: number; onDone: () => void }) {
+export function FlowLayer({ dir, loose, startedAt, onDone, design }: { dir: 'in' | 'out' | 'swap'; loose?: boolean; startedAt: number; onDone: () => void; design?: string }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const cv = ref.current;
     if (!cv) return;
+    if (design && design !== 'nebula') return designFlow(cv, design, dir, !!loose, startedAt, onDone);
     const ctx = cv.getContext('2d')!;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     let W = 0, H = 0;
@@ -142,4 +146,83 @@ export function FlowLayer({ dir, loose, startedAt, onDone }: { dir: 'in' | 'out'
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dir, startedAt]);
   return <canvas ref={ref} className="flow-layer" aria-hidden="true" />;
+}
+
+/** The flow for every design but Nebula: the design's own dots pour from Home into the workspace (or back, or loosen and
+ * rebuild between views), on Nebula's timing and paths. Every fifth dot lands on the ring and fades as the ring takes
+ * over; lines (Prism, Helix, Tesseract…) show only while the design is settled at either end. Returns the cleanup. */
+function designFlow(cv: HTMLCanvasElement, design: string, dir: 'in' | 'out' | 'swap', loose: boolean, startedAt: number, onDone: () => void): () => void {
+  const ctx = cv.getContext('2d')!;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let W = 0, H = 0;
+  const size = () => { W = window.innerWidth; H = window.innerHeight; cv.width = W * dpr; cv.height = H * dpr; };
+  size();
+  const phone = isStacked();
+  const sampler = sampleDesign(design, phone);
+  const clamp = (v: number) => Math.max(0, Math.min(1, v)), seg = (p: number, a: number, b: number) => clamp((p - a) / (b - a));
+  const smooth = (t: number) => t * t * t * (t * (t * 6 - 15) + 10);
+  const swap = dir === 'swap';
+  let home: Sphere | null = dir === 'in' ? sphereOf(spots.get('home')) : null;
+  let ws = dir !== 'in' ? ringNow() : null;
+  let raf = 0, finished = false, last = 0;
+  const D = FLOW_SECONDS * 1000;
+  // Each dot's own wobble on its way, fixed for the whole flow.
+  const jit: number[] = [], swirl: number[] = [];
+  const lines = (segs: { x1: number; y1: number; x2: number; y2: number; c: string }[], S: Sphere, a: number) => {
+    if (a <= 0.01 || !segs.length) return;
+    ctx.globalAlpha = a; ctx.lineWidth = 0.8;
+    for (const l of segs) { ctx.strokeStyle = l.c; ctx.beginPath(); ctx.moveTo(S.x + l.x1 * S.R, S.y + l.y1 * S.R); ctx.lineTo(S.x + l.x2 * S.R, S.y + l.y2 * S.R); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+  };
+  const frame = (now: number) => {
+    const u = clamp((now - startedAt) / D);
+    const p = dir === 'out' ? 1 - u : u;
+    const dt = last ? Math.min(0.05, (now - last) / 1000) : 0.016; last = now;
+    if (!swap && !home) home = sphereOf(spots.get('home'));
+    if (!ws) ws = ringNow();
+    const Bx = ws ?? ringEstimate(), B = Bx.core, RING = Bx.ring;
+    const A = swap ? { x: B.x, y: B.y, R: B.R * 1.4 } : home ?? homeEstimate();
+    const undo = swap && !loose ? 1 - smooth(seg(u, 0, 0.24)) : 0;
+    const dl = Math.hypot(B.x - A.x, B.y - A.y) || 1, dirX = (B.x - A.x) / dl, dirY = (B.y - A.y) / dl;
+    const { pts, segs } = sampler.take(now / 1000, dt, currentHue());
+    const N = pts.length, stride = N > 1100 ? Math.ceil(N / 1100) : 1, nRing = Math.ceil(N / stride / 5);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = 'rgba(0,0,0,.42)'; ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'lighter';
+    const loosen = Math.sin(Math.PI * seg(p, 0, 0.3)), fade = 1 - seg(u, 0.9, 1);
+    let cx = 0, cy = 0, m = 0;
+    for (let i = 0, k = 0; i < N; i += stride, k++) {
+      const o = pts[i]!, onRing = k % 5 === 0;
+      if (jit[k] === undefined) { jit[k] = Math.random() * 0.1; swirl[k] = (Math.random() < 0.5 ? -1 : 1) * (phone ? 16 + Math.random() * 40 : 30 + Math.random() * 70); }
+      const theta = (Math.floor(k / 5) / nRing) * Math.PI * 2 - Math.PI / 2;
+      const grow = 1 + 0.07 * loosen;
+      const sx = A.x + o.x * A.R * grow + dirX * 14 * loosen, sy = A.y + o.y * A.R * grow + dirY * 14 * loosen;
+      const ex = onRing ? B.x + Math.cos(theta) * RING : B.x + o.x * B.R, ey = onRing ? B.y + Math.sin(theta) * RING : B.y + o.y * B.R;
+      // The side facing the destination leaves first, as with Nebula; in a swap the rebuild runs round like the sweep.
+      const lead = (swap ? ((Math.atan2(o.y, o.x) + Math.PI * 2.5) % (Math.PI * 2)) / (Math.PI * 2) * 0.3 : (1 - ((o.x * dirX + o.y * dirY) / 1.2 + 1) / 2) * 0.3) + jit[k]! + (onRing ? 0.05 : 0);
+      const e = smooth(seg(p, 0.08 + lead, 0.62 + lead * 0.75));
+      const dx = ex - sx, dy = ey - sy, l = Math.hypot(dx, dy) || 1, arc = Math.sin(Math.PI * e), bend = arc * swirl[k]!;
+      let x = sx + dx * e - (dy / l) * bend, y = sy + dy * e + (dx / l) * bend;
+      if (undo > 0) { x += (ex - x) * undo; y += (ey - y) * undo; }
+      const a = (onRing ? 1 - seg(p, 0.74, 0.94) : 1) * fade, z = o.s * (1 + 0.3 * arc) * (phone ? 0.9 : 1);
+      if (a > 0) { ctx.fillStyle = o.c; ctx.globalAlpha = a; ctx.fillRect(x - z / 2, y - z / 2, z, z); }
+      cx += x; cy += y; m++;
+    }
+    ctx.globalAlpha = 1;
+    if (m) {
+      const R = A.R + (B.R - A.R) * smooth(seg(p, 0.1, 0.8)), hue = currentHue().toFixed(1);
+      const g = ctx.createRadialGradient(cx / m, cy / m, 0, cx / m, cy / m, R * 1.4);
+      g.addColorStop(0, `hsla(${hue},90%,60%,${(0.1 * fade).toFixed(3)})`); g.addColorStop(1, `hsla(${hue},90%,60%,0)`);
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    }
+    // Lines belong to a settled design: at Home (or the ring being left) and at the ring it arrives at, not in flight.
+    lines(segs, A, (swap ? undo : 1 - seg(p, 0, 0.14)) * fade);
+    lines(segs, B, seg(p, 0.84, 0.98) * fade);
+    ctx.globalCompositeOperation = 'source-over';
+    if (u >= 1) { if (!finished) { finished = true; ctx.clearRect(0, 0, W, H); onDone(); } return; }
+    raf = requestAnimationFrame(frame);
+  };
+  raf = requestAnimationFrame(frame);
+  window.addEventListener('resize', size);
+  return () => { cancelAnimationFrame(raf); window.removeEventListener('resize', size); };
 }
