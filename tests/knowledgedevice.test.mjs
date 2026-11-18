@@ -191,7 +191,7 @@ await ok('the search model: only the repository’s own files, by exact address;
   assert.equal(embedFileFor(`${base}config.json`)?.json, true);
   for (const bad of [`${base}onnx/model.onnx`, `https://huggingface.co/evil/multilingual-e5-small/resolve/main/tokenizer.json`, `${base}../x/tokenizer.json`, `https://huggingface.co.evil.com/Xenova/multilingual-e5-small/resolve/main/config.json`, `${base}onnx/model_quantizedXonnx`])
     assert.equal(embedFileFor(bad), null, bad);
-  assert.equal(typeof EMBED_PINNED, 'boolean');
+  assert.equal(EMBED_PINNED, true);
 });
 
 await pool.end();

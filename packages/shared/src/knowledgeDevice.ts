@@ -14,8 +14,9 @@ export const knSearchOf = (p: Pick<KnowledgePrefs, 'search'>, a: Pick<KnowledgeA
  *  real answer above 0.85. Like KN_LEAD and KN_SIMILAR, these can be tuned once real answers are seen. */
 export const KN_DEVICE_LEAD = 0.86;
 export const KN_DEVICE_SIMILAR = 0.82;
-/** The on-device search model, downloaded once per device from Hugging Face and checked against a pinned SHA-256. */
-export const KN_DEVICE_MODEL_MB = 118;
+/** The on-device search model and its tokenizer (118 MB + 17 MB), downloaded once per device from Hugging Face and
+ *  checked against pinned SHA-256 fingerprints. */
+export const KN_DEVICE_MODEL_MB = 135;
 
 /** What the browser may send with one question: its best matches and the tables behind them. */
 export const KN_DEVICE_HITS_MAX = 10;
