@@ -54,6 +54,11 @@ export const users = pgTable('users', {
   proOn: boolean('pro_on').notNull().default(false),
   // ---- backgrounds (see migration 0014)
   bgBundleAt: ts('bg_bundle_at'),
+  // ---- Knowledge (see migration 0015; the files themselves are in Knowledge's own database)
+  /** This account's own Knowledge choices (Settings · Knowledge). */
+  knowledge: jsonb('knowledge').notNull().default({}).$type<Record<string, unknown>>(),
+  /** This account's changes to the admin's default Knowledge limits. Set by an admin only. */
+  knowledgeLimits: jsonb('knowledge_limits').notNull().default({}).$type<Record<string, unknown>>(),
   createdAt: ts('created_at').notNull().defaultNow(),
   lastActiveAt: ts('last_active_at'),
 });
