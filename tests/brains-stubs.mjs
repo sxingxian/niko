@@ -5,7 +5,14 @@ export const store = { creds: {}, engineWrites: [], keyWrites: [] };
 export async function credentials(_env, _db, _userId, provider) { return store.creds[provider] ?? null; }
 export async function getConnection(_db, _userId, provider) { return store.creds[provider] ? { meta: {} } : undefined; }
 export function publicHttpsUrl(raw) {
-  try { const u = new URL(String(raw)); return u.protocol === 'https:' && !/^(localhost|127\.|10\.|192\.168\.)/.test(u.hostname) ? u : null; } catch { return null; }
+  // The same rule as apps/api/src/providers.ts.
+  if (typeof raw !== 'string') return null;
+  let u; try { u = new URL(raw); } catch { return null; }
+  if (u.protocol !== 'https:' || u.username || u.password) return null;
+  const h = u.hostname.toLowerCase();
+  if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal') || h.startsWith('[')) return null;
+  if (/^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h)) return null;
+  return u;
 }
 export const fakeDb = {
   // A skip list is saved as that one field (rest, voiceRest…): recorded as { [field]: list }.

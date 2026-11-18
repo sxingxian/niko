@@ -23,7 +23,10 @@ type KnFile = { id: string; name: string; kind: string; collection: string; byte
   place?: string; url?: string | null; copied?: boolean; copyError?: string | null };
 type KnSheet = { id: string; name: string; columns: KnColumn[]; rows: number; header: boolean; example: string[] };
 type OwnSource = { ref: string; name: string; example: string };
-type PlaceInfo = { connected: boolean; label: string | null; root: string | null };
+type StorageShown = { endpoint: string; bucket: string; region: string; access: boolean };
+type PlaceInfo = { connected: boolean; label: string | null; root: string | null; storage?: StorageShown };
+type StorageForm = { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string; accessId: string; accessSecret: string };
+const EMPTY_STORAGE: StorageForm = { endpoint: '', bucket: '', accessKeyId: '', secretAccessKey: '', accessId: '', accessSecret: '' };
 type State = { available: boolean; access: KnowledgeAccess; prefs: KnowledgePrefs; limits: KnowledgeLimits; usage: { files: number; bytes: number }; ownSearch?: OwnSource[]; places?: Partial<Record<KnRemotePlace, PlaceInfo>> };
 type By = 'cloudflare' | 'device' | 'own';
 type Upload = { key: string; name: string; bytes: number; step: string; done: number; total: number; error?: string };
@@ -60,6 +63,8 @@ const CONNECT: Partial<Record<KnRemotePlace, string>> = { notion: 'notion', gdri
 /** "in Niko", "in Google Drive", "on this device". */
 const inPlace = (p: KnPlace) => (p === 'device' ? 'on this device' : p === 's3' ? 'in your own storage' : `in ${KN_PLACE_NAMES[p]}`);
 const PLACE_NAME = KN_PLACE_NAMES;
+/** A place's name inside a sentence (“Move to your own storage”). */
+const toName = (p: KnPlace) => (p === 's3' ? 'your own storage' : p === 'device' ? 'this device' : PLACE_NAME[p]);
 /** Where files are read and searched: Niko (files in their own apps too) or this device. */
 type Place = 'niko' | 'device';
 /** What the screen does with files, wherever they're kept. */
@@ -88,6 +93,8 @@ export function Knowledge() {
   const [picked, setPicked] = useState<KnPlace | null>(null);
   const [copying, setCopying] = useState<{ done: number; total: number; name: string; rows?: { done: number; total: number } } | null>(null);
   const [notionPages, setNotionPages] = useState<{ id: string; title: string }[] | null>(null);
+  const [storage, setStorage] = useState<StorageForm | null>(null);
+  const [storageNote, setStorageNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [moving, setMoving] = useState<{ done: number; total: number; name: string } | null>(null);
   const [model, setModel] = useState<{ ready: boolean; p: number | null }>({ ready: embedReady(), p: null });
   // A search service of their own picked in the list, waiting for its model name before it's saved.
@@ -267,6 +274,23 @@ export function Knowledge() {
     try { sessionStorage.setItem('kn-return', CONNECT[p] ?? ''); } catch { /* storage off */ }
     navigate(`/connections?connect=${CONNECT[p]}`);
   };
+  // Their own storage: Test tries it without saving; Save tries it and keeps it (keys are never shown again).
+  const storageForm = (): StorageForm => storage ?? { ...EMPTY_STORAGE, endpoint: st?.places?.s3?.storage?.endpoint ?? '', bucket: st?.places?.s3?.storage?.bucket ?? '' };
+  const storageSend = async (save: boolean) => {
+    setStorageNote(null); setTrying(true);
+    const f = storageForm();
+    try {
+      await api(save ? '/knowledge/places/storage' : '/knowledge/places/storage/test', { method: save ? 'PUT' : 'POST', body: f });
+      setStorageNote({ ok: true, text: save ? 'Saved. Niko can keep your files there.' : 'Niko wrote a test file there, read it back and removed it.' });
+      if (save) { setStorage(null); await load(); }
+    } catch (e) { setStorageNote({ ok: false, text: (e as Error).message }); }
+    finally { setTrying(false); }
+  };
+  const storageRemove = async () => {
+    setStorageNote(null);
+    try { await api('/knowledge/places/storage', { method: 'DELETE' }); setStorage(null); await load(); }
+    catch (e) { setStorageNote({ ok: false, text: (e as Error).message }); }
+  };
   const pickNotionPage = async (v: string) => {
     setNote(null);
     try { await api('/knowledge/places/notion', { method: 'PUT', body: { page: v === 'new' ? null : v } }); await load(); }
@@ -337,7 +361,7 @@ export function Knowledge() {
   const info = (p: KnPlace) => (isRemotePlace(p) ? st.places?.[p] : undefined);
   const places: KnPlace[] = SPOTS.filter((p) => (p === 'niko' ? access.niko : p === 'device' ? access.device : !!info(p)));
   const placeStatus = (p: KnPlace) => p === spot ? `In use · ${n(files.length, 'file', 'files')}` : p === 'niko' ? 'All your devices' : p === 'device' ? 'Stays on this computer'
-    : info(p)?.connected ? `Connected${info(p)?.label ? ` · ${info(p)!.label}` : ''}` : 'Not connected yet';
+    : info(p)?.connected ? `${p === 's3' ? 'Set up' : 'Connected'}${info(p)?.label ? ` · ${info(p)!.label}` : ''}` : p === 's3' ? 'Add your storage' : 'Not connected yet';
   const shownInfo = info(shown);
   const canMoveTo = !isRemotePlace(shown) || !!shownInfo?.connected;
   const notCopied = remote ? files.filter((f) => f.status === 'ready' && !f.copied) : [];
@@ -419,6 +443,38 @@ export function Knowledge() {
                     <span className="kn-lead">{shownInfo?.connected ? '' : 'Connect OneDrive first. Personal and work Microsoft accounts both work. '}Files go in Niko’s own folder in your OneDrive (Apps › Niko › Niko Knowledge): documents as .md, spreadsheets as .csv.</span>
                     <span className="srow-hint">Niko can only see its own folder. It also keeps the search pieces and rows.</span>
                   </>}
+                  {shown === 's3' && (() => {
+                    const f = storageForm(), saved = shownInfo?.storage;
+                    const set = (k: keyof StorageForm) => (e: { target: { value: string } }) => setStorage({ ...f, [k]: e.target.value });
+                    const keyHint = saved ? 'Saved · type to change' : '';
+                    return <>
+                      <span className="kn-lead">Storage you run or rent that speaks S3, such as a NAS behind your own Cloudflare Tunnel, Cloudflare R2 or MinIO. Files go in a niko-knowledge folder: documents as .md, spreadsheets as .csv. Niko also keeps the search pieces and rows.</span>
+                      <form className="kn-store" autoComplete="off" onSubmit={(e) => { e.preventDefault(); void storageSend(true); }}>
+                        <div className="kn-grid2">
+                          <label className="kn-field"><span className="kn-k">Address</span><input className="in" value={f.endpoint} onChange={set('endpoint')} placeholder="https://s3.example.com" inputMode="url" spellCheck={false} maxLength={300} disabled={busy} /></label>
+                          <label className="kn-field"><span className="kn-k">Bucket</span><input className="in" value={f.bucket} onChange={set('bucket')} placeholder="knowledge" spellCheck={false} maxLength={63} disabled={busy} /></label>
+                          <label className="kn-field"><span className="kn-k">Access key ID</span><input className="in" value={f.accessKeyId} onChange={set('accessKeyId')} placeholder={keyHint} spellCheck={false} maxLength={128} disabled={busy} /></label>
+                          <label className="kn-field"><span className="kn-k">Secret key</span><input className="in" type="password" value={f.secretAccessKey} onChange={set('secretAccessKey')} placeholder={keyHint} maxLength={256} disabled={busy} /></label>
+                        </div>
+                        <details className="kn-details" open={saved?.access || undefined}>
+                          <summary>Behind Cloudflare Access (optional)</summary>
+                          <div className="kn-grid2">
+                            <label className="kn-field"><span className="kn-k">Client ID</span><input className="in" value={f.accessId} onChange={set('accessId')} placeholder={saved?.access ? 'Saved · type to change' : ''} spellCheck={false} maxLength={128} disabled={busy} /></label>
+                            <label className="kn-field"><span className="kn-k">Client secret</span><input className="in" type="password" value={f.accessSecret} onChange={set('accessSecret')} placeholder={saved?.access ? 'Saved · type to change' : ''} maxLength={256} disabled={busy} /></label>
+                          </div>
+                        </details>
+                        <div className="kn-store-b">
+                          <span className="srow-hint">Must use https and a public address. Keys are locked in Niko and never shown again. Changing the address clears them.</span>
+                          <span className="kn-store-acts">
+                            {saved && spot !== 's3' && <button type="button" className="bt md" disabled={busy} onClick={() => void storageRemove()}>Remove</button>}
+                            <button type="button" className="bt md" disabled={busy || !f.endpoint || !f.bucket} onClick={() => void storageSend(false)}>Test</button>
+                            <button type="submit" className="pri md" disabled={busy || !f.endpoint || !f.bucket || (!!saved && !storage)}>Save</button>
+                          </span>
+                        </div>
+                        {storageNote && <span role="status" className={'srow-hint ' + (storageNote.ok ? 'ready' : 'no')}>{storageNote.text}</span>}
+                      </form>
+                    </>;
+                  })()}
                   {isRemotePlace(shown) && !shownInfo?.connected && CONNECT[shown] && <span><button type="button" className="bt md" disabled={busy} onClick={() => connect(shown)}>Connect {PLACE_NAME[shown]}</button></span>}
                   {shown === spot && copying && <span className="kn-move-t"><Status tone="busy">Copying {Math.min(copying.done + 1, copying.total)} of {copying.total}{copying.name ? ` · ${copying.name}` : ''}{copying.rows && copying.rows.total > 20 ? ` · ${copying.rows.done.toLocaleString()} of ${copying.rows.total.toLocaleString()} rows` : ''}</Status><Meter value={copying.total ? (copying.done + (copying.rows ? copying.rows.done / Math.max(1, copying.rows.total) : 0)) / copying.total : 0} warnAt={2} label="Copying files" /></span>}
                   {shown === spot && !copying && notCopied.length > 0 && <div className="kn-move">
@@ -432,11 +488,11 @@ export function Knowledge() {
                       <span className="kn-move-t"><Status tone="busy">Moving {Math.min(moving.done + 1, moving.total)} of {moving.total}{moving.name ? ` · ${moving.name}` : ''}</Status><Meter value={moving.total ? moving.done / moving.total : 0} warnAt={2} label="Moving files" /></span>
                     </> : <>
                       <span className="srow-hint">{files.length
-                        ? isRemotePlace(shown) ? `Moving copies your ${n(files.length, 'file', 'files')} to ${PLACE_NAME[shown]}. Niko keeps their search pieces, so answers don’t change.${remote ? ' Copies in the place you leave stay there.' : ''}`
-                          : shown === 'device' || place === 'device' ? `Moving copies your ${n(files.length, 'file', 'files')} to ${PLACE_NAME[shown]}, then removes the copy ${inPlace(spot)}. Nothing is lost.${remote ? ` Copies ${inPlace(spot)} stay there.` : ''}`
+                        ? isRemotePlace(shown) ? `Moving copies your ${n(files.length, 'file', 'files')} to ${toName(shown)}. Niko keeps their search pieces, so answers don’t change.${remote ? ' Copies in the place you leave stay there.' : ''}`
+                          : shown === 'device' || place === 'device' ? `Moving copies your ${n(files.length, 'file', 'files')} to ${toName(shown)}, then removes the copy ${inPlace(spot)}. Nothing is lost.${remote ? ` Copies ${inPlace(spot)} stay there.` : ''}`
                           : `Niko stops using the copies ${inPlace(spot)}; they stay there. Your files and their search pieces are already in Niko.`
                         : `New files will be kept ${inPlace(shown)}.`}</span>
-                      <button type="button" className="pri md" disabled={busy || !canMoveTo} onClick={() => void move(shown)}>{files.length ? `Move to ${PLACE_NAME[shown]}` : `Use ${PLACE_NAME[shown]}`}</button>
+                      <button type="button" className="pri md" disabled={busy || !canMoveTo} onClick={() => void move(shown)}>{files.length ? `Move to ${toName(shown)}` : `Use ${toName(shown)}`}</button>
                     </>}
                   </div>
                 )}

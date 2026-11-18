@@ -14,6 +14,7 @@ import { ownEmbedder, ownSearchSources } from '../ownEmbed';
 import { notionPage, notionPages, PlaceError, placeConnections, remoteFor } from '../knPlaces';
 import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile, roots, setRoot } from '../knPlacesStore';
 import { credentials } from '../providers';
+import { cleanStorage, loadStorage, saveStorage, shownStorage, testStorage } from '../knStorage';
 import { addCloudflareNumbers, addOwnNumbers, clearOwnNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeDb, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
 
 export const knowledge = new Hono<AppEnv>();
@@ -69,17 +70,17 @@ async function store(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: Kn
 
 /** For each place their plan allows: whether it's connected (and as whom), and the name of Niko's folder or page. */
 async function placesInfo(c: C, k: Kdb, access: KnowledgeAccess) {
-  const allowed = KN_REMOTE_PLACES.filter((p) => access[p] && p !== 's3');
+  const allowed = KN_REMOTE_PLACES.filter((p) => access[p]);
   if (!allowed.length) return {};
-  const [conn, made] = await Promise.all([placeConnections(c.get('db'), c.get('user').id), roots(k, c.get('user').id)]);
-  return Object.fromEntries(allowed.map((p) => [p, { ...conn[p as 'notion' | 'gdrive' | 'onedrive'], root: made[p] ?? null }]));
+  const [conn, made, storage] = await Promise.all([placeConnections(c.get('db'), c.get('user').id), roots(k, c.get('user').id), access.s3 ? loadStorage(c.env, c.get('db'), c.get('user').id) : null]);
+  return Object.fromEntries(allowed.map((p) => [p, { ...conn[p], root: made[p] ?? null, ...(p === 's3' && storage ? { storage: shownStorage(storage) } : {}) }]));
 }
 /** Their chosen place, signed in, for copying; a plain problem when it can't be used. */
 async function placeFor(c: C, s: { access: KnowledgeAccess; prefs: KnowledgePrefs }, place?: KnRemotePlace) {
   const p = place ?? knRemoteOf(s.prefs, s.access);
   if (!p || !s.access[p]) return { error: c.json({ error: NOT_ON_ACCOUNT }, 403) };
   const remote = await remoteFor(c.env, c.get('db'), c.get('user').id, p);
-  if (!remote) return { error: c.json({ error: `Connect ${KN_PLACE_NAMES[p]} first.`, connect: p }, 409) };
+  if (!remote) return { error: c.json({ error: (p === 's3' ? 'Add your storage first.' : `Connect ${KN_PLACE_NAMES[p]} first.`), connect: p }, 409) };
   return { remote };
 }
 const placeFail = (c: C, e: unknown) => (e instanceof PlaceError ? c.json({ error: e.message }, e.status === 401 || e.status === 403 ? 409 : 502) : fail(c, e));
@@ -118,7 +119,7 @@ knowledge.put('/prefs', async (c) => {
     const k = knowledgeDb(c.env);
     if (!k) return c.json({ error: NOT_HERE }, 503);
     const remote = await remoteFor(c.env, c.get('db'), u.id, prefs.place);
-    if (!remote) return c.json({ error: `Connect ${KN_PLACE_NAMES[prefs.place]} first.`, connect: prefs.place }, 409);
+    if (!remote) return c.json({ error: (prefs.place === 's3' ? 'Add your storage first.' : `Connect ${KN_PLACE_NAMES[prefs.place]} first.`), connect: prefs.place }, 409);
     try { await placeRoot(k, remote, u.id); } catch (e) { return placeFail(c, e); }
   }
   if (prefs.place === 'niko' && isRemotePlace(before.place)) { const k = knowledgeDb(c.env); if (k) await leavePlaces(k, u.id); }
@@ -282,6 +283,37 @@ knowledge.put('/places/notion', async (c) => {
     await setRoot(s.k, u.id, 'notion', { id: p.id, name: p.title });
     return c.json({ ok: true, root: p.title });
   } catch (e) { return placeFail(c, e); }
+});
+
+// Their own S3 storage: tried before it's saved, keys never sent back. A new address needs its keys again.
+async function storageInput(c: C) {
+  const s = await store(c); if (s instanceof Response) return { error: s };
+  if (!s.access.s3) return { error: c.json({ error: NOT_ON_ACCOUNT }, 403) };
+  const u = c.get('user');
+  if (await tooMany(c, 'kn-storage:' + u.id, 30, 3600)) return { error: c.json({ error: 'That’s a lot of tries. Try again in a little while.' }, 429) };
+  const saved = await loadStorage(c.env, c.get('db'), u.id);
+  const cfg = cleanStorage(await c.req.json().catch(() => ({})), saved);
+  if ('problem' in cfg) return { error: c.json({ error: cfg.problem }, 400) };
+  return { s, cfg };
+}
+knowledge.post('/places/storage/test', async (c) => {
+  const r = await storageInput(c); if (r.error) return r.error;
+  try { await testStorage(r.cfg); return c.json({ ok: true }); } catch (e) { return placeFail(c, e); }
+});
+knowledge.put('/places/storage', async (c) => {
+  const r = await storageInput(c); if (r.error) return r.error;
+  try { await testStorage(r.cfg); } catch (e) { return placeFail(c, e); }
+  await saveStorage(c.env, c.get('db'), c.get('user').id, r.cfg);
+  await audit(c, 'knowledge.storage-saved', { host: new URL(r.cfg.endpoint).hostname }, c.get('user').id);
+  return c.json({ ok: true, storage: shownStorage(r.cfg) });
+});
+knowledge.delete('/places/storage', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  if (knRemoteOf(s.prefs, s.access) === 's3') return c.json({ error: 'Your files are kept in your storage. Move them to another place first.' }, 409);
+  await saveStorage(c.env, c.get('db'), c.get('user').id, null);
+  await setRoot(s.k, c.get('user').id, 's3', null);
+  await audit(c, 'knowledge.storage-removed', {}, c.get('user').id);
+  return c.json({ ok: true });
 });
 
 // Moving a file to the person's device, and making its search numbers again when they change how it's searched.
