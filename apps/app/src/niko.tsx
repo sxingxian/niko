@@ -4,7 +4,7 @@ import { startAuthentication } from '@simplewebauthn/browser';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { speakable, stripTags, aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type MapAskMode, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
 import { enterFullscreen, exitFullscreen, fullscreenSupported } from './fullscreen';
-import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag } from './speech';
+import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag, takeStepsTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
@@ -31,6 +31,8 @@ export interface MapView {
   times: Partial<Record<MapMode, number>>;
   /** Whether the location was used: yes, no (refused or unavailable). */
   located: boolean;
+  /** The route's steps are open on the card (tapped, asked for, or opened by the AI). */
+  steps?: boolean;
 }
 /** Which country's map services: from the location ('auto'), the Worldwide list ('ww'), or one the person said. */
 export type MapCountry = 'auto' | 'ww' | string;
@@ -109,6 +111,8 @@ interface NikoState {
   /** The answer to Niko's question about the location: allow (the browser then asks) or use Worldwide. */
   answerLocation: (allow: boolean) => void;
   closeMap: () => void;
+  /** Opens or closes the steps of the route on the card. */
+  setMapSteps: (open: boolean) => void;
   /** Asked for full screen by voice, which browsers allow only after a tap: Niko shows a button to tap. */
   fullscreenAsk: boolean;
   answerFullscreen: (go: boolean) => void;
@@ -287,13 +291,17 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   /** Records one request and has a speech-to-text service turn it into words. If none of them can, the device's own
    * recognition takes over for the next try. The device recogniser lets go of the mic meanwhile, and comes back after. */
   /** keep: the line on screen stays (after a stop it says what to say next, and the mic listens for it). */
-  const listenByApi = useCallback((waitMs: number, keep = false) => {
+  /** strict: listening nobody asked for (after an answer), which needs a clearly louder, longer voice to start. */
+  /** Each recording gets a number; stopping moves it on, so a recording still being turned into words is dropped. */
+  const hearing = useRef(0);
+  const listenByApi = useCallback((waitMs: number, keep = false, strict = false) => {
     capture.current?.cancel();
+    const mine = ++hearing.current;
     muteMic();
     active.current = false;
     setMode('listening');
     if (!keep) { setLabel('Listening'); setLine('Go ahead.'); }
-    const cap = captureUtterance({ waitMs, onSpeech: () => { setLabel('Listening'); setLine('Listening…'); } });
+    const cap = captureUtterance({ waitMs, strict, onSpeech: () => { setLabel('Listening'); setLine('Listening…'); } });
     capture.current = cap;
     void (async () => {
       const wav = await cap.done;
@@ -303,10 +311,13 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       setMode('thinking'); setLabel('Hearing'); setLine('Turning that into words…');
       try {
         const r = await transcribe(wav);
+        // Stopped (or moved on) while it was being turned into words: it isn't asked.
+        if (hearing.current !== mine) return;
         unmuteMic();
         if (!r.text.trim()) { setMode('idle'); setLabel('Didn’t catch that'); setLine('Say it again, or tap the mic.'); return; }
         askRef.current(r.text.trim());
       } catch (e) {
+        if (hearing.current !== mine) return;
         if ((e as { usedUp?: boolean }).usedUp) { const d = new Date(); hearUsedUpUntil.current = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1); }
         if (SR) {
           // None of the services could hear it: the device's own recognition listens for the next try.
@@ -369,7 +380,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const listenForFollowUp = useCallback((keep = false) => {
     speaking.current = false;
     if (!wantRec.current || lockedRef.current) return idle();
-    if (apiHearing()) { endFollowUp(); return listenByApi(FOLLOW_UP_MS, keep); }
+    if (apiHearing()) { endFollowUp(); return listenByApi(FOLLOW_UP_MS, keep, true); }
     if (!SR) return idle();
     active.current = true;
     setMode('listening');
@@ -382,7 +393,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   /** after: once said, this label and line show (and Niko listens for the reply to them, unless listen is false). */
   const say = useCallback((text: string, answerFrom = -1, after?: { label: string; line: string; listen?: boolean }) => {
     const engine = meRef.current?.engine as EnginePrefs | undefined;
-    stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null;
+    stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; hearing.current++;
     const id = speechId.current;
     const live = () => id === speechId.current;
     // answerFrom ≥ 0: this is (the rest of) the last answer, starting at that character, so a stop can be picked up.
@@ -563,10 +574,15 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     try {
       // A weather question carries where this device is, rounded to about 1 km, when a weather service is connected.
       const where = meRef.current?.weather && isWeatherQuestion(text) ? await whereAmI() : undefined;
-      const r = await api<{ reply: string; brief: Brief; weather?: WeatherCard }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}) } }).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
+      // The route on screen, so the AI can talk about it (and open its steps) instead of saying it can't see it.
+      const shown = mapRef.current?.result?.route && mapRef.current.status === 'done' ? mapRef.current : null;
+      const screen = shown ? { map: { from: shown.result!.from?.name === 'You' ? 'your location' : shown.result!.from?.name ?? shown.from ?? 'your location', to: shown.result!.to.name, mode: shown.result!.route!.mode, seconds: shown.result!.route!.seconds, meters: shown.result!.route!.meters, steps: shown.result!.route!.steps.slice(0, 40).map((s) => ({ text: s.text.slice(0, 200), meters: s.meters ?? 0 })) } } : undefined;
+      const r = await api<{ reply: string; brief: Brief; weather?: WeatherCard }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}) } }).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
       // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
-      const { text: noScreen, path: asked } = takeScreenTag(r.reply);
+      const { text: noSteps, open: openSteps } = takeStepsTag(r.reply);
+      if (openSteps) setMapStepsFn(true);
+      const { text: noScreen, path: asked } = takeScreenTag(noSteps);
       const { text: noItem, item } = takeItemTag(noScreen);
       // …or to scroll ([[scroll:down]]) or turn the list's page ([[page:next]]), which this screen then does.
       const { text: noMove, scroll, page } = takeMoveTags(noItem);
@@ -716,6 +732,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     mapRef.current = v; setMap(v);
     loadMap(v);
   };
+  const setMapStepsFn = (open: boolean) => { const m = mapRef.current; if (!m || !!m.steps === open) return; const next = { ...m, steps: open }; mapRef.current = next; setMap(next); };
   const closeMapFn = () => { mapCtl.current?.abort(); mapCtl.current = null; locationWait.current?.(false); locationWait.current = null; mapRef.current = null; setMap(null); };
 
   /** Paints a picture with the first image service that will (the server goes down the Engine screen's order). */
@@ -834,16 +851,17 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     const thinking = inFlight.current !== 0 && inFlight.current === askId.current;
     inFlight.current = 0;
     askId.current++; // an answer still on its way is kept for "continue", not spoken
-    stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; active.current = false; unmuteMic();
+    stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; hearing.current++; active.current = false; unmuteMic();
     if (picCtl.current) { const c = picCtl.current; picCtl.current = null; c.abort(); }
     if (locationWait.current) { const w = locationWait.current; locationWait.current = null; w(false); }
     const l = last.current;
     if (l && (thinking || (l.answer && l.from < l.answer.length))) {
       if (thinking) setResumable({ canContinue: true });
-      setMode('idle'); setLabel('Stopped'); setLine('Say “continue” to carry on, or “try again” to ask again.');
-      // Listening for a few seconds, so "continue" works without saying "Niko" first.
-      if (wantRec.current) window.setTimeout(() => listenForFollowUp(true), 400);
-    } else idle();
+      // Stopped means stopped: nothing listens afterwards (it heard videos and people nearby, and started again).
+      wantRec.current = false;
+      setMode('idle'); setLabel('Stopped');
+      setLine(SR && (meRef.current?.engine as EnginePrefs | undefined)?.wake ? 'Say “Niko, continue” to carry on, or tap the mic.' : 'Tap the mic and say “continue” to carry on, or “try again”.');
+    } else { wantRec.current = false; idle(); }
   }, [idle, listenForFollowUp]);
 
   // ---------------------------------------------------------------- a fresh start on Inbox, Calendar and Notes
@@ -859,7 +877,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     last.current = null; setResumable(null); setReply(null); setWeather(null);
     mapCtl.current?.abort(); mapRef.current = null; setMap(null); setPictureId(null);
     if (!mine) {
-      stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; active.current = false; unmuteMic();
+      stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; hearing.current++; active.current = false; unmuteMic();
       if (!lockedRef.current) idle();
     }
     void api('/chat/history', { method: 'DELETE' }).catch(() => undefined);
@@ -877,7 +895,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     if (lockedRef.current) return;
     lockedRef.current = true; setLocked(true);
     askId.current++; inFlight.current = 0;
-    stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; active.current = false;
+    stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; hearing.current++; active.current = false;
     if (picCtl.current) { const c = picCtl.current; picCtl.current = null; c.abort(); }
     mapCtl.current?.abort(); mapRef.current = null; setMap(null);
     if (locationWait.current) { const w = locationWait.current; locationWait.current = null; w(false); }
@@ -1013,6 +1031,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     setMapCountry: setMapCountryFn,
     answerLocation: (allow: boolean) => { const w = locationWait.current; locationWait.current = null; w?.(allow); },
     closeMap: closeMapFn,
+    setMapSteps: setMapStepsFn,
     fullscreenAsk,
     answerFullscreen: (go: boolean) => { setFullscreenAsk(false); window.clearTimeout(fsTimer.current); if (go) void enterFullscreen(); },
     resumable,

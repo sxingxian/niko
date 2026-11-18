@@ -8,7 +8,7 @@ import { mapsOn } from '../packages/shared/src/index.ts';
 import { greatCircle, greatCircleMeters, flightSeconds, countryNamed, isCountryName } from '../packages/shared/src/maps.ts';
 import { fullscreenCommand } from '../apps/app/src/speech.ts';
 import { bdToGcj, gcjToBd, gcjToWgs, mapChain, mapHandoff, mapSkipped, wgsToGcj } from '../packages/shared/src/maps.ts';
-import { countryCommand, countryFromName, mapCommand, takeMapTag } from '../apps/app/src/speech.ts';
+import { countryCommand, countryFromName, mapCommand, stepsCommand, takeMapTag, takeStepsTag } from '../apps/app/src/speech.ts';
 import { store, fakeDb } from './brains-stubs.mjs';
 
 const ok = async (name, fn) => { try { await fn(); console.log('PASS', name); } catch (e) { console.log('FAIL', name, e?.stack ?? e?.message); process.exitCode = 1; } };
@@ -263,4 +263,17 @@ await ok('full screen by voice', () => {
   assert.equal(fullscreenCommand('Niko, go full screen'), 'enter'); assert.equal(fullscreenCommand('fullscreen please'), 'enter');
   assert.equal(fullscreenCommand('exit full screen'), 'exit'); assert.equal(fullscreenCommand('back to normal'), 'exit');
   assert.equal(fullscreenCommand('what is a full screen monitor'), null);
+});
+await ok('the steps of the route on screen: many ways of asking, and new routes left alone', async () => {
+  for (const t of ['Niko, open the steps to show the direction', 'show me the steps for the direction', 'can you open the steps please', 'show the step by step', 'open step-by-step directions',
+    'display the route steps', 'expand the directions', 'let me see the steps', 'can I see the transit breakdown', 'steps', 'the directions please', 'show me the directions'])
+    assert.deepEqual(stepsCommand(t), { steps: true }, t);
+  for (const t of ['read me the steps', 'tell me the directions', 'what are the steps', 'walk me through the steps', 'how do I get there step by step', 'read the directions out loud'])
+    assert.deepEqual(stepsCommand(t), { steps: true, read: true }, t);
+  for (const t of ['hide the steps', 'close the directions', 'collapse the steps']) assert.deepEqual(stepsCommand(t), { steps: false }, t);
+  for (const t of ['directions to Changi Airport', 'show me directions to the zoo', 'steps to get to Orchard', 'how do I get to the zoo by train', 'directions from Bishan to Tampines'])
+    assert.equal(stepsCommand(t), null, t);
+  assert.deepEqual(mapCommand('show me the steps for the direction'), { steps: true });
+  assert.deepEqual(takeStepsTag('Here are the steps. [[steps]]'), { text: 'Here are the steps.', open: true });
+  assert.deepEqual(takeStepsTag('Take the TE line.'), { text: 'Take the TE line.', open: false });
 });

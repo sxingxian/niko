@@ -28,11 +28,14 @@ export function captureSupported(): boolean {
  */
 export interface Vad { push(rms: number, ms: number): 'wait' | 'start' | 'talk' | 'end' | 'noise' }
 export const VAD = { MIN_START: 0.006, MAX_START: 0.06, FLOOR_MIN: 0.0015, FLOOR_MAX: 0.025, START_X: 3, KEEP_X: 1.8, QUIET_MS: 1300, PRE_MS: 800, ROOM_MS: 1500, WARM_MS: 250 } as const;
-export function createVad(): Vad {
+/** strict: for listening nobody asked for (after an answer): a clearly louder voice, for longer, so a video or
+ * someone talking across the room isn't taken for a request. */
+export function createVad(opts: { strict?: boolean } = {}): Vad {
+  const MIN = opts.strict ? 0.014 : VAD.MIN_START, X = opts.strict ? 4 : VAD.START_X, NEED = opts.strict ? 300 : 150;
   let floor: number = VAD.FLOOR_MAX, talking = false, loudMs = 0, lastLoud = 0, peak = 0, t = 0;
   const recent: number[] = [];
-  const startBar = () => Math.min(VAD.MAX_START, Math.max(VAD.MIN_START, floor * VAD.START_X));
-  const keepBar = () => Math.max(VAD.MIN_START * 0.6, Math.min(startBar(), floor * VAD.KEEP_X));
+  const startBar = () => Math.min(VAD.MAX_START, Math.max(MIN, floor * X));
+  const keepBar = () => Math.max(MIN * 0.6, Math.min(startBar(), floor * VAD.KEEP_X));
   return {
     push(rms, ms) {
       t += ms;
@@ -45,9 +48,10 @@ export function createVad(): Vad {
       if (recent.length > Math.max(3, Math.round(VAD.ROOM_MS / ms))) recent.shift();
       floor = Math.min(VAD.FLOOR_MAX, Math.max(VAD.FLOOR_MIN, Math.min(...recent)));
       if (!talking) {
-        // About 150 ms of voice (or 60 ms of clearly loud voice) to start, so a tap or a click doesn't count.
-        loudMs = rms > startBar() ? loudMs + ms : 0;
-        if (loudMs >= 150 || (loudMs >= 60 && rms > startBar() * 2.5)) { talking = true; lastLoud = t; peak = rms; return 'start'; }
+        // About 150 ms of voice (300 ms when nobody asked), or 60 ms of clearly loud voice, so a tap or click doesn't count.
+        // (Short dips between syllables count it down, not back to nothing.)
+        loudMs = rms > startBar() ? loudMs + ms : Math.max(0, loudMs - 2 * ms);
+        if (loudMs >= NEED || (loudMs >= 60 && rms > startBar() * 2.5 && !opts.strict)) { talking = true; lastLoud = t; peak = rms; return 'start'; }
         return 'wait';
       }
       peak = Math.max(peak, rms);
@@ -59,7 +63,7 @@ export function createVad(): Vad {
   };
 }
 
-export function captureUtterance(opts: { waitMs: number; maxMs?: number; onSpeech?: () => void; onLevel?: (v: number) => void }): Capture {
+export function captureUtterance(opts: { waitMs: number; maxMs?: number; strict?: boolean; onSpeech?: () => void; onLevel?: (v: number) => void }): Capture {
   const maxMs = opts.maxMs ?? 15_000;
   let stopNow: (keep: boolean) => void = () => undefined;
   // Made and resumed now, while the tap that started listening still counts: Safari (iPhone, iPad) otherwise keeps
@@ -70,7 +74,7 @@ export function captureUtterance(opts: { waitMs: number; maxMs?: number; onSpeec
     let ended = false, stream: MediaStream | null = null;
     const chunks: Float32Array[] = [], before: Float32Array[] = [];
     let heard = false;
-    const vad = createVad();
+    const vad = createVad({ strict: opts.strict });
     const t0 = performance.now();
     const end = (keep: boolean) => {
       if (ended) return;

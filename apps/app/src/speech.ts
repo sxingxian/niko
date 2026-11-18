@@ -241,6 +241,11 @@ export function pictureCommand(raw: string): 'save' | 'share' | 'more' | 'close'
 type MapHow = 'drive' | 'transit' | 'walk' | 'cycle' | 'place' | 'fly';
 /** The AI asks for a map by ending its reply with [[map:<how>|<destination>]] or [[map:<how>|<destination>|<start>]];
  * [[map:<how>|same]] changes how to travel on the map already showing. */
+/** The AI opening the route's steps on screen: [[steps]]. */
+export function takeStepsTag(text: string): { text: string; open: boolean } {
+  const open = /\[\[\s*steps\s*\]\]/i.test(text);
+  return { text: open ? text.replace(/\s*\[\[\s*steps\s*\]\]\s*/gi, ' ').replace(/\s+/g, ' ').trim() : text, open };
+}
 export function takeMapTag(reply: string): { text: string; map: { how: MapHow | 'any'; to: string; from?: string } | null } {
   const m = /\[\[\s*map\s*:\s*([a-z]+)\s*\|\s*([^|\]]{1,200}?)\s*(?:\|\s*([^\]]{1,200}?)\s*)?\]\]/i.exec(reply);
   const text = reply.replace(/\s*\[\[\s*map\s*:[^\]]*\]\]\s*/gi, ' ').replace(/\s+/g, ' ').trim();
@@ -260,11 +265,28 @@ const MODE_WORDS: [Exclude<MapHow, 'place'>, string][] = [
   ['fly', 'planes?|flight|flights|fly|flying|air|the flight path|flight path|airplane|aeroplane'],
 ];
 /** On a map: "by train", "walking instead", "drive me there", "by bike", "close the map". */
-export function mapCommand(raw: string): { mode: Exclude<MapHow, 'place'> } | { close: true } | { steps: boolean } | null {
+/**
+ * The steps of the route on screen: "show me the steps for the direction", "can you open the step by step",
+ * "read me the directions", "what are the steps", "hide the steps". `read` asks for them aloud too. A request for a new
+ * route ("directions to Changi", "steps to get to the zoo") isn't one: it goes on as a map request.
+ */
+export function stepsCommand(raw: string): { steps: boolean; read?: boolean } | null {
+  let t = cleanCommand(raw).replace(/^(?:how about|what about|maybe|let's|lets|i want to|i'd like to|i wanna)\s+/, '');
+  // "…for the direction(s)", "…on the map", "…to show the directions": about the route already shown.
+  t = t.replace(/\s+(?:for|of|on|in|from)\s+(?:the|this|that|my)\s+(?:direction|directions|route|map|trip|journey|way|card)$/, '')
+    .replace(/\s+(?:to|so (?:i|we) can)\s+(?:show|see|view|read|follow)\s+(?:the|my)\s+(?:direction|directions|route|way)$/, '').trim();
+  if (/\b(?:to|towards|from)\s+(?!(?:the|this|my)\s+(?:direction|directions|route|steps)\b)(?!show\b|see\b|view\b|read\b|follow\b|get there\b)[a-z0-9]/.test(t) && !/\b(?:get|getting) there\b/.test(t)) return null;
+  const words = '(?:the |those |these |all the |each )?(?:route |transit |travel |bus |train |mrt )?(?:steps?|step by step|step-by-step|turn by turn|turn-by-turn|directions?|instructions|breakdown|details|route details|way to go)(?: directions| instructions| list)?';
+  if (new RegExp(`^(?:close|closing|hide|hiding|collapse|fold|put away)(?: up)? ${words}$`).test(t)) return { steps: false };
+  if (new RegExp(`^(?:read|reading|say|tell me|tell|walk me through|talk me through|go through|run me through)(?: me| us)?(?: out)? ${words}(?: out| aloud| out loud)?$|^what (?:are|were) ${words}$|^how do (?:i|we) get there step by step$`).test(t)) return { steps: true, read: true };
+  if (new RegExp(`^(?:open|opening|show|showing|see|view|display|expand|list|bring up|pull up|give me|give)(?: me| us)?(?: up)? ${words}$|^${words}$|^(?:can i|could i|let me) (?:see|view|have) ${words}$`).test(t)) return { steps: true };
+  return null;
+}
+
+export function mapCommand(raw: string): { mode: Exclude<MapHow, 'place'> } | { close: true } | { steps: boolean; read?: boolean } | null {
   const t = cleanCommand(raw).replace(/^(?:how about|what about|maybe|let's|lets)\s+/, '');
-  const steps = '(?:the )?(?:steps|directions|turn by turn(?: directions)?|route steps|instructions)';
-  if (new RegExp(`^(?:open|opening|show|showing|see|expand|read|list)(?: me)? ${steps}$|^${steps}$`).test(t)) return { steps: true };
-  if (new RegExp(`^(?:close|closing|hide|hiding|collapse) ${steps}$`).test(t)) return { steps: false };
+  const st = stepsCommand(raw);
+  if (st) return st;
   if (/^(?:close|hide|dismiss|put away)(?: (?:it|this|that|the map|the route|the directions|map))?$/.test(t)) return { close: true };
   for (const [mode, words] of MODE_WORDS) {
     const re = new RegExp(`^(?:(?:show me|switch to|change to|change it to|go|use|try|what about|how about|and|let's go|i'll go|i'll take|take|get there|make it|instead)\\s+)*(?:(?:by|on|with|via|using|in)\\s+)?(?:the |a )?(?:${words})(?:\\s+(?:instead|there|route|directions|it|then|way|mode))*$`);

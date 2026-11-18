@@ -119,10 +119,20 @@ function whyLine(v: MapView, r: MapResult, chosen: string): string {
   return why;
 }
 
+/** The steps, said aloud: each as a short sentence with its distance (up to 12; the rest are on the card). */
+function stepsAloud(list: { text: string; meters?: number }[]): string {
+  const one = (s: { text: string; meters?: number }) => {
+    const t = s.text.replace(/\s+/g, ' ').trim().replace(/\b([A-Z][A-Z]+(?:\s+[A-Z][A-Z]+)*)\b/g, (w) => (w.length <= 3 ? w : w.toLowerCase().replace(/\b\w/g, (x) => x.toUpperCase())));
+    return `${t}${s.meters ? `, ${distanceText(s.meters)}` : ''}.`;
+  };
+  const shown = list.slice(0, 12).map((s, i) => `${i === 0 ? 'First' : i === list.length - 1 ? 'Finally' : 'Then'}, ${one(s).replace(/^\w/, (x) => x.toLowerCase())}`);
+  return `${list.length} steps. ${shown.join(' ')}${list.length > 12 ? ` The other ${list.length - 12} are on the card.` : ''}`.replace(/\bm\b/g, 'metres').replace(/\bkm\b/g, 'kilometres');
+}
+
 export function MapCard({ v, tabbable }: { v: MapView; tabbable?: boolean }) {
   const n = useNiko();
   const [picker, setPicker] = useState(false);
-  const [steps, setSteps] = useState(false);
+  const steps = !!v.steps;
   const tab = tabbable ? 0 : -1;
   const r = v.result;
   const lists = Object.keys(n.me?.engine.mapCountries ?? {}).filter((cc) => n.me?.engine.mapCountries?.[cc]?.length).sort();
@@ -134,9 +144,10 @@ export function MapCard({ v, tabbable }: { v: MapView; tabbable?: boolean }) {
       if (!c) return false;
       if ('close' in c) { n.closeMap(); n.carryOn(); return true; }
       if ('steps' in c) {
-        const has = !!v.result?.route?.steps.length;
-        setSteps(c.steps && has);
-        n.setStatus('Heard', !has ? 'There are no steps for this map.' : c.steps ? 'Here are the steps.' : 'Steps hidden.', 'speaking');
+        const list = v.result?.route?.steps ?? [];
+        n.setMapSteps(c.steps && list.length > 0);
+        if (c.steps && c.read && list.length) { n.say(stepsAloud(list)); return true; }
+        n.setStatus('Heard', !list.length ? (v.status === 'loading' ? 'Still finding the way.' : 'There are no steps for this map.') : c.steps ? 'Here are the steps.' : 'Steps hidden.', 'speaking');
         window.setTimeout(n.carryOn, 1200);
         return true;
       }
@@ -223,7 +234,7 @@ export function MapCard({ v, tabbable }: { v: MapView; tabbable?: boolean }) {
           </div>
         )}
         {r?.route && r.route.steps.length > 0 && (
-          <details className="map-steps" open={steps} onToggle={(e) => setSteps((e.target as HTMLDetailsElement).open)}>
+          <details className="map-steps" open={steps} onToggle={(e) => n.setMapSteps((e.target as HTMLDetailsElement).open)}>
             <summary tabIndex={tab}>Steps ({r.route.steps.length})</summary>
             <ol>{r.route.steps.map((s, i) => <li key={i}><span>{s.text}</span>{s.meters ? <span className="map-small">{distanceText(s.meters)}</span> : null}</li>)}</ol>
           </details>

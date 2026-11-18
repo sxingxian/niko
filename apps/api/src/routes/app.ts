@@ -863,8 +863,22 @@ app.delete('/chat/history', async (c) => {
   await c.get('db').delete(chatTurns).where(eq(chatTurns.userId, c.get('user').id));
   return c.json({ ok: true });
 });
+/** How to use the route on the user's screen. */
+const STEPS_RULE = 'A route is showing on the user’s screen (in <SCREEN> above), with its steps listed on the card under Steps. Answer questions about the way from those steps (which line, where to change, how far to walk, how long). When the user asks to see, open or show the steps or directions, say a short line such as “Here are the steps.” and end your reply with [[steps]], which opens them on the card. Never say you can’t show or display the steps.';
+/** The route on the user's screen, as plain lines for the AI (from the app; only the text of what is shown). */
+function screenText(v: unknown): string {
+  const m = (v as { map?: Record<string, unknown> } | null)?.map;
+  if (!m || typeof m !== 'object') return '';
+  const clean = (x: unknown, n: number) => String(x ?? '').replace(/[<>\[\]{}]/g, '').replace(/\s+/g, ' ').trim().slice(0, n);
+  const steps = Array.isArray(m.steps) ? (m.steps as { text?: unknown; meters?: unknown }[]).slice(0, 40) : [];
+  const mins = Math.round(clampNum(m.seconds, 0, 864_000, 0) / 60), km = clampNum(m.meters, 0, 4e7, 0) / 1000;
+  const mode = ({ drive: 'driving', transit: 'public transport', walk: 'walking', cycle: 'cycling', fly: 'flight' } as Record<string, string>)[String(m.mode)] ?? 'travel';
+  if (!clean(m.to, 120)) return '';
+  const lines = steps.map((s, i) => `${i + 1}. ${clean(s.text, 200)}${clampNum(s.meters, 0, 4e7, 0) ? ` (${Math.round(clampNum(s.meters, 0, 4e7, 0))} m)` : ''}`);
+  return `<SCREEN>\nRoute from ${clean(m.from, 120) || 'the user’s location'} to ${clean(m.to, 120)} by ${mode}: about ${mins} min, ${km.toFixed(1)} km.${lines.length ? `\nSteps:\n${lines.join('\n')}` : ''}\n</SCREEN>\n`;
+}
 app.post('/chat', async (c) => {
-  const b = await c.req.json<{ message?: string; tz?: number; purpose?: string; where?: unknown }>();
+  const b = await c.req.json<{ message?: string; tz?: number; purpose?: string; where?: unknown; screen?: unknown }>();
   const text = String(b.message ?? '').trim().slice(0, b.purpose === 'draft' ? 5000 : 2000); // a draft being rewritten is sent along with the request
   // A draft for the workspace is a one-off: it neither sees nor joins the spoken conversation.
   const oneOff = b.purpose === 'draft';
@@ -899,8 +913,9 @@ app.post('/chat', async (c) => {
   const off = await offFor(db, u);
   const mapRule = oneOff ? '' : !mapsOn(off) ? NOT_ON_ACCOUNT_MAP_RULE : await mapsUsable(c.env, db, u, off) ? MAP_RULE : NO_MAP_RULE;
   const wxRule = wx ? `\n${WEATHER_RULE}${weather ? '' : '\nNo forecast for the user’s own location is given. If they ask about the weather where they are, say their location is off, and that they can allow it in the browser or set a home place for Open-Meteo in Connections.'}` : '';
+  const onScreen = oneOff ? '' : screenText(b.screen);
   const msgs = [
-    { role: 'system', content: `${SYSTEM}${oneOff ? '\nThis request is for the text of a message the user will send: write only that text, and never any [[…]] tag (no screen, scroll, page, map or picture tags).' : `\n${off.includes('sec:images') ? NOT_ON_ACCOUNT_IMAGE_RULE : imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}\n${mapRule}`}${wxRule}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${weather}` },
+    { role: 'system', content: `${onScreen}${SYSTEM}${oneOff ? '\nThis request is for the text of a message the user will send: write only that text, and never any [[…]] tag (no screen, scroll, page, map or picture tags).' : `\n${off.includes('sec:images') ? NOT_ON_ACCOUNT_IMAGE_RULE : imageOrder(u.engine as Partial<EnginePrefs>).length ? IMAGE_RULE : NO_IMAGE_RULE}\n${mapRule}`}${wxRule}${onScreen ? `\n${STEPS_RULE}` : ''}\nThe user's name is ${u.name || 'not given'}.${data ? `\n<DATA>\n${data}\n</DATA>` : ''}${weather}` },
     ...history.map((h) => ({ role: h.role, content: h.content })),
     { role: 'user', content: text },
   ];

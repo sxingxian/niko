@@ -7,7 +7,7 @@ let pass = 0;
 const ok = (name, fn) => { try { fn(); pass++; console.log('PASS', name); } catch (e) { console.log('FAIL', name, e?.message); process.exitCode = 1; } };
 const F = 21; // ms per slice (1024 samples at 48 kHz)
 /** Plays a list of [rms, ms] through a new detector; returns each frame's answer. */
-const play = (parts) => { const v = createVad(); const out = []; for (const [rms, ms] of parts) for (let t = 0; t < ms; t += F) out.push(v.push(rms, F)); return out; };
+const play = (parts, opts) => { const v = createVad(opts); const out = []; for (const [rms, ms] of parts) for (let t = 0; t < ms; t += F) out.push(v.push(rms, F)); return out; };
 const at = (out, word) => out.indexOf(word);
 
 ok('a quiet phone voice in a quiet room is heard', () => {
@@ -52,5 +52,12 @@ ok('it ends after a pause of about 1.3 seconds', () => {
   const quietFrames = at(out, 'end') - (Math.ceil(300 / F) + Math.ceil(600 / F)) + 1;
   void quietFrames;
   assert.ok(quietFrames * F >= 1300 && quietFrames * F <= 1400, `${quietFrames * F} ms`);
+});
+ok('listening nobody asked for (after an answer) ignores a video or talk across the room, but not someone speaking to it', () => {
+  const far = []; for (let i = 0; i < 10; i++) far.push([0.009, 200], [0.0025, 80]);
+  assert.ok(play([[0.0025, 400], ...far, [0.0025, 1600]]).includes('start'), 'after a tap, a soft voice is heard');
+  assert.ok(!play([[0.0025, 400], ...far, [0.0025, 1600]], { strict: true }).includes('start'), 'unasked, it is not');
+  const near = []; for (let i = 0; i < 6; i++) near.push([0.04, 250], [0.004, 80]);
+  assert.ok(play([[0.0025, 400], ...near, [0.0025, 1600]], { strict: true }).includes('start'), 'someone talking to it is');
 });
 console.log(`${pass} listening checks passed`);
