@@ -6,7 +6,7 @@ import { aiAllowed, stripTags, PAGE_SIZES, SEND_COUNTDOWN_SECONDS, voiceName, vo
 /** The first voice this account may use (the admin may have turned some off); the device voice if none. */
 const firstVoice = (m: Me | null | undefined) => { const off = m?.aiOff ?? []; return off.includes('sec:voices') ? 'device' : voiceOrder(m?.engine).find((v) => v.startsWith('vkey:') || aiAllowed(off, voiceOption(v))) ?? 'device'; };
 import { Backdrop, api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
-import { useNiko, type KnowledgeAnswer } from '../niko';
+import { useNiko, type FollowUp, type KnowledgeAnswer } from '../niko';
 import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
 import { isStacked } from '../flow';
 import { PictureCard } from './Picture';
@@ -123,6 +123,62 @@ function Sparks({ run, cards }: { run: number; cards: number }) {
 
 const CARD_GAP = 0.6; // seconds between the answer card and the approval card building
 
+const followFor = (f: FollowUp | null, reply: string) => (f && f.for === reply ? f : null);
+/** The card under an answer from the person's files or about what Niko learned: where it came from, "Is this the
+ *  one?" for something only similar, a taught match or a note just learned (with Undo), or choices to tap. */
+function KnowledgeCard({ reply, kn, tabbable }: { reply: string; kn: KnowledgeAnswer | null; tabbable: boolean }) {
+  const n = useNiko();
+  const f = followFor(n.followUp, reply);
+  const t = tabbable ? 0 : -1;
+  const row = (badge: string, name: string, sub: string, app = false) => (
+    <li key={name}><span className={'kn-src-n' + (app ? ' app' : '')}>{badge}</span><span className="kn-src-t"><b>{name}</b><span>{sub}</span></span></li>
+  );
+  const label = (x: { file: string; heading: string | null }) => `${x.file}${x.heading ? ` › ${x.heading}` : ''}`;
+  if (f?.kind === 'choices') return (
+    <section className="g kn-src" aria-label="Choose one">
+      <span className="k">Choose one</span>
+      <div className="kn-choices">{f.options.map((o) => <button key={o} type="button" className="sec" tabIndex={t} onClick={() => void n.ask(o)}>{o}</button>)}</div>
+      <span className="kn-src-note">Or say it. Niko will remember your answer.</span>
+    </section>
+  );
+  if (f?.kind === 'learned') return (
+    <section className="g kn-src" aria-label="Learned just now">
+      <span className="k">Learned just now</span>
+      <ol className="kn-src-list">{f.items.map((it) => row('✓', it.kind === 'remembered' ? `“${it.said}”` : `“${it.said}” → ${it.means}`, it.kind === 'remembered' ? 'Kept as you said it' : it.kind === 'correction' ? 'You corrected Niko' : 'You told Niko', true))}</ol>
+      <div className="kn-src-b"><button type="button" className="sec" tabIndex={t} onClick={n.undoFollowUp}>Undo</button><button type="button" className="pri" tabIndex={t} onClick={n.dismissFollowUp}>Done</button></div>
+      <span className="kn-src-note">Change or forget it in Settings · Knowledge · What Niko learned.</span>
+    </section>
+  );
+  if (f?.kind === 'noted') return (
+    <section className="g kn-src" aria-label="Noted">
+      <span className="k">Noted</span>
+      <ol className="kn-src-list">{row('×', label(f.target), 'Not offered for this question again')}</ol>
+      <div className="kn-src-b"><button type="button" className="sec" tabIndex={t} onClick={n.undoFollowUp}>Undo</button><button type="button" className="pri" tabIndex={t} onClick={n.dismissFollowUp}>Done</button></div>
+      <span className="kn-src-note">You can change it in Settings · Knowledge.</span>
+    </section>
+  );
+  if (!kn) return null;
+  if (kn.ask && !kn.lead) return (
+    <section className="g kn-src" aria-label="Something similar in your Knowledge">
+      <span className="k">Something similar in your Knowledge</span>
+      <ol className="kn-src-list">{row(kn.ask.file.split('.').pop()?.toUpperCase().slice(0, 4) || '?', label(kn.ask), 'Close, but I’m not sure it answers this. Is this the one?')}</ol>
+      <div className="kn-src-b"><button type="button" className="sec" tabIndex={t} onClick={() => n.teach('no')}>Not this one</button><button type="button" className="pri" tabIndex={t} onClick={() => n.teach('yes')}>Yes, that’s the one</button></div>
+      <span className="kn-src-note">Or say “that’s the one”. Niko will use it for questions like this next time.</span>
+    </section>
+  );
+  const taught = f?.kind === 'taught' && kn.taught;
+  return (
+    <section className="g kn-src" aria-label="Sources">
+      <span className="k">{taught ? 'Source · taught by you' : `${kn.sources.length === 1 ? 'Source' : 'Sources'} · your files`}</span>
+      <ol className="kn-src-list">{kn.sources.map((s, i) => row(String(s.n), label(s), taught && i === 0 ? 'Remembered just now' : s.collection))}</ol>
+      {taught ? <>
+        <div className="kn-src-b"><Link className="sec" to="/knowledge" tabIndex={t}>Open Knowledge</Link><button type="button" className="sec" tabIndex={t} onClick={n.undoFollowUp}>Undo</button></div>
+        <span className="kn-src-note">Matches you taught are listed in Settings · Knowledge.</span>
+      </> : <Link className="sec" to="/knowledge" tabIndex={t}>Open Knowledge</Link>}
+    </section>
+  );
+}
+
 export function Home() {
   const n = useNiko();
   const wide = useWide();
@@ -152,7 +208,7 @@ export function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [n.reply, n.weather, n.knowledge, wide]);
   const submit = (e: FormEvent) => { e.preventDefault(); const t = text; setText(''); setTyping(false); void n.ask(t); };
-  const cards = shown ? (shown.chat || shown.kn ? 2 : 1) : 0;
+  const cards = shown ? (shown.chat || shown.kn || followFor(n.followUp, shown.reply) ? 2 : 1) : 0;
   const card = !!pic || !!mapv;
   // The caption always sits under the core: aside exactly when the core moves aside (an answer, a picture or a map is
   // open on a wide screen), back when it returns. Before, a new question asked over a map or picture sent the caption
@@ -224,7 +280,7 @@ export function Home() {
             {shown.wx ? <WeatherCard card={shown.wx} onClose={n.dismissReply} tabbable={open} /> : (
             <section className="g">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span className="k">{shown.kn?.only ? 'Niko · from your files' : shown.kn?.lead ? 'Niko · your files lead' : 'Niko'}</span>
+                <span className="k">{shown.kn?.only || (n.knowledge?.for === shown.reply && n.knowledge.k.taught) ? 'Niko · from your files' : shown.kn?.lead ? 'Niko · your files lead' : 'Niko'}</span>
                 <button className="ib" style={{ width: 44, height: 44, margin: '-8px -10px -8px 0' }} onClick={n.dismissReply} aria-label="Hide the answer" tabIndex={open ? 0 : -1}><Icon name="x" /></button>
               </div>
               <p className="reply"><Words text={shown.reply} start={wide ? 1.0 : 0.35} /></p>
@@ -232,21 +288,13 @@ export function Home() {
             )}
             <Outline />
           </div>
-          {shown.kn && (
+          {(shown.kn || followFor(n.followUp, shown.reply)) && (
             <div className="card-build" style={{ ['--d' as string]: `${CARD_GAP}s` }}>
-              <section className="g kn-src" aria-label="Sources">
-                <span className="k">{shown.kn.sources.length === 1 ? 'Source' : 'Sources'} · your files</span>
-                <ol className="kn-src-list">
-                  {shown.kn.sources.map((s) => (
-                    <li key={s.n}><span className="kn-src-n">{s.n}</span><span className="kn-src-t"><b>{s.file}{s.heading ? ` › ${s.heading}` : ''}</b><span>{s.collection}</span></span></li>
-                  ))}
-                </ol>
-                <Link className="sec" to="/knowledge" tabIndex={open ? 0 : -1}>Open Knowledge</Link>
-              </section>
+              <KnowledgeCard reply={shown.reply} kn={n.knowledge?.for === shown.reply ? n.knowledge.k : shown.kn} tabbable={open} />
               <Outline />
             </div>
           )}
-          {shown.chat && (
+          {shown.chat && !followFor(n.followUp, shown.reply) && (
             <div className="card-build" style={{ ['--d' as string]: `${CARD_GAP}s` }}>
               <section className="g" aria-label="Waiting for a reply">
                 <div className="meta"><span className="k">Waiting for a reply</span><span>{shown.chat.source}</span></div>

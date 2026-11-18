@@ -2,15 +2,23 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { startAuthentication } from '@simplewebauthn/browser';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { speakable, stripTags, aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type MapAskMode, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
+import { type KnTarget, speakable, stripTags, aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type MapAskMode, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
 
-/** Where an answer came from in the person's files (from /chat). */
-export type KnowledgeAnswer = { lead: boolean; only: boolean; sources: { n: number; file: string; heading: string | null; collection: string }[] };
+/** Where an answer came from in the person's files (from /chat). `ask`: the closest piece is only similar, so Home asks
+ *  "Is this the one?". `taught`: the piece that leads is one the person taught. */
+export type KnowledgeAnswer = { lead: boolean; only: boolean; taught?: boolean; ask?: KnTarget; sources: { n: number; file: string; heading: string | null; collection: string }[] };
+/** What Home shows under an answer about learning: choices to tap, notes just learned, or a taught match to undo. */
+export type FollowUp = { for: string; question: string } & (
+  | { kind: 'choices'; options: string[] }
+  | { kind: 'learned'; items: { id: string; kind: string; said: string; means: string }[]; device: boolean }
+  | { kind: 'noted'; target: KnTarget; id: string; device: boolean }
+  | { kind: 'taught'; id: string; device: boolean });
 import { enterFullscreen, exitFullscreen, fullscreenSupported } from './fullscreen';
 import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag, takeStepsTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
-import { chatWithTables, knowledgeAccount, knowledgeFor } from './knowledgeChat';
+import { chatWithTables, keepDeviceNotes, knowledgeAccount, knowledgeFor } from './knowledgeChat';
+import { forgetNoteHere, teachHere } from './knowledgeDevice';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, ApiError, lockedSignal, setAppearance, type CoreMode } from '@niko/ui';
 
@@ -72,6 +80,12 @@ interface NikoState {
   weather: { for: string; card: WeatherCard } | null;
   /** The files an answer came from (Knowledge), for the answer it came with. */
   knowledge: { for: string; k: KnowledgeAnswer } | null;
+  followUp: FollowUp | null;
+  /** "That's the one" / "Not this one" for the similar piece Home shows. */
+  teach: (answer: 'yes' | 'no') => void;
+  /** Undoes what was just learned or taught. */
+  undoFollowUp: () => void;
+  dismissFollowUp: () => void;
   brief: Brief | null;
   micOn: boolean;
   voiceSupported: boolean;
@@ -202,6 +216,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [reply, setReply] = useState<string | null>(null);
   const [weather, setWeather] = useState<{ for: string; card: WeatherCard } | null>(null);
   const [knowledge, setKnowledge] = useState<{ for: string; k: KnowledgeAnswer } | null>(null);
+  const [nextStep, setNextStep] = useState<FollowUp | null>(null);
+  const knowledgeRef = useRef(knowledge); knowledgeRef.current = knowledge;
+  const followRef = useRef(nextStep); followRef.current = nextStep;
   const [brief, setBrief] = useState<Brief | null>(null);
   const [micOn, setMicOn] = useState(false);
   const navigate = useNavigate();
@@ -528,6 +545,11 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       if (l.from >= l.answer.length) { setMode('speaking'); setLabel('Heard'); setLine('That was the end of my answer. Say “repeat” to hear it again.'); window.setTimeout(() => (wantRec.current ? listenForFollowUp(true) : idle()), 1600); return; }
       return say(l.answer.slice(l.from), l.from);
     }
+    // "That's the one" / "Not this one" right after Niko showed something similar from the person's files.
+    if (knowledgeRef.current?.k.ask) {
+      if (/^(yes|yeah|yep)?\s*(that'?s|that is|it'?s|this is) (the one|it|right)\b|^yes,? (that|this) one\b/.test(lower)) { teachFn('yes'); return; }
+      if (/^(no,? )?not (this|that) one\b|^no,? (that'?s|that is|it'?s) not (it|the one)\b/.test(lower)) { teachFn('no'); return; }
+    }
     setReply(null); failStreak.current = 0;
     // 1. Phrases a page has claimed (send it / cancel).
     if (glanceHandler.current?.(lower) || handler.current?.(lower)) return;
@@ -573,7 +595,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     return askAI(text);
   }, [navigate, idle, say, goTo, listenForFollowUp, SR]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const askAI = async (text: string) => {
+  const askAI = async (text: string, opts: { pin?: KnTarget; taught?: { id: string; device: boolean } } = {}) => {
     const mine = ++askId.current;
     inFlight.current = mine;
     last.current = { question: text, answer: null, from: 0 };
@@ -585,9 +607,10 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // The route on screen, so the AI can talk about it (and open its steps) instead of saying it can't see it.
       const shown = mapRef.current?.result?.route && mapRef.current.status === 'done' ? mapRef.current : null;
       const screen = shown ? { map: { from: shown.result!.from?.name === 'You' ? 'your location' : shown.result!.from?.name ?? shown.from ?? 'your location', to: shown.result!.to.name, mode: shown.result!.route!.mode, seconds: shown.result!.route!.seconds, meters: shown.result!.route!.meters, steps: shown.result!.route!.steps.slice(0, 40).map((s) => ({ text: s.text.slice(0, 200), meters: s.meters ?? 0 })) } } : undefined;
-      const knowledge = await knowledgeFor(meRef.current, text);
-      const body = { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}), ...(knowledge ? { knowledge } : {}) };
-      const r = await chatWithTables<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer }>(meRef.current, body).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
+      const knowledge = await knowledgeFor(meRef.current, text, { pin: opts.pin });
+      const body = { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}), ...(knowledge ? { knowledge } : {}), ...(opts.pin ? { pin: opts.pin } : {}) };
+      const r = await chatWithTables<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer; learned?: { id: string; kind: string; said: string; means: string }[]; learn?: unknown; choices?: string[] }>(meRef.current, body).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
+      const kept = await keepDeviceNotes(meRef.current, r.learn);
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
       // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
       const { text: noSteps, open: openSteps } = takeStepsTag(r.reply);
@@ -621,6 +644,11 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         paintPicture(image.prompt, image.shape, false, text);
         return;
       }
+      const device = meRef.current?.knowledge?.place === 'device';
+      const learnedNow = [...(r.learned ?? []), ...kept];
+      setNextStep(opts.taught && r.knowledge?.taught ? { for: answer, question: text, kind: 'taught', ...opts.taught }
+        : learnedNow.length ? { for: answer, question: text, kind: 'learned', items: learnedNow, device: device && kept.length > 0 }
+        : r.choices?.length ? { for: answer, question: text, kind: 'choices', options: r.choices } : null);
       setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setReply(answer); say(answer, 0);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) goSelf('/' + item.view); }
       else if (asked) goSelf(asked);
@@ -884,7 +912,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     if (was === path || !/^\/(inbox|calendar|notes)$/.test(p) || !meRef.current) return;
     const mine = Date.now() - selfNav.current < 2000; // Niko opened it and may be saying so: that line finishes
     askId.current++; inFlight.current = 0; failStreak.current = 0;
-    last.current = null; setResumable(null); setReply(null); setWeather(null); setKnowledge(null);
+    last.current = null; setResumable(null); setReply(null); setWeather(null); setKnowledge(null); setNextStep(null);
     mapCtl.current?.abort(); mapRef.current = null; setMap(null); setPictureId(null);
     if (!mine) {
       stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; hearing.current++; active.current = false; unmuteMic();
@@ -892,6 +920,41 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     }
     void api('/chat/history', { method: 'DELETE' }).catch(() => undefined);
   }, [path]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---------------------------------------------------------------- teaching Niko
+  const plainLine = (label: string, l: string) => { setMode('speaking'); setLabel(label); setLine(l); window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 1800); };
+  /** "That's the one" answers from that piece now and uses it for questions like this; "Not this one" stops it being
+   *  offered for them. Only from the person's own tap or voice here. */
+  const teachFn = (answer: 'yes' | 'no') => {
+    const k = knowledgeRef.current, ask = k?.k.ask, question = last.current?.question, me = meRef.current;
+    if (!ask || !question || !me) return;
+    const device = me.knowledge?.place === 'device';
+    const target = { ...ask, answer };
+    void (async () => {
+      let id: string;
+      try { id = device ? (await teachHere(me.id, question, target)).id : (await api<{ item: { id: string } }>('/knowledge/taught', { body: { question, target, answer } })).item.id; }
+      catch (e) { plainLine('Not saved', (e as Error).message); return; }
+      setKnowledge((x) => (x ? { ...x, k: { ...x.k, ask: undefined } } : x));
+      if (answer === 'yes') { void askAI(question, { pin: target, taught: { id, device } }); return; }
+      setNextStep({ for: k!.for, question, kind: 'noted', target, id, device });
+      plainLine('Noted', `Okay. I won’t offer ${ask.heading ?? ask.file} for this again.`);
+    })();
+  };
+  const forget = async (id: string, device: boolean) => {
+    const me = meRef.current; if (!me) return;
+    if (device) await forgetNoteHere(me.id, id); else await api(`/knowledge/learned/${id}`, { method: 'DELETE' });
+  };
+  const undoFollowUpFn = () => {
+    const f = followRef.current; if (!f) return;
+    void (async () => {
+      try {
+        if (f.kind === 'learned') for (const it of f.items) await forget(it.id, f.device);
+        else if (f.kind === 'noted' || f.kind === 'taught') await forget(f.id, f.device);
+        setNextStep(null);
+        plainLine('Undone', f.kind === 'learned' ? 'Okay, I’ve forgotten that.' : 'Okay, undone.');
+      } catch (e) { plainLine('Not undone', (e as Error).message); }
+    })();
+  };
 
   // ---------------------------------------------------------------- screen lock
   const [locked, setLocked] = useState(false);
@@ -909,7 +972,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     if (picCtl.current) { const c = picCtl.current; picCtl.current = null; c.abort(); }
     mapCtl.current?.abort(); mapRef.current = null; setMap(null);
     if (locationWait.current) { const w = locationWait.current; locationWait.current = null; w(false); }
-    setPictureId(null); setReply(null); setWeather(null); setKnowledge(null); setResumable(null); setPendingOpen(null); setBrief(null); last.current = null;
+    setPictureId(null); setReply(null); setWeather(null); setKnowledge(null); setNextStep(null); setResumable(null); setPendingOpen(null); setBrief(null); last.current = null;
     setFullscreenAsk(false); setLockAsk(null); afterUnlock.current = null;
     if (here.current !== '/') navigate('/');
     idle();
@@ -1018,7 +1081,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, [me?.id, me?.lock?.on, me?.lock?.mins]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const value = useMemo<NikoState>(() => ({
-    me, refreshMe, mode, label, line, reply, weather, knowledge, brief, micOn, voiceSupported: !!SR || (hearsFor(me).length > 0 && captureSupported()), toggleMic, stop, ask,
+    me, refreshMe, mode, label, line, reply, weather, knowledge, followUp: nextStep, teach: teachFn, undoFollowUp: undoFollowUpFn, dismissFollowUp: () => setNextStep(null), brief, micOn, voiceSupported: !!SR || (hearsFor(me).length > 0 && captureSupported()), toggleMic, stop, ask,
     dismissReply: () => setReply(null),
     setCommandHandler: (fn) => { handler.current = fn; },
     setGlanceHandler: (fn) => { glanceHandler.current = fn; },
@@ -1053,7 +1116,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     unlock: unlockFn,
     unlockWithPasskey: unlockWithPasskeyFn,
     lockNow: lockNowFn,
-  }), [me, refreshMe, mode, label, line, reply, weather, knowledge, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk, locked, lockAsk]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [me, refreshMe, mode, label, line, reply, weather, knowledge, nextStep, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk, locked, lockAsk]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

@@ -7,6 +7,7 @@ export * from './maps';
 export * from './speechtext';
 export * from './knowledge';
 export * from './knowledgeDevice';
+export * from './learned';
 import { MAP_PROVIDERS, mapPreset, type MapProvider, type MapSource } from './maps';
 
 export type ProviderGroup = 'mail' | 'calendar' | 'notes' | 'automation' | 'messaging' | 'weather' | 'ai';
@@ -397,7 +398,7 @@ export const AI_OPTION_GROUPS: AiOptionGroup[] = [
     { key: 'kn:place:onedrive', name: 'OneDrive', sub: 'Their Microsoft connection' },
     { key: 'kn:cf-read', name: 'Cloudflare reads files', sub: 'PDF, Word and spreadsheets into text · keeps nothing' },
     { key: 'kn:cf-search', name: 'Cloudflare search', sub: 'Search numbers for their files · keeps nothing' },
-    { key: 'kn:learning', name: 'Learning from each person', sub: 'Notes, corrections and playbooks', offByDefault: true, feature: true } ] },
+    { key: 'kn:learning', name: 'Learning from each person', sub: 'Names, corrections and taught matches', offByDefault: true, feature: true } ] },
 ];
 const OFF_BY_DEFAULT = new Set(AI_OPTION_GROUPS.flatMap((g) => g.items.filter((i) => i.offByDefault).map((i) => i.key)));
 /** Whether an option is on in the default for everyone: what the admin saved, else the option's own starting value. */

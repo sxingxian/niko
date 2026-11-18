@@ -73,8 +73,12 @@ export interface KnowledgePrefs {
   drafts: boolean;
   /** How many files are kept in Niko, kept here by the server so an account without files never asks Knowledge. */
   files: number;
+  /** Learning from how the person uses Niko (once their plan includes it). Off pauses it; what was learned is still used. */
+  learn: boolean;
+  /** How many learned notes are kept in Niko (server-kept, like `files`). */
+  notes: number;
 }
-export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false, files: 0 };
+export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false, files: 0, learn: true, notes: 0 };
 const isMode = (v: unknown): v is KnMode => v === 'files' || v === 'only' || v === 'off';
 /** How Niko answers from one collection. */
 export const knModeOf = (p: KnowledgePrefs, collection: string): KnMode => p.modes[collection] ?? p.mode;
@@ -90,6 +94,8 @@ export function cleanKnowledgePrefs(v: unknown): KnowledgePrefs {
     telegram: typeof o.telegram === 'boolean' ? o.telegram : d.telegram,
     drafts: typeof o.drafts === 'boolean' ? o.drafts : d.drafts,
     files: typeof o.files === 'number' && Number.isInteger(o.files) && o.files >= 0 ? o.files : d.files,
+    learn: typeof o.learn === 'boolean' ? o.learn : d.learn,
+    notes: typeof o.notes === 'number' && Number.isInteger(o.notes) && o.notes >= 0 ? o.notes : d.notes,
   };
 }
 

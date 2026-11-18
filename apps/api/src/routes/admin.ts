@@ -542,7 +542,7 @@ admin.get('/knowledge', requireAdmin, async (c) => {
   const settings = await knowledgeSettings(db), k = knowledgeDb(c.env);
   const usage = k ? await databaseUsage(k).catch(() => null) : null;
   return c.json({ ready: !!k, usage: usage ? { bytes: usage.bytes, files: usage.files, people: usage.people } : null, split: settings.split, defaults: knowledgeLimits(settings.limits, {}),
-    users: list.map((u) => ({ ...u, knowledgeLimits: cleanKnowledgeLimits(u.knowledgeLimits), used: usage?.accounts[u.id] ?? { files: 0, bytes: 0 } })) });
+    users: list.map((u) => ({ ...u, knowledgeLimits: cleanKnowledgeLimits(u.knowledgeLimits), used: usage?.accounts[u.id] ?? { files: 0, bytes: 0, notes: 0 } })) });
 });
 admin.put('/knowledge/settings', requireAdmin, async (c) => {
   const b = await c.req.json<{ split?: unknown; limits?: unknown }>().catch(() => ({} as { split?: unknown; limits?: unknown }));

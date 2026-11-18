@@ -4,10 +4,11 @@
 import { eq } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { users } from '@niko/db';
-import { aiAllowed, cleanKnowledgePrefs, knowledgeAccess, type KnowledgeAccess, type KnowledgePrefs } from '@niko/shared';
+import { aiAllowed, cleanKnowledgePrefs, cleanTarget, knowledgeAccess, knPlaceOf, knSearchOf, type KnowledgeAccess, type KnowledgePrefs } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
 import { hmacSha256Hex } from '../lib/crypto';
+import { editNote, forgetAll, forgetFileMatches, forgetNote, learnedCount, listLearned, saveNote } from '../learned';
 import { offFor } from '../access';
 import { addCloudflareNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeDb, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
 
@@ -33,8 +34,25 @@ const fail = (c: C, e: unknown) => {
 async function syncCount(c: C, k: Kdb) {
   const u = c.get('user');
   const files = (await usage(k, u.id)).files;
-  const prefs = { ...cleanKnowledgePrefs((u as { knowledge?: unknown }).knowledge), files };
+  const fresh = await c.get('db').select({ knowledge: users.knowledge }).from(users).where(eq(users.id, u.id)).limit(1);
+  const prefs = { ...cleanKnowledgePrefs(fresh[0]?.knowledge), files };
   await c.get('db').update(users).set({ knowledge: prefs as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
+}
+/** Keeps the number of learned notes with the account, so answering only looks notes up for someone who has some. */
+export async function syncNotes(c: C, k: Kdb) {
+  const u = c.get('user');
+  const notes = await learnedCount(k, u.id);
+  const fresh = await c.get('db').select({ knowledge: users.knowledge }).from(users).where(eq(users.id, u.id)).limit(1);
+  const prefs = { ...cleanKnowledgePrefs(fresh[0]?.knowledge), notes };
+  await c.get('db').update(users).set({ knowledge: prefs as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
+}
+/** Notes learned in Niko need the Knowledge database and learning in the person's plan (it works without files). */
+async function notesStore(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: KnowledgePrefs } | Response> {
+  const k = knowledgeDb(c.env);
+  if (!k) return c.json({ error: NOT_HERE }, 503);
+  const w = await who(c);
+  if (!w.access.learning) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  return { k, ...w };
 }
 /** Files kept in Niko need the Knowledge database, Knowledge files and the Niko place. */
 async function store(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: KnowledgePrefs } | Response> {
@@ -51,7 +69,7 @@ knowledge.get('/', async (c) => {
   const w = await who(c);
   const settings = await knowledgeSettings(c.get('db'));
   return c.json({
-    available: !!k && w.access.files, access: w.access, prefs: w.prefs, limits: await limitsFor(c.get('db'), u),
+    available: !!k && (w.access.files || w.access.learning), access: w.access, prefs: w.prefs, limits: await limitsFor(c.get('db'), u),
     split: settings.split, usage: k && w.access.niko ? await usage(k, u.id) : { files: 0, bytes: 0 },
   });
 });
@@ -63,13 +81,14 @@ knowledge.put('/prefs', async (c) => {
   if (!access.files) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   const before = cleanKnowledgePrefs((u as { knowledge?: unknown }).knowledge);
   // The file count is kept by the server, never taken from the request.
-  const prefs = { ...cleanKnowledgePrefs({ ...before, ...b }), files: before.files };
+  const prefs = { ...cleanKnowledgePrefs({ ...before, ...b }), files: before.files, notes: before.notes };
   // A choice the account doesn't have is kept to what it does have.
   if (prefs.place === 'niko' && !access.niko && access.device) prefs.place = 'device';
   if (prefs.place === 'device' && !access.device && access.niko) prefs.place = 'niko';
   if (!access.cloudflareRead) prefs.read = 'device';
   if (!access.cloudflareSearch) prefs.search = 'device';
   await c.get('db').update(users).set({ knowledge: prefs as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
+  if (prefs.learn !== before.learn) await audit(c, prefs.learn ? 'knowledge.learning-on' : 'knowledge.learning-paused', {}, u.id);
   return c.json({ ok: true, prefs });
 });
 
@@ -145,7 +164,7 @@ knowledge.patch('/files/:id', async (c) => {
 knowledge.delete('/files/:id', async (c) => {
   const s = await store(c); if (s instanceof Response) return s;
   const gone = await deleteFile(s.k, c.get('user').id, c.req.param('id'));
-  if (gone) { await syncCount(c, s.k); await audit(c, 'knowledge.file-removed', {}, c.get('user').id); }
+  if (gone) { await forgetFileMatches(s.k, c.get('user').id, c.req.param('id')); await syncCount(c, s.k); await syncNotes(c, s.k); await audit(c, 'knowledge.file-removed', {}, c.get('user').id); }
   return c.json({ ok: true });
 });
 
@@ -182,6 +201,65 @@ knowledge.get('/device-key', async (c) => {
   if (!access.device) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   c.header('Cache-Control', 'no-store');
   return c.json({ key: await hmacSha256Hex(c.env.ENCRYPTION_KEY, `niko.knowledge.device.v1:${c.get('user').id}`) });
+});
+
+// What Niko learned: everything, with what each note says, how it was learned and how sure Niko is. Only the person
+// sees this; the admin sees counts.
+knowledge.get('/learned', async (c) => {
+  const s = await notesStore(c); if (s instanceof Response) return s;
+  return c.json({ items: await listLearned(s.k, c.get('user').id) });
+});
+// Bringing notes kept on the person's device into Niko when they move their Knowledge here. Names, corrections and
+// things to remember only, with the same checks as any note.
+knowledge.post('/learned', async (c) => {
+  const s = await notesStore(c); if (s instanceof Response) return s;
+  const u = c.get('user');
+  if (await tooMany(c, 'kn-note:' + u.id, 1200, 60)) return c.json({ error: 'That’s a lot at once. Try again in a little while.' }, 429);
+  const b = await c.req.json<{ kind?: unknown; said?: unknown; means?: unknown; how?: unknown }>().catch(() => ({} as { kind?: unknown; said?: unknown; means?: unknown; how?: unknown }));
+  const kind = b.kind === 'person' || b.kind === 'correction' || b.kind === 'remembered' ? b.kind : null;
+  if (!kind || typeof b.said !== 'string' || typeof b.means !== 'string') return c.json({ error: 'Nothing to keep.' }, 400);
+  const how = (['told', 'corrected', 'chose', 'remember'] as const).find((h) => h === b.how) ?? 'told';
+  const place = knPlaceOf(s.prefs, s.access);
+  try {
+    const item = await saveNote(s.k, c.env, u.id, { kind, said: b.said, means: b.means, how }, { cloudflare: knSearchOf(s.prefs, s.access, place) === 'cloudflare' });
+    await syncNotes(c, s.k);
+    return c.json({ ok: true, item });
+  } catch (e) { return fail(c, e); }
+});
+knowledge.patch('/learned/:id', async (c) => {
+  const s = await notesStore(c); if (s instanceof Response) return s;
+  const b = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const place = knPlaceOf(s.prefs, s.access);
+  try { return c.json({ ok: true, item: await editNote(s.k, c.env, c.get('user').id, c.req.param('id'), b, { cloudflare: knSearchOf(s.prefs, s.access, place) === 'cloudflare' }) }); }
+  catch (e) { return fail(c, e); }
+});
+knowledge.delete('/learned/:id', async (c) => {
+  const s = await notesStore(c); if (s instanceof Response) return s;
+  if (await forgetNote(s.k, c.get('user').id, c.req.param('id'))) await syncNotes(c, s.k);
+  return c.json({ ok: true });
+});
+knowledge.delete('/learned', async (c) => {
+  const s = await notesStore(c); if (s instanceof Response) return s;
+  const n = await forgetAll(s.k, c.get('user').id);
+  await syncNotes(c, s.k);
+  await audit(c, 'knowledge.forget-all', { notes: n }, c.get('user').id);
+  return c.json({ ok: true, forgot: n });
+});
+// "That's the one" / "Not this one" on a similar match, from the person's own tap or voice in the app.
+knowledge.post('/taught', async (c) => {
+  const s = await notesStore(c); if (s instanceof Response) return s;
+  if (!s.prefs.learn) return c.json({ error: 'Learning is paused. Turn it on in Settings · Knowledge · What Niko learned.' }, 409);
+  const u = c.get('user');
+  if (await tooMany(c, 'kn-taught:' + u.id, 120, 60)) return c.json({ error: 'That’s a lot at once. Try again in a little while.' }, 429);
+  const b = await c.req.json<{ question?: unknown; target?: unknown; answer?: unknown }>().catch(() => ({} as { question?: unknown; target?: unknown; answer?: unknown }));
+  const target = cleanTarget({ ...(b.target && typeof b.target === 'object' ? b.target : {}), answer: b.answer === 'no' ? 'no' : 'yes' });
+  if (!target || typeof b.question !== 'string' || !b.question.trim()) return c.json({ error: 'Nothing to teach.' }, 400);
+  const place = knPlaceOf(s.prefs, s.access);
+  try {
+    const item = await saveNote(s.k, c.env, u.id, { kind: 'file-match', said: b.question, means: `${target.file}${target.heading ? ` › ${target.heading}` : ''}`, how: target.answer, target }, { cloudflare: knSearchOf(s.prefs, s.access, place) === 'cloudflare' });
+    await syncNotes(c, s.k);
+    return c.json({ ok: true, item });
+  } catch (e) { return fail(c, e); }
 });
 
 // Cloudflare turns a PDF, Word or spreadsheet file into text and keeps nothing; the browser then splits the text.
