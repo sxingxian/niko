@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '@niko/ui';
 import { useNiko } from '../niko';
+import { voiceForgetAll } from '../voiceMatch';
 
 export function LockEntry() {
   const n = useNiko();
@@ -46,6 +47,7 @@ export function LockEntry() {
   };
   const signOut = async () => {
     await api('/auth/sign-out', { body: {} }).catch(() => undefined);
+    await voiceForgetAll();
     location.assign(location.pathname.startsWith('/app') ? '/app/sign-in' : '/sign-in');
   };
 

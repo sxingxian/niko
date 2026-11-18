@@ -269,6 +269,7 @@ export function Home() {
         {locked ? <span className="lock-pill"><Icon name="lock" size={14} />Locked</span> : <>
         {n.quiet && <button className="g chip quiet-chip" style={{ boxShadow: 'none' }} onClick={() => n.setQuiet(false)} aria-label="Leave quiet mode"><span className="k" style={{ marginRight: 8 }}>Quiet</span><span className="long">{n.quiet.why === 'meeting' ? `${n.quiet.title ?? 'Meeting'} now` : 'On screen only'}</span><Icon name="x" size={14} /></button>}
         {fs.offer && <button className="ib g" style={{ width: 44, height: 44 }} onClick={() => void toggleFullscreen()} aria-label={fs.on ? 'Leave full screen' : 'Full screen'} aria-pressed={fs.on} title={fs.on ? 'Leave full screen' : 'Full screen'}><Icon name={fs.on ? 'collapse' : 'expand'} /></button>}
+        {n.voiceMode && <Link className="g chip" style={{ boxShadow: 'none' }} to="/voice"><span className="long"><span className="k" style={{ marginRight: 10 }}>Voice</span><span style={{ color: n.voiceMode === 'you' ? undefined : '#ffd38a' }}>{n.voiceMode === 'you' ? 'Only you' : 'Not set up here'}</span></span><span className="short">Voice</span></Link>}
         <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : n.me?.engine.brain === 'self-hosted-ai' ? 'Your model' : 'Workers AI'} · {voiceName(firstVoice(n.me))}</span><span className="short">Engine</span></Link>
         </>}
         </div>
@@ -276,6 +277,22 @@ export function Home() {
       {!locked && <Dock className={'dock' + (nav ? ' show' : '')} />}
       <GlanceStack wide={wide} />
       {!locked && wide && !card && <Sparks run={open && shown ? shown.id : 0} cards={cards} />}
+      {!locked && n.voiceBanner && (
+        <div className="vm-banner g" role="note" style={{ boxShadow: 'none' }}>
+          <svg className="vm-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h2M8 8v8M12 5v14M16 9v6M20 11v2" /></svg>
+          <span className="vm-txt"><b>Set up your voice on this device</b><span className="hint">Until then, Niko answers anyone here.</span></span>
+          <button className="sec" onClick={n.laterVoiceBanner}>Later</button>
+          <Link className="pri" to="/voice?voice=setup">Set up · 1 min</Link>
+        </div>
+      )}
+      {!locked && n.voiceChip && (
+        <div className="vm-chip g" role="status" style={{ boxShadow: 'none' }}>
+          <svg className="vm-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h2M8 8v8M12 5v14M16 9v6M20 11v2M3 3l18 18" /></svg>
+          <span>Not your voice? I stayed quiet.</span>
+          <button className="pri" onClick={n.thatWasMe}>That was me</button>
+          <button className="ib" style={{ width: 44, height: 44 }} onClick={n.dismissVoiceChip} aria-label="Dismiss"><Icon name="x" /></button>
+        </div>
+      )}
       {n.fullscreenAsk && (
         <div className="fs-ask g" role="dialog" aria-label="Full screen">
           <span>Browsers need a tap for full screen.</span>
@@ -304,10 +321,11 @@ export function Home() {
             {shown.wx ? <WeatherCard card={shown.wx} onClose={n.dismissReply} tabbable={open} /> : (
             <section className="g">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span className="k">{n.quiet ? `Niko · quiet${n.quiet.why === 'meeting' ? ` · ${n.quiet.title ?? 'meeting'} now` : ''}` : shown.kn?.only || (n.knowledge?.for === shown.reply && n.knowledge.k.taught) ? 'Niko · from your files' : shown.kn?.lead ? 'Niko · your files lead' : 'Niko'}</span>
+                <span className="k" style={n.voiceNote?.for === shown.reply && !n.quiet ? { color: '#a8f0c6' } : undefined}>{n.voiceNote?.for === shown.reply && !n.quiet ? 'Niko · that was you' : n.quiet ? `Niko · quiet${n.quiet.why === 'meeting' ? ` · ${n.quiet.title ?? 'meeting'} now` : ''}` : shown.kn?.only || (n.knowledge?.for === shown.reply && n.knowledge.k.taught) ? 'Niko · from your files' : shown.kn?.lead ? 'Niko · your files lead' : 'Niko'}</span>
                 <button className="ib" style={{ width: 44, height: 44, margin: '-8px -10px -8px 0' }} onClick={n.dismissReply} aria-label="Hide the answer" tabIndex={open ? 0 : -1}><Icon name="x" /></button>
               </div>
               <p className="reply"><Words text={shown.reply} start={wide ? 1.0 : 0.35} /></p>
+              {n.voiceNote?.for === shown.reply && n.voiceNote.learned && <p className="vm-learned">Added to your voiceprint on this device, so I’ll know your voice like this next time.</p>}
             </section>
             )}
             <Outline />

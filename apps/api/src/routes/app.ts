@@ -178,7 +178,8 @@ app.patch('/me', async (c) => {
       ...(typeof e.workersVoice === 'string' && WORKERS_VOICES.some((v) => v.id === e.workersVoice) ? { workersVoice: e.workersVoice } : {}),
       ...(typeof e.kokoroVoice === 'string' && KOKORO_VOICES.some((v) => v.id === e.kokoroVoice) ? { kokoroVoice: e.kokoroVoice } : {}),
       ...(typeof e.wake === 'boolean' ? { wake: e.wake } : {}),
-      ...(typeof e.onlyMyVoice === 'boolean' ? { onlyMyVoice: e.onlyMyVoice } : {}),
+      // Only when the account is allowed it; switching it off is always allowed.
+      ...(typeof e.onlyMyVoice === 'boolean' ? { onlyMyVoice: e.onlyMyVoice && aiAllowed(await offFor(c.get('db'), u), 'h:only-me') } : {}),
       ...(typeof e.fallback === 'boolean' ? { fallback: e.fallback } : {}),
     };
   }
