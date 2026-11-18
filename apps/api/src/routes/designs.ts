@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import { designCheckouts, users } from '@niko/db';
 import { designInfo, designQuote, isDesign, money, type DesignBuy } from '@niko/shared';
 import { customerIn, keysOf, payNow, priceLine, syncCheckout } from '../billing';
+import { backgroundSettings } from '../backgrounds';
 import { activePlan, addPro, designAccount, designFor, designSettings, removePro, viewFor } from '../designs';
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
@@ -19,7 +20,8 @@ async function viewJson(c: any, fresh?: any) {
   const db = c.get('db');
   const u = fresh ?? c.get('user');
   const now = await payNow(c.env, db);
-  return { ...(await viewFor(db, u)), current: await designFor(db, u), payments: now.ready, testMode: now.mode === 'test' };
+  // Niko Pro is one add-on: its wording says whether it covers backgrounds too.
+  return { ...(await viewFor(db, u)), current: await designFor(db, u), payments: now.ready, testMode: now.mode === 'test', proBackgrounds: (await backgroundSettings(db)).pro };
 }
 
 designs.get('/', async (c) => c.json(await viewJson(c)));

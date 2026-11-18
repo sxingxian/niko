@@ -7,7 +7,7 @@ import { api, DesignPreview, Icon, type CoreMode } from '@niko/ui';
 import { money, type DesignOffer, type DesignsView } from '@niko/shared';
 import { useNiko } from '../niko';
 
-type View = DesignsView & { current: string; payments: boolean; testMode: boolean };
+type View = DesignsView & { current: string; payments: boolean; testMode: boolean; proBackgrounds?: boolean };
 type Buy = 'one' | 'all' | 'topup' | 'topupall' | 'pro';
 type Bought = { kind: Buy; name: string };
 
@@ -110,14 +110,14 @@ export function Designs() {
     plans.push({ id: 'one', name: `${cur.name} only`, note: 'Just this design. Yours to keep.', price: money(cur.cents) });
     if (v.bundle) plans.push({ id: 'all', name: 'All designs', note: `All ${v.bundle.count} designs available today. Yours to keep.`, price: money(v.bundle.cents), badge: 'Best value' });
   }
-  if (v.pro.offered && !v.pro.active) plans.push({ id: 'pro', name: 'Niko Pro add-on', note: `Every design, new ones included, added on top of your ${v.pro.plan} plan.`, price: `+${money(v.pro.cents)}${perShort}`, badge: 'Add-on' });
+  if (v.pro.offered && !v.pro.active) plans.push({ id: 'pro', name: 'Niko Pro add-on', note: `Every design${v.proBackgrounds ? ' and background' : ''}, new ones included, added on top of your ${v.pro.plan} plan.`, price: `+${money(v.pro.cents)}${perShort}`, badge: 'Add-on' });
   const chosen = plans.find((p) => p.id === plan) ?? plans[0];
   const bullets: Record<Buy, string[]> = {
     one: ['One-time payment, no subscription.', 'Yours on every device, even if it’s retired later.', 'Switch back to Nebula anytime.'],
     all: ['One payment for every design available today.', 'New designs later: add them for less than their full price.', 'Yours on every device, even if one is retired later.'],
     topup: ['One-time payment, at the bundle’s reduced price.', 'Joins the rest of your designs on every device.', 'Yours to keep, even if it’s retired later.'],
     topupall: ['One payment for every design added since your bundle.', 'Joins the rest of your designs on every device.', 'Yours to keep, even if any are retired later.'],
-    pro: ['Added on top of your current plan, billed with it until you remove it.', 'Every design, including new ones as they arrive.', 'Designs you bought once stay yours if you remove it.'],
+    pro: ['Added on top of your current plan, billed with it until you remove it.', v.proBackgrounds ? 'Every design and background, including new ones as they arrive.' : 'Every design, including new ones as they arrive.', 'Anything you bought once stays yours if you remove it.'],
   };
   const doneTitle = (b: Bought) => (b.kind === 'pro' ? 'Niko Pro is on' : b.kind === 'all' ? 'Every design is yours' : b.kind === 'topupall' ? 'Your collection is complete' : `${b.name} is yours`);
   const doneLine = (b: Bought) => ({
@@ -125,7 +125,7 @@ export function Designs() {
     all: 'Every design available today is unlocked on every device you sign in to.',
     topup: `${b.name} joins your designs on every device you sign in to.`,
     topupall: 'Every new design joins your collection on every device you sign in to.',
-    pro: 'Niko Pro is added to your plan. Every design is yours while it’s on, including new ones as they arrive.',
+    pro: `Niko Pro is added to your plan. Every design${v.proBackgrounds ? ' and background' : ''} is yours while it’s on, including new ones as they arrive.`,
   })[b.kind];
   const note = cur.retired && !locked ? 'Paid by you. No longer offered.' : cur.back && locked ? 'Back after a break. It counts as a new design.' : '';
 
@@ -177,7 +177,7 @@ export function Designs() {
               <button type="button" className="pri accent-bg" disabled={busy} onClick={() => open(v.bundleOwner ? 'topup' : 'one')}><Icon name="lock" size={18} />{v.bundleOwner ? `Add ${cur.name}` : `Unlock ${cur.name}`} · {money(cur.cents)}</button>
               {!v.bundleOwner && v.bundle && <button type="button" className="sec dz-sec" onClick={() => open('all')}>Or unlock all {v.bundle.count} · {money(v.bundle.cents)}</button>}
               {v.bundleOwner && v.topupAll && <button type="button" className="sec dz-sec" onClick={() => open('topupall')}>Or add all {v.topupAll.count} new · {money(v.topupAll.cents)}</button>}
-              {v.pro.offered && !v.pro.active && <button type="button" className="dz-link" onClick={() => open('pro')}>Or every design, new ones too, with the Niko Pro add-on</button>}
+              {v.pro.offered && !v.pro.active && <button type="button" className="dz-link" onClick={() => open('pro')}>{v.proBackgrounds ? 'Or every design and background, new ones too, with the Niko Pro add-on' : 'Or every design, new ones too, with the Niko Pro add-on'}</button>}
             </div>
           ) : (
             <div className="dz-acts">
@@ -187,7 +187,7 @@ export function Designs() {
           {v.pro.active && (
             <div className="dz-pro">
               {!removing ? <><span className="sub">Niko Pro is on, added to your plan.</span><button type="button" className="dz-link" onClick={() => setRemoving(true)}>Remove Niko Pro</button></>
-                : <><span className="sub">Remove Niko Pro? Designs you bought once stay yours; the rest go back to Nebula. Unused time is credited to your next bill.</span>
+                : <><span className="sub">Remove Niko Pro? Anything you bought once stays yours; other designs go back to Nebula{v.proBackgrounds ? ' and other backgrounds to Glow' : ''}. Unused time is credited to your next bill.</span>
                   <span className="dz-row"><button type="button" className="bt" disabled={busy} onClick={removePro}>Remove</button><button type="button" className="bt" onClick={() => setRemoving(false)}>Keep it</button></span></>}
             </div>
           )}
@@ -240,7 +240,7 @@ export function Designs() {
 }
 
 /** A dialog over the page: Escape closes it, focus moves into it and back out when it closes. */
-function Sheet({ children, onClose, labelledBy }: { children: React.ReactNode; onClose: () => void; labelledBy: string }) {
+export function Sheet({ children, onClose, labelledBy }: { children: React.ReactNode; onClose: () => void; labelledBy: string }) {
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const before = document.activeElement as HTMLElement | null;

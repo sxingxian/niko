@@ -52,6 +52,8 @@ export const users = pgTable('users', {
   designBundleAt: ts('design_bundle_at'),
   proItem: text('pro_item'),
   proOn: boolean('pro_on').notNull().default(false),
+  // ---- backgrounds (see migration 0014)
+  bgBundleAt: ts('bg_bundle_at'),
   createdAt: ts('created_at').notNull().defaultNow(),
   lastActiveAt: ts('last_active_at'),
 });
@@ -301,6 +303,29 @@ export const designCheckouts = pgTable('design_checkouts', {
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   kind: text('kind').notNull(),
   designs: text('designs').array().notNull(),
+  cents: integer('cents').notNull(),
+  mode: text('mode').notNull(),
+  paidAt: ts('paid_at'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+/** Backgrounds an account owns: bought, in a bundle, added later, or given by an admin. Kept when one is retired. */
+export const backgroundOwned = pgTable('background_owned', {
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  background: text('background').notNull(),
+  source: text('source').notNull(),
+  cents: integer('cents'),
+  checkoutId: text('checkout_id'),
+  mode: text('mode'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+}, (t) => [primaryKey({ columns: [t.userId, t.background] })]);
+
+/** Each background Checkout, with what it covers and costs as the server fixed it. */
+export const backgroundCheckouts = pgTable('background_checkouts', {
+  id: text('id').primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull(),
+  backgrounds: text('backgrounds').array().notNull(),
   cents: integer('cents').notNull(),
   mode: text('mode').notNull(),
   paidAt: ts('paid_at'),

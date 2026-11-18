@@ -1,8 +1,8 @@
 // Niko admin portal: sign-in with a second factor, then users and registration.
 import { StrictMode, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, ApiError, DesignPreview, Field, PasswordField, Switch } from '@niko/ui';
-import { DESIGNS, designInfo, type DesignInfo } from '@niko/shared';
+import { api, ApiError, BackgroundPreview, DesignPreview, Field, PasswordField, Switch } from '@niko/ui';
+import { BACKGROUNDS, backgroundInfo, DESIGNS, designInfo, type BackgroundInfo, type DesignInfo } from '@niko/shared';
 import { AI_OPTION_GROUPS, AI_PRESETS, aiAllowed, BUILTIN_TOKEN, hearPresetOf, imagePresetOf, presetOf, providedIds, voicePresetOf, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
 import '@niko/ui/src/styles.css';
 import './admin.css';
@@ -1437,7 +1437,7 @@ function DesignsAdmin({ guard }: { guard: (e: unknown) => void }) {
       <div className="pay-side">
         <section className="g card" aria-label="Niko Pro">
           <div className="card-head"><span className="k">Niko Pro · add-on</span><Switch on={d.pro.on} onChange={(v) => { setD({ ...d, pro: { ...d.pro, on: v } }); setNote(null); }} label="Offer the Niko Pro add-on" /></div>
-          <p className="sub">Added on top of someone’s monthly or yearly plan: every design offered, new ones included, while the add-on is on.</p>
+          <p className="sub">Added on top of someone’s monthly or yearly plan: every design offered, new ones included, while the add-on is on. It covers backgrounds too unless Backgrounds leaves them out.</p>
           <div className="pay-row"><span className="pay-name" style={{ width: 140 }}>On monthly plans</span><label className={'price' + (d.pro.on ? '' : ' dim')}><span className="k">SGD</span><span className="sr">Add-on price for monthly plans, in Singapore dollars</span><input className="in" inputMode="decimal" placeholder="Amount" value={proM} disabled={!d.pro.on} onChange={(ev) => { setProM(ev.target.value); setNote(null); }} /></label><span className="sub">extra a month</span></div>
           <div className="pay-row"><span className="pay-name" style={{ width: 140 }}>On yearly plans</span><label className={'price' + (d.pro.on ? '' : ' dim')}><span className="k">SGD</span><span className="sr">Add-on price for yearly plans, in Singapore dollars</span><input className="in" inputMode="decimal" placeholder="Amount" value={proY} disabled={!d.pro.on} onChange={(ev) => { setProY(ev.target.value); setNote(null); }} /></label><span className="sub">extra a year</span></div>
           <ul className="dz-list sub small">
@@ -1477,6 +1477,192 @@ function PersonDesigns({ id, isAdmin }: { id: string; isAdmin: boolean }) {
       {left.length > 0 && <div className="pay-line">
         <label><span className="sr">Design to give</span><select className="in sel" value={give} onChange={(e) => setGive(e.target.value)}><option value="">Choose a design</option>{left.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
         <button className="bt" disabled={!give} onClick={() => act(api(`/admin/users/${id}/designs`, { body: { design: give } }))}>Give</button>
+      </div>}
+      {msg && <span className="err small" role="alert">{msg}</span>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- backgrounds
+// Which backgrounds people can choose behind Niko, and what they cost. The same rules as designs. Niko Pro's price is
+// set with designs; here the admin only says whether Pro covers backgrounds too.
+type BgRow = { on: boolean; paid: boolean; cents: number | null; everOn: boolean; wasOff: boolean };
+type BgCfg = { backgrounds: Record<string, BgRow>; bundleCents: number | null; credit: boolean; rate: 'saving' | 'percent'; percent: number; pro: boolean };
+function BackgroundsAdmin({ guard }: { guard: (e: unknown) => void }) {
+  const [saved, setSaved] = useState<BgCfg | null>(null);
+  const [d, setD] = useState<BgCfg | null>(null);
+  const [prices, setPrices] = useState<Record<string, string>>({});
+  const [bundle, setBundle] = useState('');
+  const [pct, setPct] = useState('30');
+  const [list, setList] = useState<BackgroundInfo[]>([]);
+  const [owners, setOwners] = useState<Record<string, number>>({});
+  const [bundles, setBundles] = useState<number | null>(null);
+  const [proPrice, setProPrice] = useState<{ on: boolean; monthly: number | null; yearly: number | null } | null>(null);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const take = (s: BgCfg) => {
+    setSaved(s); setD(s);
+    setPrices(Object.fromEntries(Object.entries(s.backgrounds).map(([id, e]) => [id, centsText(e.cents)])));
+    setBundle(centsText(s.bundleCents)); setPct(String(s.percent));
+  };
+  useEffect(() => {
+    api<{ settings: BgCfg; backgrounds: BackgroundInfo[]; owners: Record<string, number>; bundles: number; proPrice: { on: boolean; monthly: number | null; yearly: number | null } }>('/admin/backgrounds')
+      .then((r) => { take(r.settings); setList(r.backgrounds); setOwners(r.owners); setBundles(r.bundles); setProPrice(r.proPrice); }).catch(guard);
+  }, [guard]);
+  if (!d || !saved) return null;
+  const row = (id: string, p: Partial<BgRow>) => { setD({ ...d, backgrounds: { ...d.backgrounds, [id]: { ...d.backgrounds[id]!, ...p } } }); setNote(null); };
+  const draft: BgCfg = {
+    ...d, bundleCents: toCents(bundle), percent: Math.max(0, Math.min(90, parseInt(pct, 10) || 0)),
+    backgrounds: Object.fromEntries(Object.entries(d.backgrounds).map(([id, e]) => [id, { ...e, cents: toCents(prices[id] ?? '') }])),
+  };
+  const offered = list.filter((x) => x.id !== 'glow' && draft.backgrounds[x.id]?.on && draft.backgrounds[x.id]!.paid);
+  const missing = offered.filter((x) => !draft.backgrounds[x.id]!.cents).length;
+  const sum = offered.reduce((n, x) => n + (draft.backgrounds[x.id]!.cents ?? 0), 0);
+  const b = draft.bundleCents;
+  const ratio = !missing && b && sum > b ? b / sum : null;
+  const bundleNote = !offered.length ? 'No paid backgrounds are offered, so the bundle is hidden.'
+    : missing ? `Covers the ${offered.length} paid backgrounds offered today. Give every paid background a price to see the saving.`
+    : !b ? `Covers the ${offered.length} paid backgrounds offered today, ${money(sum)} if bought one by one.`
+    : b >= sum ? `The bundle should cost less than the ${money(sum)} the backgrounds cost one by one.`
+    : `Covers the ${offered.length} paid backgrounds offered today, ${money(sum)} one by one. People save ${Math.round((1 - ratio!) * 100)}%.`;
+  const off = d.rate === 'saving' ? (ratio == null ? null : 1 - ratio) : draft.percent / 100;
+  const EX = 300;
+  const rateNote = off == null ? 'Bundle owners get the same saving as the bundle. Set the bundle price to see an example.'
+    : `Example: a new background at ${money(EX)} costs bundle owners ${money(Math.max(50, Math.round(EX * (1 - off))))} (${Math.round(off * 100)}% off). Everyone else pays full price.`;
+  const status = (id: string) => {
+    const e = draft.backgrounds[id]!, was = saved.backgrounds[id]!;
+    const priceBit = !e.paid ? 'included' : e.cents ? `${money(e.cents)} once` : 'needs a price';
+    const own = owners[id] ? ` · ${owners[id]} own it` : '';
+    if (!e.on) return { text: was.on || e.everOn ? `Not offered · anyone who bought it keeps it${own}` : 'New · not offered yet', hi: false };
+    if (e.wasOff || (!was.on && was.everOn)) return { text: `Back as a new background · ${priceBit}`, hi: true };
+    if (!was.everOn) return { text: `New · ${priceBit}`, hi: true };
+    return { text: `Offered · ${priceBit}${own}`, hi: false };
+  };
+  const save = async () => {
+    setNote(null);
+    const bad = (v: string) => v.trim() !== '' && toCents(v) === null;
+    if (Object.values(prices).some(bad) || bad(bundle)) return setNote({ ok: false, text: 'Prices are in Singapore dollars, at least 0.50, like 3 or 3.50.' });
+    setBusy(true);
+    try {
+      const r = await api<{ settings: BgCfg }>('/admin/backgrounds', { method: 'PUT', body: { settings: draft } });
+      take(r.settings);
+      setNote({ ok: true, text: 'Saved. New purchases use these prices; anyone who already unlocked keeps what they have.' });
+    } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
+  };
+  const proOn = !!proPrice?.on;
+  const proLine = !proOn ? 'Not offered' : [proPrice!.monthly ? `+${money(proPrice!.monthly)} a month` : '', proPrice!.yearly ? `+${money(proPrice!.yearly)} a year` : ''].filter(Boolean).join(' or ') || 'Set under Designs';
+  const see = [
+    { name: 'Glow', note: 'Included for everyone.', price: 'Included' },
+    { name: 'One background', note: 'Pay once, keep it.', price: offered.length ? 'Price above' : '—' },
+    { name: 'All backgrounds', note: `Every paid background offered today.${d.credit ? ' Less what they already paid.' : ''}`, price: b ? money(b) : 'SGD [BUNDLE]' },
+    { name: 'New background, bundle owners', note: 'Pro-rated, one payment.', price: off == null ? 'SGD [PRO-RATED]' : `${Math.round(off * 100)}% off` },
+    { name: 'Niko Pro add-on', note: !proOn ? 'Switched off under Designs.' : d.pro ? 'On top of their plan, once pay-once time ends. Every background and design, new ones included.' : 'Covers designs only. Backgrounds are bought on their own.', price: d.pro ? proLine : '—' },
+  ];
+  return <>
+    <header><h1>Backgrounds</h1><p className="sub" style={{ fontSize: 15 }}>Which backgrounds people can choose behind Niko, and what they cost. Prices in Singapore dollars{bundles != null ? ` · ${bundles} with the bundle` : ''}.</p></header>
+    {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
+    <div className="pay-grid">
+      <section className="g card" aria-label="Background prices">
+        <div><span className="k">Background prices</span>
+          <p className="sub" style={{ marginTop: 6 }}>Switch a background on to offer it. Paid backgrounds are a one-time unlock, kept on every device, even after a background is switched off.</p></div>
+        <div className="pay-block">
+          <b className="pay-h">1 · Each background</b>
+          <div className="dz-rows">
+            {list.map((x) => {
+              const fixed = x.id === 'glow', e = draft.backgrounds[x.id], st = fixed ? null : status(x.id);
+              return (
+                <div key={x.id} className="dz-arow">
+                  <Switch on={fixed || !!e?.on} onChange={(v) => row(x.id, { on: v })} label={`Offer ${x.name}`} disabled={fixed} />
+                  <span className="dz-amini wide"><BackgroundPreview background={x.id} paused /></span>
+                  <span className="pay-txt"><span>{x.name}</span><span className={'sub small' + (st?.hi ? ' dz-hi' : '')}>{fixed ? 'Everyone has it' : st!.text}</span></span>
+                  {fixed ? <span className="sub small">Always included · the default</span> : (
+                    <div className="pay-line">
+                      <div role="group" aria-label={`${x.name}: included or paid`} className="segs">
+                        <button className="seg" aria-pressed={!e!.paid} disabled={!e!.on} onClick={() => row(x.id, { paid: false })}>Included</button>
+                        <button className="seg" aria-pressed={e!.paid} disabled={!e!.on} onClick={() => row(x.id, { paid: true })}>Paid</button>
+                      </div>
+                      <label className={'price' + (e!.on && e!.paid ? '' : ' dim')}><span className="k">SGD</span><span className="sr">{x.name} price in Singapore dollars</span>
+                        <input className="in" inputMode="decimal" placeholder="Amount" value={prices[x.id] ?? ''} disabled={!e!.on || !e!.paid} onChange={(ev) => { setPrices({ ...prices, [x.id]: ev.target.value }); setNote(null); }} style={{ width: 110 }} /></label>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div className="pay-block">
+          <b className="pay-h">2 · All backgrounds bundle</b>
+          <div className="pay-line">
+            <label className="price"><span className="k">SGD</span><span className="sr">Bundle price in Singapore dollars</span><input className="in" inputMode="decimal" placeholder="Amount" value={bundle} onChange={(ev) => { setBundle(ev.target.value); setNote(null); }} /></label>
+            <span>once, for every paid background offered today</span>
+          </div>
+          <p className={'sub small' + (b && sum && !missing && b >= sum ? ' err' : '')}>{bundleNote}</p>
+          <div className="pay-row">
+            <Switch on={d.credit} onChange={(v) => { setD({ ...d, credit: v }); setNote(null); }} label="Count backgrounds someone already bought toward the bundle" />
+            <span className="pay-txt"><span>Count backgrounds someone already bought</span><span className="sub small">{d.credit ? 'Someone who owns a few backgrounds pays the bundle price minus what they paid for them.' : 'Everyone pays the full bundle price, whatever they already own.'}</span></span>
+          </div>
+        </div>
+        <div className="pay-block">
+          <b className="pay-h">3 · When a new background arrives</b>
+          <p className="sub small">The bundle covers what was offered when someone bought it. Bundle owners can add each new background for a pro-rated amount.</p>
+          <div role="group" aria-label="How the pro-rated amount is worked out" className="segs">
+            <button className="seg" aria-pressed={d.rate === 'saving'} onClick={() => { setD({ ...d, rate: 'saving' }); setNote(null); }}>Bundle’s saving</button>
+            <button className="seg" aria-pressed={d.rate === 'percent'} onClick={() => { setD({ ...d, rate: 'percent' }); setNote(null); }}>Set percentage off</button>
+          </div>
+          {d.rate === 'percent' && <div className="pay-line"><label><span className="sr">Percentage off for bundle owners</span><input className="in num" inputMode="numeric" value={pct} onChange={(ev) => { setPct(ev.target.value.replace(/\D/g, '').slice(0, 2)); setNote(null); }} /></label><span>% off each new background’s price</span></div>}
+          <p className="sub small">{rateNote}</p>
+        </div>
+        <div className="pay-block">
+          <b className="pay-h">4 · Switching a background off, or back on</b>
+          <div className="dz-rule"><span className="k">Off</span><span className="pay-txt"><span>It stops being offered</span><span className="sub small">Hidden from people who don’t own it and left out of the bundle. Everyone who bought it, on its own or in a bundle, keeps using it.</span></span></div>
+          <div className="dz-rule"><span className="k dz-hi">On</span><span className="pay-txt"><span>It comes back as a new background</span><span className="sub small">People who own it keep it. Bundle owners who don’t have it can add it at the pro-rated amount, and it joins the bundle for new buyers.</span></span></div>
+        </div>
+        <div className="pay-acts"><button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save background prices'}</button><span className="sub small">Anyone who already unlocked a background keeps it. New prices apply to new purchases.</span></div>
+      </section>
+      <div className="pay-side">
+        <section className="g card" aria-label="Niko Pro">
+          <span className="k">Niko Pro · add-on</span>
+          <p className="sub">One add-on on top of someone’s monthly or yearly plan. Its price is set once, under Designs → Niko Pro{proOn ? ` (${proLine})` : ', where it’s switched off now'}.</p>
+          <div className="pay-row">
+            <Switch on={d.pro} onChange={(v) => { setD({ ...d, pro: v }); setNote(null); }} label="Include backgrounds in Niko Pro" />
+            <span className="pay-txt"><span>Include backgrounds in Niko Pro</span><span className="sub small">{d.pro ? 'People with Niko Pro get every background, new ones included.' : 'Niko Pro covers designs only. Backgrounds are bought on their own.'}</span></span>
+          </div>
+          <ul className="dz-list sub small">
+            <li>Not offered during pay-once time. It appears once someone is on a monthly or yearly plan.</li>
+            <li>Joins their plan’s Stripe subscription, so both renew and bill together.</li>
+            <li>If the add-on or their plan ends: backgrounds bought once stay; the rest go back to Glow.</li>
+          </ul>
+        </section>
+        <section className="g card" aria-label="What people see">
+          <span className="k">What people see</span>
+          <ol className="dz-see">{see.map((x) => <li key={x.name}><span className="pay-txt"><span>{x.name}</span><span className="sub small">{x.note}</span></span><b>{x.price}</b></li>)}</ol>
+          <p className="sub small">To give one person a background with no payment, go to Users → the person → Backgrounds.</p>
+        </section>
+      </div>
+    </div>
+  </>;
+}
+
+/** One person's backgrounds in Users: what they own and how, and gifts. Only gifts can be taken back. */
+function PersonBackgrounds({ id, isAdmin }: { id: string; isAdmin: boolean }) {
+  const [r, setR] = useState<{ owned: { background: string; source: string }[]; bundle: string | null } | null>(null);
+  const [give, setGive] = useState('');
+  const [msg, setMsg] = useState('');
+  const load = () => api<{ owned: { background: string; source: string }[]; bundle: string | null }>(`/admin/users/${id}/backgrounds`).then(setR).catch(() => setR({ owned: [], bundle: null }));
+  useEffect(() => { setR(null); setMsg(''); void load(); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (isAdmin) return <div className="psec"><span className="k">Backgrounds</span><span className="sub small">Admins have every background.</span></div>;
+  if (!r) return <div className="psec"><span className="k">Backgrounds</span><span className="sub small">Loading…</span></div>;
+  const how: Record<string, string> = { single: 'Bought', bundle: 'In bundle', topup: 'Added later', gift: 'Given by you' };
+  const owned = new Set(r.owned.map((o) => o.background));
+  const left = BACKGROUNDS.filter((x) => x.id !== 'glow' && !owned.has(x.id));
+  const act = async (p: Promise<unknown>) => { setMsg(''); try { await p; await load(); setGive(''); } catch (e) { setMsg((e as Error).message); } };
+  return (
+    <div className="psec"><span className="k">Backgrounds</span>
+      <span className="sub small">{r.bundle ? `All backgrounds bundle since ${fmtDate(r.bundle)}` : 'Glow, plus anything included.'}</span>
+      {r.owned.length > 0 && <ul className="recent">{r.owned.map((o) => <li key={o.background}><span>{backgroundInfo(o.background).name}</span><span className="sub small">{how[o.source] ?? o.source}{o.source === 'gift' && <> · <button className="lnk" style={{ padding: 0, minHeight: 0 }} onClick={() => act(api(`/admin/users/${id}/backgrounds/${o.background}`, { method: 'DELETE' }))}>Take back</button></>}</span></li>)}</ul>}
+      {left.length > 0 && <div className="pay-line">
+        <label><span className="sr">Background to give</span><select className="in sel" value={give} onChange={(e) => setGive(e.target.value)}><option value="">Choose a background</option>{left.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
+        <button className="bt" disabled={!give} onClick={() => act(api(`/admin/users/${id}/backgrounds`, { body: { background: give } }))}>Give</button>
       </div>}
       {msg && <span className="err small" role="alert">{msg}</span>}
     </div>
@@ -1532,6 +1718,7 @@ function PersonPanel({ item, pay, onClose, onToggle, onPrices, onUnlock, onRemov
         <span style={{ fontSize: 15 }}>{offersLine(item.keptPrices ?? plansOffered(pay)) || 'No plans on'}</span><span className="sub small">What they pay when they next choose a plan.</span></div>}
       <EngineCard who="user" id={item.id} name={item.name || item.email} onSetup={(tab) => onSetup({ who: 'user', id: item.id, name: item.name || item.email }, tab)} onCopy={(fid, fname, fwho) => onCopy({ who: 'user', id: item.id, name: item.name || item.email }, fid, fname, fwho)} copyFrom={copyFrom.filter((o) => o.id !== item.id)} />
       {!unpaid && <PersonDesigns id={item.id} isAdmin={item.role === 'admin'} />}
+      {!unpaid && <PersonBackgrounds id={item.id} isAdmin={item.role === 'admin'} />}
       {(payer || unpaid) && <div className="psec"><span className="k">Actions</span><div className="acts">
         {payer && pay && <button className="bt" onClick={() => onPrices(item)}>Change prices</button>}
         {payer && <button className="bt" onClick={() => onUnlock(item)}>Unlock</button>}
@@ -1713,7 +1900,7 @@ function AuditTab({ guard, person, onPerson }: { guard: (e: unknown) => void; pe
 }
 
 function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?: { name: string; email: string } | null }) {
-  const [tab, setTab] = useState<'users' | 'payments' | 'designs' | 'ai' | 'keys' | 'glance' | 'limits' | 'security' | 'audit'>('users');
+  const [tab, setTab] = useState<'users' | 'payments' | 'designs' | 'backgrounds' | 'ai' | 'keys' | 'glance' | 'limits' | 'security' | 'audit'>('users');
   const [me, setMe] = useState<{ name: string; email: string } | null>(initialMe ?? null);
   const [auditFor, setAuditFor] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -1736,6 +1923,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
           <button className="nv" aria-current={tab === 'users' ? 'page' : undefined} onClick={() => setTab('users')}>Users</button>
           <button className="nv" aria-current={tab === 'payments' ? 'page' : undefined} onClick={() => setTab('payments')}>Payments</button>
           <button className="nv" aria-current={tab === 'designs' ? 'page' : undefined} onClick={() => setTab('designs')}>Designs</button>
+          <button className="nv" aria-current={tab === 'backgrounds' ? 'page' : undefined} onClick={() => setTab('backgrounds')}>Backgrounds</button>
           <button className="nv" aria-current={tab === 'ai' ? 'page' : undefined} onClick={() => setTab('ai')}>AI options</button>
           <button className="nv" aria-current={tab === 'keys' ? 'page' : undefined} onClick={() => setTab('keys')}>Included keys</button>
           <button className="nv" aria-current={tab === 'glance' ? 'page' : undefined} onClick={() => setTab('glance')}>New items</button>
@@ -1747,7 +1935,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
       </aside>
       <main key={tab} className="hud-in">
         {tab === 'users' ? <PeopleTab onSignedOut={onSignedOut} onOpenPayments={() => setTab('payments')} onAudit={(id) => { setAuditFor(id); setTab('audit'); }} />
- : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'designs' ? <DesignsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'keys' ? <KeysLibrary guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'security' ? <>
+ : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'designs' ? <DesignsAdmin guard={guard} /> : tab === 'backgrounds' ? <BackgroundsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'keys' ? <KeysLibrary guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'security' ? <>
           <header><h1>Security</h1><p className="sub" style={{ fontSize: 15 }}>Your own admin sign-in: authenticator app and recovery codes.</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
           <div className="two">

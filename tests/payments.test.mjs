@@ -1352,6 +1352,158 @@ await ok('designs: admins give a design (even one not offered) and can take back
 });
 
 
+// ---------------------------------------------------------------- backgrounds
+// The same rules as designs, for the background behind Niko: the admin's offer, one-time unlocks, the bundle (with
+// credit), pro-rated new backgrounds for bundle owners, retired backgrounds kept by owners, gifts, and Niko Pro (one
+// add-on, priced with designs) covering backgrounds unless the admin leaves them out.
+const bgPay = async (b, what, background) => {
+  const r = await b.post('/backgrounds/checkout', { what, background });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const id = r.data.url.split('/').pop();
+  assert.equal(await webhook('checkout.session.completed', paidSession(id), { secret: made[payMode] }), 200);
+  return id;
+};
+const bgOwns = async (id) => (await q('select background, source, cents from background_owned where user_id = $1 order by background', [id])).map((r) => `${r.background}:${r.source}${r.cents ? ':' + r.cents : ''}`);
+const bgView = async (b) => (await b.get('/backgrounds')).data;
+const bgFind = (v, id) => v.backgrounds.find((d) => d.id === id);
+const bgBase = (over = {}, extra = {}) => ({
+  backgrounds: { aurora: { on: true, paid: true, cents: 300 }, stars: { on: true, paid: true, cents: 300 }, silk: { on: true, paid: true, cents: 400 }, dust: { on: true, paid: false }, ...over },
+  bundleCents: 700, credit: true, rate: 'saving', percent: 30, pro: true, ...extra,
+});
+let gia, hal;
+
+await ok('backgrounds: nothing offered until the admin says; prices are checked before saving', async () => {
+  gia = await member('gia@example.com');
+  let v = await bgView(gia);
+  assert.deepEqual(v.backgrounds.map((d) => d.id), ['glow']); assert.equal(v.current, 'glow');
+  assert.equal((await gia.get('/me')).data.background, 'glow');
+  let r = await admin.put('/admin/backgrounds', { settings: { backgrounds: { aurora: { on: true, paid: true } } } });
+  assert.equal(r.status, 400); assert.match(r.data.error, /Aurora a price/);
+  r = await admin.put('/admin/backgrounds', { settings: bgBase({}, { bundleCents: 5000 }) });
+  assert.equal(r.status, 400); assert.match(r.data.error, /bundle should cost less/);
+  r = await admin.put('/admin/backgrounds', { settings: bgBase({ aurora: { on: true, paid: true, cents: 300, wasOff: true, everOn: false } }) });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.settings.backgrounds.aurora.wasOff, false, 'the admin can’t set the server’s own record');
+  r = await admin.get('/admin/backgrounds');
+  assert.equal(r.data.backgrounds.length, 20); assert.ok(r.data.proPrice);
+});
+
+await ok('backgrounds: locked ones can’t be used, included ones can, and a settings save can’t set one', async () => {
+  const v = await bgView(gia);
+  assert.deepEqual(v.backgrounds.map((d) => d.id), ['glow', 'aurora', 'stars', 'dust', 'silk']);
+  assert.equal(bgFind(v, 'aurora').state, 'locked'); assert.equal(bgFind(v, 'aurora').cents, 300);
+  assert.equal(bgFind(v, 'dust').state, 'included');
+  assert.deepEqual(v.bundle, { count: 3, cents: 700 });
+  assert.equal((await gia.post('/backgrounds/use', { background: 'aurora' })).status, 403);
+  assert.equal((await gia.post('/backgrounds/use', { background: 'nope' })).status, 400);
+  assert.equal((await gia.post('/backgrounds/use', { background: 'dust' })).status, 200);
+  assert.equal((await gia.get('/me')).data.background, 'dust');
+  const me = (await gia.get('/me')).data;
+  await gia.patch('/me', { appearance: { ...me.appearance, background: 'aurora', bgMotion: false } });
+  const a = (await user('gia@example.com')).appearance;
+  assert.equal(a.background, 'dust'); assert.equal(a.bgMotion, false, 'Move with Niko is an ordinary setting');
+});
+
+await ok('backgrounds: one unlocks once Stripe confirms the amount Niko asked for; resent events count once', async () => {
+  const r = await gia.post('/backgrounds/checkout', { what: 'one', background: 'aurora' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const id = r.data.url.split('/').pop();
+  const call = stripeCalls.filter((c) => c.path === '/checkout/sessions').at(-1);
+  assert.equal(call.p['line_items[0][price_data][unit_amount]'], '300');
+  assert.equal(call.p['metadata[kind]'], 'background');
+  assert.match(call.p.success_url, /\/backgrounds\?bought=\{CHECKOUT_SESSION_ID\}$/);
+  assert.equal(await webhook('checkout.session.completed', sessions.get(id), { secret: made[payMode] }), 200);
+  assert.equal(await webhook('checkout.session.completed', paidSession(id, { amount_total: 1 }), { secret: made[payMode] }), 200);
+  assert.equal(await webhook('checkout.session.completed', paidSession(id, { metadata: { ...sessions.get(id).metadata, user_id: ownerId } }), { secret: made[payMode] }), 200);
+  assert.deepEqual(await bgOwns(gia.id), []);
+  assert.equal(await webhook('checkout.session.completed', paidSession(id), { secret: made[payMode] }), 200);
+  assert.equal(await webhook('checkout.session.completed', paidSession(id), { secret: made[payMode] }), 200);
+  assert.deepEqual(await bgOwns(gia.id), ['aurora:single:300']);
+  assert.deepEqual(await owns(gia.id), [], 'a background is not a design');
+  const st = await gia.get(`/backgrounds/status?session=${id}`);
+  assert.equal(st.data.paid, true); assert.deepEqual(st.data.bought, { kind: 'one', backgrounds: ['aurora'] });
+  assert.equal((await gia.post('/backgrounds/use', { background: 'aurora' })).status, 200);
+  assert.equal((await gia.get('/me')).data.background, 'aurora');
+  assert.equal((await gia.post('/backgrounds/checkout', { what: 'one', background: 'aurora' })).status, 400);
+  assert.equal((await gia.post('/backgrounds/checkout', { what: 'topup', background: 'stars' })).status, 400);
+  assert.equal((await gia.post('/backgrounds/checkout', { what: 'free' })).status, 400);
+  // A design Checkout id isn't a background one.
+  assert.equal((await gia.get('/backgrounds/status?session=cs_test_nothing')).data.paid, false);
+});
+
+await ok('backgrounds: bundle with credit; new ones pro-rated; switched off, owners keep them; back on, they’re new', async () => {
+  let v = await bgView(gia);
+  assert.deepEqual(v.bundle, { count: 2, cents: 400 }, 'SGD 7 less the SGD 3 already paid');
+  await bgPay(gia, 'all');
+  assert.deepEqual(await bgOwns(gia.id), ['aurora:single:300', 'silk:bundle', 'stars:bundle']);
+  assert.ok((await user('gia@example.com')).bg_bundle_at);
+  // Bokeh is new; Stars is switched off (Gia keeps it), then back on later.
+  let r = await admin.put('/admin/backgrounds', { settings: bgBase({ bokeh: { on: true, paid: true, cents: 500 }, stars: { on: false, paid: true, cents: 300 } }) });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  v = await bgView(gia);
+  assert.equal(bgFind(v, 'stars').retired, true); assert.equal(bgFind(v, 'stars').state, 'owned');
+  assert.equal(bgFind(v, 'bokeh').fresh, true);
+  assert.equal(bgFind(v, 'bokeh').cents, Math.round(500 * 700 / 1200), 'the bundle’s saving: SGD 7 for the SGD 12 offered now');
+  assert.equal((await gia.post('/backgrounds/use', { background: 'stars' })).status, 200, 'retired but bought');
+  // Someone else doesn't see Stars at all.
+  hal = await member('hal@example.com');
+  assert.equal(bgFind(await bgView(hal), 'stars'), undefined);
+  r = await admin.put('/admin/backgrounds', { settings: { ...bgBase({ bokeh: { on: true, paid: true, cents: 500 }, stars: { on: true, paid: true, cents: 300 } }), rate: 'percent', percent: 40 } });
+  assert.equal(r.data.settings.backgrounds.stars.wasOff, true, 'remembered: it came back');
+  v = await bgView(gia);
+  assert.equal(bgFind(v, 'bokeh').cents, 300, '40% off SGD 5');
+  assert.equal(bgFind(v, 'stars').state, 'owned', 'Gia already had it');
+  await bgPay(gia, 'topup', 'bokeh');
+  const co = (await q(`select cents from background_checkouts where user_id = $1 and kind = 'topup'`, [gia.id]))[0];
+  assert.equal(co.cents, 300);
+  assert.ok((await bgOwns(gia.id)).includes('bokeh:topup'));
+});
+
+await ok('backgrounds: Niko Pro covers them while it’s on, unless the admin leaves backgrounds out', async () => {
+  const end = Math.floor(Date.now() / 1000) + 20 * 86400;
+  await q(`update users set sub_id = 'sub_hal', sub_status = 'active', sub_plan = 'monthly', sub_mode = $2 where id = $1`, [hal.id, payMode]);
+  subs.set('sub_hal', { id: 'sub_hal', status: 'active', customer: 'cus_hal', metadata: { user_id: hal.id, plan: 'monthly' }, current_period_end: end, items: { data: [{ id: 'si_hal_plan', current_period_end: end, price: { recurring: { interval: 'month' } } }] } });
+  let v = await bgView(hal);
+  assert.equal(v.pro.offered, true); assert.equal(v.pro.cents, 300); assert.equal(v.pro.covers, true);
+  assert.equal((await hal.post('/designs/pro')).status, 200);
+  v = await bgView(hal);
+  assert.equal(v.pro.active, true); assert.equal(v.pro.offered, false);
+  assert.equal(bgFind(v, 'silk').state, 'pro');
+  assert.equal((await hal.post('/backgrounds/use', { background: 'silk' })).status, 200);
+  assert.equal((await hal.post('/backgrounds/checkout', { what: 'one', background: 'silk' })).status, 400, 'nothing to buy with Pro');
+  // Left out of Pro: Silk goes back to Glow for Hal; paid backgrounds would stay.
+  let r = await admin.put('/admin/backgrounds', { settings: { ...bgBase({ bokeh: { on: true, paid: true, cents: 500 } }), pro: false } });
+  assert.equal(r.status, 200);
+  assert.equal((await hal.get('/me')).data.background, 'glow');
+  assert.equal(bgFind(await bgView(hal), 'silk').state, 'locked');
+  r = await admin.put('/admin/backgrounds', { settings: bgBase({ bokeh: { on: true, paid: true, cents: 500 } }) });
+  assert.equal((await hal.get('/me')).data.background, 'silk');
+  // Removing Niko Pro: Glow again.
+  assert.equal((await hal.del('/designs/pro')).status, 200);
+  assert.equal((await hal.get('/me')).data.background, 'glow');
+});
+
+await ok('backgrounds: admins give one (even one not offered), take back only gifts, and have every background', async () => {
+  let r = await admin.post(`/admin/users/${hal.id}/backgrounds`, { background: 'peaks' });
+  assert.equal(r.status, 200);
+  assert.equal((await admin.post(`/admin/users/${hal.id}/backgrounds`, { background: 'peaks' })).status, 409);
+  assert.equal((await admin.post(`/admin/users/${hal.id}/backgrounds`, { background: 'glow' })).status, 400);
+  const v = await bgView(hal);
+  assert.equal(bgFind(v, 'peaks').state, 'owned'); assert.equal(bgFind(v, 'peaks').retired, true);
+  assert.equal((await hal.post('/backgrounds/use', { background: 'peaks' })).status, 200);
+  assert.equal((await admin.del(`/admin/users/${gia.id}/backgrounds/aurora`)).status, 400, 'paid backgrounds stay theirs');
+  assert.equal((await admin.del(`/admin/users/${hal.id}/backgrounds/peaks`)).status, 200);
+  assert.equal((await hal.get('/me')).data.background, 'glow');
+  r = await admin.get(`/admin/users/${gia.id}/backgrounds`);
+  assert.equal(r.data.owned.length, 4); assert.ok(r.data.bundle);
+  const ov = await bgView(owner);
+  assert.equal(ov.backgrounds.length, 20); assert.ok(ov.backgrounds.every((d) => d.state !== 'locked'));
+  assert.equal((await owner.post('/backgrounds/use', { background: 'equalizer' })).status, 200);
+  assert.equal((await owner.post('/backgrounds/checkout', { what: 'one', background: 'aurora' })).status, 400);
+  const log = JSON.stringify(await q(`select action from audit_log where action like '%background%'`));
+  assert.ok(['payment.background', 'background.checkout', 'admin.backgrounds', 'admin.background_gift', 'admin.background_ungift'].every((a) => log.includes(a)));
+});
+
 await sqlc.end();
 await closePools();
 try { run('pg_ctl', ['-D', join(dir, 'data'), '-m', 'immediate', 'stop']); } catch { /* already stopping */ }

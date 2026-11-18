@@ -1,6 +1,6 @@
 import { and, desc, eq, gt, ilike, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
-import { appSettings, auditLog, designOwned, invites, recoveryCodes, sessions, signups, users, type Db } from '@niko/db';
+import { appSettings, auditLog, backgroundOwned, designOwned, invites, recoveryCodes, sessions, signups, users, type Db } from '@niko/db';
 import { accessState, accountLimits, cleanProvided, providedIds, USAGE_KINDS, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
 import { connectInfo, connectStripe, dateLabel, forgetPayments, forgetStripeMode, inviteCodeHash, keysOf, makeInviteCode, paymentSettings, PAYMENTS_KEY, payNow, plansLine, secretsFor, STRIPE_MODE_KEY, stripeMode } from '../billing';
 import { isMode, keysFor, modeStatus, stripe, StripeError, stripeReady } from '../stripe';
@@ -18,6 +18,8 @@ import { includedByUser, nextReset } from '../usage';
 import { setup } from './setup';
 import { DEFAULT_DESIGN, DESIGNS, designInfo, designSettingsProblem, isDesign, nextDesignSettings } from '@niko/shared';
 import { DESIGNS_KEY, designSettings, forgetDesigns } from '../designs';
+import { BACKGROUNDS_KEY, backgroundSettings, forgetBackgrounds } from '../backgrounds';
+import { BACKGROUNDS, DEFAULT_BACKGROUND, backgroundInfo, backgroundSettingsProblem, isBackground, nextBackgroundSettings } from '@niko/shared';
 
 export const admin = new Hono<AppEnv>();
 admin.route('/setup', setup);
@@ -606,6 +608,63 @@ admin.put('/designs', requireAdmin, async (c) => {
   await audit(c, 'admin.designs', { offered: Object.keys(next.designs).filter((id) => next.designs[id]!.on).length, switchedOff: off, switchedOn: back, bundle: money(next.bundleCents), pro: next.pro.on });
   return c.json({ settings: next });
 });
+// ---------------------------------------------------------------- backgrounds
+// Same rules as designs: switching a background off hides it from people who don't own it, and everyone who bought it
+// keeps it; switching it back on makes it new for bundle owners. Niko Pro's price is set with designs.
+admin.get('/backgrounds', requireAdmin, async (c) => {
+  const db = c.get('db');
+  const owners = await db.select({ background: backgroundOwned.background, n: sql<number>`count(*)::int` }).from(backgroundOwned).groupBy(backgroundOwned.background);
+  const bundles = Number((await db.select({ n: sql<number>`count(*)::int` }).from(users).where(isNotNull(users.bgBundleAt)))[0]?.n ?? 0);
+  const d = await designSettings(db, true);
+  return c.json({ settings: await backgroundSettings(db, true), backgrounds: BACKGROUNDS, owners: Object.fromEntries(owners.map((o) => [o.background, o.n])), bundles, proPrice: d.pro });
+});
+admin.put('/backgrounds', requireAdmin, async (c) => {
+  const b = await c.req.json<{ settings?: unknown }>().catch(() => ({} as { settings?: unknown }));
+  const db = c.get('db');
+  const before = await backgroundSettings(db, true);
+  const next = nextBackgroundSettings(before, b.settings);
+  const problem = backgroundSettingsProblem(next);
+  if (problem) return c.json({ error: problem }, 400);
+  await db.insert(appSettings).values({ key: BACKGROUNDS_KEY, value: next }).onConflictDoUpdate({ target: appSettings.key, set: { value: next } });
+  forgetBackgrounds();
+  const off = Object.keys(next.backgrounds).filter((id) => before.backgrounds[id]?.on && !next.backgrounds[id]!.on).map((id) => backgroundInfo(id).name);
+  const back = Object.keys(next.backgrounds).filter((id) => !before.backgrounds[id]?.on && next.backgrounds[id]!.on).map((id) => backgroundInfo(id).name);
+  await audit(c, 'admin.backgrounds', { offered: Object.keys(next.backgrounds).filter((id) => next.backgrounds[id]!.on).length, switchedOff: off, switchedOn: back, bundle: money(next.bundleCents), pro: next.pro });
+  return c.json({ settings: next });
+});
+admin.get('/users/:id/backgrounds', requireAdmin, async (c) => {
+  const db = c.get('db');
+  const id = c.req.param('id');
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return c.json({ error: 'Not found.' }, 404);
+  const u = (await db.select({ id: users.id, bundle: users.bgBundleAt }).from(users).where(eq(users.id, id)).limit(1))[0];
+  if (!u) return c.json({ error: 'Not found.' }, 404);
+  const owned = await db.select({ background: backgroundOwned.background, source: backgroundOwned.source, createdAt: backgroundOwned.createdAt }).from(backgroundOwned).where(eq(backgroundOwned.userId, id));
+  return c.json({ owned, bundle: u.bundle });
+});
+admin.post('/users/:id/backgrounds', requireAdmin, async (c) => {
+  const b = await c.req.json<{ background?: string }>().catch(() => ({} as { background?: string }));
+  const db = c.get('db');
+  const id = c.req.param('id');
+  if (!/^[0-9a-f-]{36}$/i.test(id) || !isBackground(b.background) || b.background === DEFAULT_BACKGROUND) return c.json({ error: 'Choose a background to give.' }, 400);
+  const u = (await db.select({ id: users.id, email: users.email }).from(users).where(eq(users.id, id)).limit(1))[0];
+  if (!u) return c.json({ error: 'Not found.' }, 404);
+  const added = await db.insert(backgroundOwned).values({ userId: id, background: b.background, source: 'gift' }).onConflictDoNothing().returning({ d: backgroundOwned.background });
+  if (!added.length) return c.json({ error: 'They already have that background.' }, 409);
+  await audit(c, 'admin.background_gift', { target: u.email, background: backgroundInfo(b.background).name });
+  return c.json({ ok: true });
+});
+admin.delete('/users/:id/backgrounds/:background', requireAdmin, async (c) => {
+  const db = c.get('db');
+  const id = c.req.param('id'), bg = c.req.param('background');
+  if (!/^[0-9a-f-]{36}$/i.test(id) || !isBackground(bg)) return c.json({ error: 'Not found.' }, 404);
+  // Only gifts can be taken back: anything paid for stays theirs.
+  const gone = await db.delete(backgroundOwned).where(and(eq(backgroundOwned.userId, id), eq(backgroundOwned.background, bg), eq(backgroundOwned.source, 'gift'))).returning({ d: backgroundOwned.background });
+  if (!gone.length) return c.json({ error: 'Only backgrounds you gave can be taken back. Paid backgrounds stay theirs.' }, 400);
+  const u = (await db.select({ email: users.email }).from(users).where(eq(users.id, id)).limit(1))[0];
+  await audit(c, 'admin.background_ungift', { target: u?.email, background: backgroundInfo(bg).name });
+  return c.json({ ok: true });
+});
+
 // One person's designs: what they own and how, and gifts (a design with no payment).
 admin.get('/users/:id/designs', requireAdmin, async (c) => {
   const db = c.get('db');

@@ -9,6 +9,7 @@ import { ALLOWED_HOSTS, type Env } from './env';
 import { randomChars, seal, sha256, unseal } from './lib/crypto';
 import { esc, sendEmail } from './lib/email';
 import { applyDesignSession, applyPro } from './designs';
+import { applyBackgroundSession } from './backgrounds';
 import { idOf, invoiceSubscription, isMode, keysFor, periodEnd, planOf, stripe, StripeError, stripeReady, type StripeEnv, type StripeMode, type StripeSecrets } from './stripe';
 
 export const PAYMENTS_KEY = 'payments';
@@ -216,6 +217,7 @@ export async function syncCheckout(env: Env, db: Db, id: string, mode: StripeMod
   if (!/^cs_[A-Za-z0-9_]{3,250}$/.test(id) || !keys.STRIPE_SECRET_KEY) return null;
   const s = await stripe(keys, 'GET', `/checkout/sessions/${id}`, { expand: ['subscription'] });
   if (s.mode === 'payment' && s.metadata?.kind === 'design') await applyDesignSession(db, s, mode);
+  else if (s.mode === 'payment' && s.metadata?.kind === 'background') await applyBackgroundSession(db, s, mode);
   else if (s.mode === 'payment') await applyPaidSession(env, db, s, mode);
   else if (s.mode === 'subscription' && s.status === 'complete' && s.subscription) {
     const sub = typeof s.subscription === 'string' ? await stripe(keys, 'GET', `/subscriptions/${s.subscription}`) : s.subscription;
@@ -236,6 +238,7 @@ export async function handleStripeEvent(env: Env, db: Db, event: any, mode: Stri
       case 'checkout.session.completed':
       case 'checkout.session.async_payment_succeeded':
         if (o?.mode === 'payment' && o.metadata?.kind === 'design') await applyDesignSession(db, o, mode);
+        else if (o?.mode === 'payment' && o.metadata?.kind === 'background') await applyBackgroundSession(db, o, mode);
         else if (o?.mode === 'payment') await applyPaidSession(env, db, o, mode);
         else if (o?.mode === 'subscription' && o.subscription) await applySubscription(db, await stripe(keys, 'GET', `/subscriptions/${idOf(o.subscription)}`), mode);
         break;

@@ -28,6 +28,8 @@ import { lock } from './lock';
 import { usage } from './usage';
 import { designs } from './designs';
 import { designFor } from '../designs';
+import { backgrounds } from './backgrounds';
+import { backgroundFor } from '../backgrounds';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
   telegramSetWebhook, type AppKeys, api as providerApi, googleCals,
@@ -50,6 +52,7 @@ app.use('*', async (c, next) => {
 
 app.route('/usage', usage);
 app.route('/designs', designs);
+app.route('/backgrounds', backgrounds);
 
 const clampNum = (v: unknown, lo: number, hi: number, d: number) => (typeof v === 'number' && isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : d);
 
@@ -59,7 +62,7 @@ app.get('/me', async (c) => {
   const weather = !!(await getConnection(c.get('db'), u.id, 'open-meteo').catch(() => null));
   // While locked, who the account belongs to stays hidden too (the locked screen needs only how Niko looks and behaves).
   const hide = !!c.get('locked');
-  return c.json({ id: u.id, email: hide ? '' : u.email, name: hide ? null : u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: await offFor(c.get('db'), u), glanceLimits: await limitsFor(c.get('db'), u), access: await accessFor(c.env, c.get('db'), u), lock: lockInfo(u), locked: !!c.get('locked'), design: await designFor(c.get('db'), u) });
+  return c.json({ id: u.id, email: hide ? '' : u.email, name: hide ? null : u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: await offFor(c.get('db'), u), glanceLimits: await limitsFor(c.get('db'), u), access: await accessFor(c.env, c.get('db'), u), lock: lockInfo(u), locked: !!c.get('locked'), design: await designFor(c.get('db'), u), background: await backgroundFor(c.get('db'), u) });
 });
 
 // Changing the password while signed in: the current one is needed. Every other session (other devices, the admin
@@ -105,6 +108,10 @@ app.patch('/me', async (c) => {
       glance: cleanGlancePrefs(a.glance ?? (u.appearance as Record<string, unknown>)?.glance),
       // The design is changed only through /api/designs/use, which checks the account may use it.
       ...(typeof (u.appearance as Record<string, unknown>)?.design === 'string' ? { design: (u.appearance as Record<string, unknown>).design } : {}),
+      // Likewise the background, only through /api/backgrounds/use.
+      ...(typeof (u.appearance as Record<string, unknown>)?.background === 'string' ? { background: (u.appearance as Record<string, unknown>).background } : {}),
+      // Whether the background answers Niko's state: kept as it was when this save doesn't include it.
+      bgMotion: typeof a.bgMotion === 'boolean' ? a.bgMotion : (u.appearance as Record<string, unknown>)?.bgMotion !== false,
     };
   }
   if (b.engine) {

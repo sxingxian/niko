@@ -2,6 +2,7 @@
 import type { AccessInfo } from './billing';
 export * from './billing';
 export * from './designs';
+export * from './backgrounds';
 export * from './maps';
 export * from './speechtext';
 import { MAP_PROVIDERS, mapPreset, type MapProvider, type MapSource } from './maps';
@@ -166,7 +167,7 @@ export const GROUPS: { id: ProviderGroup; name: string; note: string }[] = [
 export const COLOURS: Record<string, number> = { cyan: 190, violet: 262, rose: 330, amber: 32, emerald: 158 };
 export const SHIFT_ORDER = ['cyan', 'violet', 'rose', 'amber', 'emerald'];
 
-export interface Appearance { mode: 'shift' | 'single'; colours: string[]; single: string; customHue: number; seconds: number; /** Items per page in Inbox, Calendar and Notes. */ pageSize?: number; /** The core's design (see DESIGNS); Nebula when unset. */ design?: string; /** New items on Home. */ glance?: GlancePrefs }
+export interface Appearance { mode: 'shift' | 'single'; colours: string[]; single: string; customHue: number; seconds: number; /** Items per page in Inbox, Calendar and Notes. */ pageSize?: number; /** The core's design (see DESIGNS); Nebula when unset. */ design?: string; /** The background behind Niko (see BACKGROUNDS); Glow when unset. */ background?: string; /** The background answers Niko's state (on unless turned off). */ bgMotion?: boolean; /** New items on Home. */ glance?: GlancePrefs }
 export const PAGE_SIZES = [5, 10, 20, 25, 50];
 export type Brain = 'workers-ai' | 'custom-ai' | 'self-hosted-ai';
 /** Where Niko's speech can come from: three built in, and any number of the user's voice API keys ("vkey:<id>").
@@ -426,6 +427,8 @@ export interface Me {
   locked?: boolean;
   /** The design to draw: the one chosen, or Nebula if this account can no longer use it. */
   design?: string;
+  /** The background to draw: the one chosen, or Glow if this account can no longer use it. */
+  background?: string;
 }
 
 /** Whether a message is about the weather. Only then is the device's location asked for and sent. */
