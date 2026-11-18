@@ -87,6 +87,9 @@ export function GlanceStack({ wide }: { wide: boolean }) {
           if (r.locked && !nRef.current.locked) lockedSignal(sent);
           const known = new Set([...queue.current.map((x) => x.key), ...cardsRef.current.map((c) => c.it.key)]);
           queue.current.push(...(r.items ?? []).filter((x) => !known.has(x.key)));
+          // Asked while locked but answered after unlocking (reading new items takes a few seconds): they came sealed,
+          // so they are opened now, as unlocking does. (The server opens them only when it isn't locked.)
+          if (!nRef.current.locked && (r.items ?? []).some(sealedItem)) await revealSealed();
           wait = Math.max(45_000, r.waitMs ?? 60_000);
           setTick((x) => x + 1);
         } catch { wait = 120_000; } finally { running = false; }
@@ -101,6 +104,21 @@ export function GlanceStack({ wide }: { wide: boolean }) {
     timer = window.setTimeout(run, 2500);
     return () => { stop = true; window.clearTimeout(timer); window.removeEventListener('pointerdown', active); window.removeEventListener('keydown', active); document.removeEventListener('visibilitychange', shown); };
   }, [enabled]);
+  /** Opens every sealed card (showing or waiting) in place, so it reads in full for the time it has left. */
+  const revealing = useRef(false);
+  const revealSealed = async () => {
+    const sealed = [...cardsRef.current.map((c) => c.it), ...queue.current].filter(sealedItem);
+    if (!sealed.length || revealing.current) return;
+    revealing.current = true;
+    try {
+      const r = await api<{ items: ({ title: string; line: string; open: string } | null)[] }>('/glance/reveal', { body: { sealed: sealed.map((x) => x.sealed) } });
+      if (nRef.current.locked) return;
+      const full = new Map(sealed.map((x, i) => [x.key, r.items[i]]));
+      const fix = (it: GlanceItem): GlanceItem => { const v = full.get(it.key); return v ? { ...it, ...v, sealed: undefined } : it; };
+      queue.current = queue.current.map(fix);
+      setCards((cs) => cs.map((c) => ({ ...c, it: fix(c.it) })));
+    } catch { /* still locked on the server: they stay sealed */ } finally { revealing.current = false; }
+  };
   // Locking takes every card off the screen (what was showing may say more than the locked screen should).
   // Unlocking opens the sealed ones in place, so they read in full for the time they have left.
   const wasLocked = useRef(n.locked);
@@ -108,14 +126,7 @@ export function GlanceStack({ wide }: { wide: boolean }) {
     if (n.locked === wasLocked.current) return;
     wasLocked.current = n.locked;
     if (n.locked) { queue.current = []; setCards([]); return; }
-    const sealed = [...cardsRef.current.map((c) => c.it), ...queue.current].filter(sealedItem);
-    if (!sealed.length) return;
-    void api<{ items: ({ title: string; line: string; open: string } | null)[] }>('/glance/reveal', { body: { sealed: sealed.map((x) => x.sealed) } }).then((r) => {
-      const full = new Map(sealed.map((x, i) => [x.key, r.items[i]]));
-      const fix = (it: GlanceItem): GlanceItem => { const v = full.get(it.key); return v ? { ...it, ...v, sealed: undefined } : it; };
-      queue.current = queue.current.map(fix);
-      setCards((cs) => cs.map((c) => ({ ...c, it: fix(c.it) })));
-    }).catch(() => undefined);
+    void revealSealed();
   }, [n.locked]); // eslint-disable-line react-hooks/exhaustive-deps
   // Anything said to Niko counts as being here.
   useEffect(() => { if (n.mode !== 'idle') lastActive.current = Date.now(); }, [n.mode]);
