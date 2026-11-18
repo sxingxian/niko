@@ -1270,3 +1270,12 @@ a.bt { text-decoration: none; display: inline-flex; align-items: center; justify
   .live-places li { grid-template-columns: minmax(0, 1fr) auto; } .live-places li .live-pv { grid-column: 1; grid-row: 2; }
   .live-pform { grid-template-columns: 1fr 1fr; } .live-pform .in { grid-column: span 2; }
 }
+/* Settings · Knowledge: the model name for their own search service. */
+.kn-own { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.kn-own .in { height: 40px; width: 230px; max-width: 100%; border-radius: 999px; font-size: 14px; padding: 0 16px; }
+@media (max-width: 720px) {
+  .srow:has(.kn-own) { flex-wrap: wrap; }
+  .srow-c:has(.kn-own) { flex: 1 1 100%; }
+  .kn-own { justify-content: flex-start; width: 100%; }
+  .kn-own .in { flex: 1 1 100%; width: auto; }
+}

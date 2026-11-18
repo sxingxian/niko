@@ -32,6 +32,7 @@ import { backgrounds } from './backgrounds';
 import { knowledge, syncNotes } from './knowledge';
 import { data } from './data';
 import { refreshUsed } from '../datasets';
+import { ownEmbedder } from '../ownEmbed';
 import { DataProblem, liveFor, openMeteoKey, runAction, sourcesFor, usableFor, weatherFor } from '../datasources';
 import { deviceKnowledgeFor, embed, knowledgeDb, knowledgeFor, lookupSheet, type KnContext } from '../knowledge';
 import { JUDGE_RULE, learnedBlock, LEARNED_RULE, notesFor, PEOPLE_RULE, QUIET_RULE, saveNote, SAVE_RULE, SITUATION_RULE, situationBlock, taughtFor } from '../learned';
@@ -963,11 +964,13 @@ app.post('/chat', async (c) => {
   const ndb = knAccess.learning && knPlace === 'niko' && knPrefs.notes > 0 ? knowledgeDb(c.env) : null;
   // Cloudflare's search numbers for the question, made once for files and notes.
   const cfVector = (kdb || ndb) && knCf ? await embed(c.env, [text]).then((v) => v[0] ?? null).catch(() => null) : null;
+  // Their own search service (one of their AI keys or their model server): the question's numbers, or words only.
+  const ownVector = kdb && knSearchOf(knPrefs, knAccess, 'niko') === 'own' ? await ownEmbedder(c.env, db, u, knPrefs.own!).then((e) => e([text])).then((v) => v[0] ?? null).catch((e) => { console.warn(`own search: ${String((e as Error)?.message ?? e).slice(0, 160)}`); return null; }) : null;
   const notes = knDevice ? knDevice.learned
     : ndb ? await notesFor(ndb, u.id, text, { vector: cfVector, situation: situated }).catch((e) => { console.warn(`learned: ${String((e as Error)?.message ?? e).slice(0, 200)}`); return []; }) : [];
   const taught = kdb && ndb ? await taughtFor(ndb, u.id, text, { vector: cfVector }).catch(() => undefined) : undefined;
   if (knDevice && knOk) kn = deviceKnowledgeFor(knDevice, text, knPrefs, learnSave, situated);
-  else if (kdb) kn = await knowledgeFor(kdb, c.env, u.id, text, { prefs: knPrefs, cloudflare: knCf, cfVector, vector: (b.knowledge as { vector?: unknown } | undefined)?.vector, taught, pin: cleanTarget(b.pin), ask: learnSave && !situated, situation: situated })
+  else if (kdb) kn = await knowledgeFor(kdb, c.env, u.id, text, { prefs: knPrefs, cloudflare: knCf, cfVector, ownVector, vector: (b.knowledge as { vector?: unknown } | undefined)?.vector, taught, pin: cleanTarget(b.pin), ask: learnSave && !situated, situation: situated })
     .catch((e) => { console.warn(`knowledge: ${String((e as Error)?.message ?? e).slice(0, 200)}`); return null; });
   const learned = learnedBlock(notes);
   const situation = situated && knAccess.learning && knPrefs.situations ? situationBlock(brief.events, clampNum(b.tz, -840, 840, 0), cleanWhere(b.near)) : '';

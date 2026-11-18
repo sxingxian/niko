@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import {
-  addCloudflareNumbers, addPieces, addSheet, deviceKnowledgeFor, filePieces, finishFile, knowledgeFor, listFiles, lookupSheet, setDeviceNumbers, sheetRows, startFile,
+  addCloudflareNumbers, addOwnNumbers, clearOwnNumbers, addPieces, addSheet, deviceKnowledgeFor, filePieces, finishFile, knowledgeFor, listFiles, lookupSheet, setDeviceNumbers, sheetRows, startFile,
 } from '../apps/api/src/knowledge.ts';
 import { cleanKnowledgePrefs, knowledgeLimits } from '../packages/shared/src/knowledge.ts';
 import { cleanDeviceKnowledge, cleanTableAsks, cleanTableResults, knPlaceOf, knSearchOf, lookupRows, KN_DEVICE_HITS_MAX } from '../packages/shared/src/knowledgeDevice.ts';
@@ -151,7 +151,7 @@ await ok('files in Niko searched with this device’s numbers: the device scale 
 });
 await ok('the file list says how many pieces have each kind of search numbers, and the file’s fingerprint', async () => {
   const f = (await listFiles(k, A)).find((x) => x.id === hb);
-  assert.deepEqual(f.numbers, { cloudflare: 0, device: 2 }); assert.equal(f.sha256, 'a'.repeat(64));
+  assert.deepEqual(f.numbers, { cloudflare: 0, device: 2, own: 0 }); assert.equal(f.sha256, 'a'.repeat(64));
 });
 await ok('re-reading for search: Cloudflare numbers for pieces without them; this device’s numbers by piece number', async () => {
   let r = await addCloudflareNumbers(k, env, A, hb);
@@ -192,6 +192,26 @@ await ok('the search model: only the repository’s own files, by exact address;
   for (const bad of [`${base}onnx/model.onnx`, `https://huggingface.co/evil/multilingual-e5-small/resolve/main/tokenizer.json`, `${base}../x/tokenizer.json`, `https://huggingface.co.evil.com/Xenova/multilingual-e5-small/resolve/main/config.json`, `${base}onnx/model_quantizedXonnx`])
     assert.equal(embedFileFor(bad), null, bad);
   assert.equal(EMBED_PINNED, true);
+});
+
+await ok('their own search service: numbers kept apart, used with their own scale, cleared when the model changes', async () => {
+  const own = async (texts) => texts.map((t) => wordsVec(t, 768));
+  const f = await startFile(k, A, limits, { name: 'Garden notes.md', bytes: 100, sha256: 'b'.repeat(64), collection: 'Home' });
+  const pieces = [{ heading: 'Tomatoes', body: 'Water the tomatoes every morning in summer.' }, { heading: 'Roses', body: 'Prune the roses in late winter.' }];
+  await addPieces(k, env, A, f.id, { start: 0, pieces }, { cloudflare: true, own });
+  await finishFile(k, A, f.id);
+  let listed = (await listFiles(k, A)).find((x) => x.id === f.id);
+  assert.deepEqual(listed.numbers, { cloudflare: 0, device: 0, own: 2 }, 'their own service replaces Cloudflare for new pieces');
+  const q = 'Tomatoes: water the tomatoes every morning in summer';
+  const r = await knowledgeFor(k, env, A, q, { prefs: prefs(), cloudflare: false, ownVector: wordsVec(q, 768) });
+  assert.ok(r && r.lead && r.sources[0].heading === 'Tomatoes');
+  await clearOwnNumbers(k, A);
+  listed = (await listFiles(k, A)).find((x) => x.id === f.id);
+  assert.equal(listed.numbers.own, 0);
+  assert.deepEqual(await addOwnNumbers(k, A, f.id, own), { updated: 2, left: 0 });
+  assert.deepEqual(await addOwnNumbers(k, A, f.id, own), { updated: 0, left: 0 });
+  // Another account's files are never touched.
+  await assert.rejects(addOwnNumbers(k, 'someone-else', f.id, own));
 });
 
 await pool.end();

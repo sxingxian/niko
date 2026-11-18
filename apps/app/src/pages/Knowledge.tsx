@@ -18,9 +18,11 @@ import { embedDownload, embedReady, embedRemove, embedSupported } from '../embed
 import { Sheet } from './Designs';
 import { NoteLine, SettingsPage } from './Settings';
 
-type KnFile = { id: string; name: string; kind: string; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; flagged: boolean; sheets: number; rows: number; columns: number; numbers: { cloudflare: number; device: number }; sha256: string; addedAt: string };
+type KnFile = { id: string; name: string; kind: string; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; flagged: boolean; sheets: number; rows: number; columns: number; numbers: { cloudflare: number; device: number; own?: number }; sha256: string; addedAt: string };
 type KnSheet = { id: string; name: string; columns: KnColumn[]; rows: number; header: boolean; example: string[] };
-type State = { available: boolean; access: KnowledgeAccess; prefs: KnowledgePrefs; limits: KnowledgeLimits; usage: { files: number; bytes: number } };
+type OwnSource = { ref: string; name: string; example: string };
+type State = { available: boolean; access: KnowledgeAccess; prefs: KnowledgePrefs; limits: KnowledgeLimits; usage: { files: number; bytes: number }; ownSearch?: OwnSource[] };
+type By = 'cloudflare' | 'device' | 'own';
 type Upload = { key: string; name: string; bytes: number; step: string; done: number; total: number; error?: string };
 
 const MB = 1024 * 1024;
@@ -71,6 +73,9 @@ export function Knowledge() {
   const [picked, setPicked] = useState<Place | null>(null);
   const [moving, setMoving] = useState<{ done: number; total: number; name: string } | null>(null);
   const [model, setModel] = useState<{ ready: boolean; p: number | null }>({ ready: embedReady(), p: null });
+  // A search service of their own picked in the list, waiting for its model name before it's saved.
+  const [ownPick, setOwnPick] = useState<{ ref: string; model: string } | null>(null);
+  const [trying, setTrying] = useState(false);
   const [missing, setMissing] = useState(0);
   const [reread, setReread] = useState<{ done: number; total: number } | null>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -128,7 +133,7 @@ export function Knowledge() {
   const canKeep = place === 'device' ? access.device : access.niko;
   const search = knSearchOf(prefs, access, place);
   const readCf = place === 'niko' && access.cloudflareRead && prefs.read === 'cloudflare';
-  const busy = !!moving || !!reread;
+  const busy = !!moving || !!reread || trying;
   const tab: 'files' | 'learned' = access.learning && (params.get('tab') === 'learned' || !access.files) ? 'learned' : 'files';
   const tabs = access.learning && access.files ? (
     <div className="kn-pagetabs" role="tablist" aria-label="Knowledge">
@@ -193,8 +198,9 @@ export function Knowledge() {
     } finally { setMoving(null); await load(); }
   };
 
-  // Making search numbers again: for files in Niko, by Cloudflare or on this device; for files here, on this device.
-  const rereadAll = async (by: 'cloudflare' | 'device', list = files) => {
+  // Making search numbers again: for files in Niko, by Cloudflare, their own service or on this device; for files
+  // here, on this device.
+  const rereadAll = async (by: By, list = files) => {
     if (by === 'device' && !embedReady()) return;
     setNote(null);
     try {
@@ -205,8 +211,8 @@ export function Knowledge() {
         let done = 0;
         setReread({ done, total });
         for (const f of todo) {
-          if (by === 'cloudflare') {
-            for (let left = 1; left > 0;) { const r = await api<{ updated: number; left: number }>(`/knowledge/files/${f.id}/numbers/cloudflare`, { method: 'POST' }); left = r.left; done += r.updated; setReread({ done, total }); if (!r.updated) break; }
+          if (by !== 'device') {
+            for (let left = 1; left > 0;) { const r = await api<{ updated: number; left: number }>(`/knowledge/files/${f.id}/numbers/${by}`, { method: 'POST' }); left = r.left; done += r.updated; setReread({ done, total }); if (!r.updated) break; }
           } else {
             await addNumbersInNiko(f.id, (n) => { done += n; setReread({ done, total }); });
           }
@@ -215,11 +221,19 @@ export function Knowledge() {
     } catch (e) { setNote({ ok: false, text: (e as Error).message }); }
     finally { setReread(null); await load(); }
   };
-  const chooseSearch = async (by: 'cloudflare' | 'device') => {
-    const r = await savePrefs({ search: by });
-    if (r) await refreshMe();
-    if (r && (by === 'cloudflare' || embedReady())) await rereadAll(by);
+  const chooseSearch = async (by: By, own?: { ref: string; model: string }) => {
+    setTrying(true);
+    const r = await savePrefs(by === 'own' ? { search: by, own } : { search: by });
+    setTrying(false);
+    if (r) { setOwnPick(null); await refreshMe(); }
+    if (r && (by !== 'device' || embedReady())) await rereadAll(by);
     else await load();
+  };
+  // The list: Cloudflare, each of their own services, then this device. Their own service asks for a model name first.
+  const pickSearch = (v: string) => {
+    if (!v.startsWith('own:')) { setOwnPick(null); void chooseSearch(v === 'device' ? 'device' : 'cloudflare'); return; }
+    const ref = v.slice(4), src = (st.ownSearch ?? []).find((x) => x.ref === ref);
+    setOwnPick({ ref, model: prefs.own?.ref === ref ? prefs.own.model : src?.example ?? '' });
   };
   const download = async () => {
     setNote(null);
@@ -247,9 +261,17 @@ export function Knowledge() {
   const choose = <button type="button" className="pri md" disabled={busy} onClick={() => picker.current?.click()}>Choose files</button>;
   const places: Place[] = (['niko', 'device'] as const).filter((p) => (p === 'niko' ? access.niko : access.device));
   const placeStatus = (p: Place) => p === place ? `In use · ${n(files.length, 'file', 'files')}` : p === 'niko' ? 'All your devices' : 'Stays on this computer';
-  const modelRow = search === 'device' && embedSupported();
+  const modelRow = search === 'device' && !ownPick && embedSupported();
+  const owns = place === 'niko' ? st.ownSearch ?? [] : [];
+  const ownNow = ownPick ?? (search === 'own' ? prefs.own : null);
+  const ownSrc = ownNow ? owns.find((x) => x.ref === ownNow.ref) : undefined;
+  const ownName = ownSrc?.name ?? 'Your own service', ownExample = ownSrc?.example ?? '';
+  const searchValue = ownNow ? `own:${ownNow.ref}` : search;
+  const searchChoices = (access.cloudflareSearch && place === 'niko' ? 1 : 0) + owns.length + 1;
   const searchHint = place === 'device'
     ? (model.ready ? 'Done on this computer, so Niko finds the right part even when you use different words.' : 'Done on this computer. Until the search model is downloaded, Niko finds things by the words in them.')
+    : ownNow
+      ? `${ownNow.ref === 'self-hosted-ai' ? 'Your own model server makes the search numbers.' : `Your AI key “${ownName}” makes the search numbers; its own charges apply.`} Works for Telegram replies.${files.length ? ` Changing it re-reads ${files.length === 1 ? 'your file' : `all ${files.length} files`}.` : ''}`
     : search === 'cloudflare'
       ? `Included in your plan, and works for Telegram replies.${files.length ? ` Changing it re-reads ${files.length === 1 ? 'your file' : `all ${files.length} files`}.` : ''}`
       : `Free; the search numbers are made on this computer. Telegram replies then search by words only.${files.length ? ` Changing it re-reads ${files.length === 1 ? 'your file' : `all ${files.length} files`}.` : ''}`;
@@ -391,17 +413,27 @@ export function Knowledge() {
               </select>
             </SettingRow>}
             <SettingRow title="Find things by meaning with" hint={searchHint}>
-              <select className="in" aria-label="Find things by meaning with" value={search} disabled={busy || place === 'device' || !access.cloudflareSearch} onChange={(e) => void chooseSearch(e.target.value === 'device' ? 'device' : 'cloudflare')}>
-                {access.cloudflareSearch && place === 'niko' && <option value="cloudflare">Cloudflare · included in your plan</option>}<option value="device">On this device · free</option>
+              <select className="in" aria-label="Find things by meaning with" value={searchValue} disabled={busy || place === 'device' || searchChoices < 2} onChange={(e) => pickSearch(e.target.value)}>
+                {access.cloudflareSearch && place === 'niko' && <option value="cloudflare">Cloudflare · included in your plan</option>}
+                {owns.map((o) => <option key={o.ref} value={`own:${o.ref}`}>{o.ref === 'self-hosted-ai' ? 'Your own model server' : `${o.name} · your AI key`}</option>)}
+                <option value="device">On this device · free</option>
               </select>
             </SettingRow>
+            {ownNow && <SettingRow title="Search model name" hint={ownPick ? `The embedding model on that service${ownExample ? `, for example ${ownExample}` : ''}. Niko tries it once before switching.` : `Using “${ownNow.model}”. Changing it re-reads your files.`}>
+              <form className="kn-own" onSubmit={(e) => { e.preventDefault(); if (ownPick?.model.trim()) void chooseSearch('own', { ref: ownPick.ref, model: ownPick.model.trim() }); }}>
+                <input className="in" aria-label="Search model name" value={ownNow.model} maxLength={100} spellCheck={false} autoComplete="off" disabled={busy}
+                  onChange={(e) => setOwnPick({ ref: ownNow.ref, model: e.target.value })} />
+                {ownPick && <button type="submit" className="pri md" disabled={busy || !ownPick.model.trim() || (search === 'own' && prefs.own?.ref === ownPick.ref && prefs.own.model === ownPick.model.trim())}>Use this model</button>}
+                {ownPick && <button type="button" className="bt md" disabled={busy} onClick={() => setOwnPick(null)}>Cancel</button>}
+              </form>
+            </SettingRow>}
             {modelRow && <SettingRow title="Search model" hint={model.ready ? 'On this device. Your phone and other computers download their own.' : `Downloaded once to this device, about ${KN_DEVICE_MODEL_MB} MB. Until then, Niko finds things by their words.`}>
               {model.p !== null
                 ? <span className="kn-dl"><Status tone="busy">Downloading · {Math.round(model.p * 100)}%</Status><Meter value={model.p} warnAt={2} label="Downloading the search model" /></span>
                 : model.ready ? <button type="button" className="bt md" disabled={busy} onClick={() => void removeModel()}>Remove</button>
                 : <button type="button" className="pri md" disabled={busy} onClick={() => void download()}>Download to this device</button>}
             </SettingRow>}
-            {(reread || (missing > 0 && files.length > 0 && (search === 'cloudflare' || model.ready))) && (
+            {(reread || (missing > 0 && files.length > 0 && !ownPick && (search !== 'device' || model.ready))) && (
               <SettingRow title="Search numbers" hint={reread ? 'Re-reading your files so Niko can find things by meaning. You can keep using Niko meanwhile; leaving this page pauses it.' : `${n(missing, 'piece isn’t', 'pieces aren’t')} ready to be found by meaning yet.`}>
                 {reread
                   ? <span className="kn-dl"><Status tone="busy">Re-reading · {reread.total ? Math.round((reread.done / reread.total) * 100) : 0}%</Status><Meter value={reread.total ? reread.done / reread.total : 0} warnAt={2} label="Re-reading files" /></span>
