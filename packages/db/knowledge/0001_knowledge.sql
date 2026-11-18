@@ -39,8 +39,9 @@ create table if not exists kn_chunks (
 );
 create index if not exists kn_chunks_account on kn_chunks (account_id);
 create index if not exists kn_chunks_tsv on kn_chunks using gin (tsv);
-create index if not exists kn_chunks_embedding on kn_chunks using hnsw (embedding halfvec_cosine_ops);
-create index if not exists kn_chunks_embedding_device on kn_chunks using hnsw (embedding_device halfvec_cosine_ops);
+-- No vector index on purpose: a shared HNSW index picks its candidates across every account and filters by account
+-- afterwards, which can leave one person with too few matches. Search reads only that person's rows (by account_id)
+-- and compares exactly, which is fast at the sizes Knowledge allows.
 
 -- Spreadsheets are kept as tables and answered with a fixed look-up tool, never with SQL written by the AI.
 create table if not exists kn_sheets (
