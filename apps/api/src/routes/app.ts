@@ -11,7 +11,7 @@ import { sendEmail } from '../lib/email';
 import { accessFor, paymentSettings } from '../billing';
 import { eventDetail, mailDetail, noteDetail } from '../details';
 import { BrainFail, brainKeys, defaultLabel, keyInfo, listModels, loadKeys, NOT_CHAT, saveKeys, testEntry, think } from '../brains';
-import { cleanWhere, forecastCard, forecastText, geocode, stripWeatherTags, weatherTags } from '../weather';
+import { cleanWhere, forecastCard, forecastText, geocode, setOpenMeteoKey, stripWeatherTags, weatherTags } from '../weather';
 import { audioProblem, defaultHearLabel, hear, hearServerKey, HEAR_PROVIDERS_LIST, hearKeyInfo, hearKeyProblem, hearKeys, loadHearKeys, MAX_AUDIO_BYTES, saveHearKeys, type HearKey } from '../hears';
 import { NOT_ON_ACCOUNT, offFor } from '../access';
 import { diffGlance, limitsFor } from '../glance';
@@ -31,7 +31,7 @@ import { designFor } from '../designs';
 import { backgrounds } from './backgrounds';
 import { knowledge, syncNotes } from './knowledge';
 import { data } from './data';
-import { DataProblem, runAction, sourcesFor, usableFor } from '../datasources';
+import { DataProblem, openMeteoKey, runAction, sourcesFor, usableFor, weatherFor } from '../datasources';
 import { deviceKnowledgeFor, embed, knowledgeDb, knowledgeFor, lookupSheet, type KnContext } from '../knowledge';
 import { JUDGE_RULE, learnedBlock, LEARNED_RULE, notesFor, PEOPLE_RULE, QUIET_RULE, saveNote, SAVE_RULE, SITUATION_RULE, situationBlock, taughtFor } from '../learned';
 import { backgroundFor } from '../backgrounds';
@@ -66,7 +66,9 @@ const clampNum = (v: unknown, lo: number, hi: number, d: number) => (typeof v ==
 // ---------------------------------------------------------------- me
 app.get('/me', async (c) => {
   const u = c.get('user');
-  const weather = !!(await getConnection(c.get('db'), u.id, 'open-meteo').catch(() => null));
+  // Weather questions may carry the device's rounded location when a weather source is on and the person allows it.
+  const wxMe = await weatherFor(c.env, c.get('db'), u).catch(() => null);
+  const weather = !!wxMe?.on.length && wxMe.location;
   // While locked, who the account belongs to stays hidden too (the locked screen needs only how Niko looks and behaves).
   const hide = !!c.get('locked');
   const off = await offFor(c.get('db'), u);
@@ -780,6 +782,7 @@ When the user asks to switch how they travel on the map that is showing ("show m
 const NO_MAP_RULE = 'You cannot show maps yet: no map service is set up. If the user asks for directions or a map, say they can add a map service on the Engine screen. Never use a map tag.';
 const NOT_ON_ACCOUNT_MAP_RULE = 'You cannot show maps: they aren’t included in this account’s plan. If the user asks for one, say so in a sentence. Never use a map tag.';
 /** Added to the prompt when a weather service is connected. */
+const NO_WEATHER_RULE = 'No weather source is set up. If the user asks about the weather, say weather isn’t set up yet and can be set up in Connections · Weather. Never guess a forecast.';
 const WEATHER_RULE = `Weather forecasts come from Open-Meteo and are given in WEATHER blocks. Answer weather questions from them in plain spoken words: the conditions, temperatures and the chance of rain that matter for what was asked, without listing every number.
 When the user asks about the weather in a place whose forecast is not given, reply with only [[weather:<place>, <country if known>]] (one tag per place, at most three) and nothing else; you will then be given the forecasts.`;
 
@@ -914,14 +917,20 @@ app.post('/chat', async (c) => {
   const history = oneOff ? [] : (await db.select().from(chatTurns).where(eq(chatTurns.userId, u.id)).orderBy(desc(chatTurns.createdAt)).limit(8)).reverse();
   // Weather: with a weather service connected, a weather question gets the forecast for where the user is (the
   // browser's rounded location, sent only with weather questions), or else for their home place.
-  const wx = oneOff ? null : (await credentials(c.env, db, u.id, 'open-meteo').catch(() => null)) as { home?: string; units?: string } | null;
-  const units: 'C' | 'F' = /^\s*°?f/i.test(wx?.units ?? '') ? 'F' : 'C';
+  // Weather sources in the person's order (Connections · Weather): Open-Meteo (built in) and data sources used as
+  // weather. Open-Meteo answers here when it comes first; a data source that comes first is asked through its tag.
+  const wxAll = oneOff ? null : await weatherFor(c.env, db, u, () => credentials(c.env, db, u.id, 'open-meteo') as Promise<{ home?: string; units?: string } | null>).catch(() => null);
+  const omOn = !!wxAll?.on.includes('open-meteo');
+  if (omOn) setOpenMeteoKey(await openMeteoKey(c.env, db));
+  const wx = wxAll && omOn ? { home: wxAll.home, units: wxAll.units } : null;
+  const units: 'C' | 'F' = wxAll?.units === 'F' ? 'F' : 'C';
+  const omFirst = omOn && wxAll!.on[0] === 'open-meteo';
   let weather = '';
   // The card shown on Home: the place the answer is about (the first one, when it names several).
   let wxCard: Promise<WeatherCard | null> | null = null;
   const cardFor = (place: { lat: number; lon: number; name: string }, label?: string) => { wxCard ??= forecastCard(place, units, label).catch(() => null); };
-  if (wx && isWeatherQuestion(text)) {
-    const here = cleanWhere(b.where);
+  if (wx && omFirst && isWeatherQuestion(text)) {
+    const here = wxAll!.location ? cleanWhere(b.where) : null;
     try {
       const place = here ? { ...here, name: 'where the user is now' } : wx.home ? await geocode(wx.home) : null;
       if (place) { weather = `\n<WEATHER for ${here ? 'the user’s current location' : `the user’s home place, ${place.name}`}>\n${await forecastText(place, units)}\n</WEATHER>`; if (!here) cardFor(place, place.name.split(',')[0]); else cardFor(place); }
@@ -965,9 +974,12 @@ app.post('/chat', async (c) => {
   // Look-ups the browser already ran in its own tables, asked for by the first answer to this same question.
   const knResults = kn?.device ? cleanTableResults(b.tableResults) : [];
   const mapRule = oneOff ? '' : !mapsOn(off) ? NOT_ON_ACCOUNT_MAP_RULE : await mapsUsable(c.env, db, u, off) ? MAP_RULE : NO_MAP_RULE;
-  const wxRule = wx ? `\n${WEATHER_RULE}${weather ? '' : '\nNo forecast for the user’s own location is given. If they ask about the weather where they are, say their location is off, and that they can allow it in the browser or set a home place for Open-Meteo in Connections.'}` : '';
   // Data sources the person turned on (or added): the AI may ask their read-only actions with a tag.
   const ds = oneOff ? { sources: [], calls: 0 } : await usableFor(db, u).catch((e) => { console.warn(`data sources: ${String((e as Error)?.message ?? e).slice(0, 200)}`); return { sources: [], calls: 0 }; });
+  // Weather data sources that come before Open-Meteo in the person's order are asked first, through their tags.
+  const wxTags = (wxAll?.on ?? []).filter((id) => id !== 'open-meteo').map((id) => ds.sources.find((x) => x.row.id === id)?.tag).filter((t): t is string => !!t);
+  const wxRule = !wxAll || oneOff ? '' : !wxAll.on.length ? `\n${NO_WEATHER_RULE}`
+    : `${wx ? `\n${WEATHER_RULE}${weather || !omFirst ? '' : '\nNo forecast for the user’s own location is given. If they ask about the weather where they are, say their location is off, and that they can allow it in the browser or set a home place in Connections · Weather.'}` : ''}${wxTags.length && !omFirst ? `\nFor weather questions, ask ${wxTags.join(', then ')} first with its data tag (they are the user’s chosen weather sources)${wx ? '; if that fails, use the weather tag' : ''}.` : ''}`;
   const dsBlock = dataBlock(ds.sources);
   const onScreen = oneOff ? '' : screenText(b.screen);
   const msgs = [

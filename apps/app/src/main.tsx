@@ -14,6 +14,7 @@ import { Designs } from './pages/Designs';
 import { Backgrounds } from './pages/Backgrounds';
 import { Account, Appearance, Connections, Engine, SettingsLayout, Voice } from './pages/Settings';
 import { DataSources } from './pages/DataSources';
+import { Weather } from './pages/WeatherSettings';
 import { Knowledge } from './pages/Knowledge';
 
 function Private({ children }: { children: ReactNode }) {
@@ -118,6 +119,7 @@ function Screens() {
           <Route path="/appearance" element={<Appearance />} />
           <Route path="/voice" element={<Voice />} />
           <Route path="/connections" element={<Connections />} />
+          <Route path="/connections/weather" element={<Weather />} />
           <Route path="/engine" element={<Engine />} />
           <Route path="/engine/data" element={<DataSources />} />
           <Route path="/knowledge" element={<Knowledge />} />

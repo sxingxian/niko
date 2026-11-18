@@ -2,7 +2,7 @@
 // sources: address and sign-in, what Niko can ask (read-only actions, typed in or found in an OpenAPI file), and test
 // results. Every check here is repeated on the server; these only show problems early.
 import { useRef, useState } from 'react';
-import { actionLine, cleanAction, cleanBaseUrl, openApiActions, type DataAction, type DataAuth, type DataKeyMode, type DataOffer, type DataParam, type DataParamType, type DataSourceInfo, type DataUse } from '@niko/shared';
+import { actionLine, DATA_USE_NAMES, cleanAction, cleanBaseUrl, openApiActions, type DataAction, type DataAuth, type DataKeyMode, type DataOffer, type DataParam, type DataParamType, type DataSourceInfo, type DataUse } from '@niko/shared';
 
 export interface SourceDraft {
   name: string; use: DataUse; baseUrl: string; auth: DataAuth; authName: string; keyMode: DataKeyMode; key: string;
@@ -26,7 +26,7 @@ export function AddressStep({ d, set, admin, hasKey }: { d: SourceDraft; set: (p
     <div className="ds-step">
       <div className="ds-two">
         <label className="fld"><span className="k">{admin ? 'Name people see' : 'Name'}</span><input className="in" value={d.name} maxLength={60} onChange={(e) => set({ name: e.target.value })} placeholder="Acme orders" /></label>
-        {admin && <label className="fld"><span className="k">Use as</span><select className="in" value={d.use} onChange={(e) => set({ use: e.target.value as DataUse })}><option value="general">General data</option><option value="live">Live information</option></select></label>}
+        <label className="fld"><span className="k">Use as</span><select className="in" value={d.use} onChange={(e) => set({ use: e.target.value as DataUse })}>{(Object.keys(DATA_USE_NAMES) as DataUse[]).map((u) => <option key={u} value={u}>{DATA_USE_NAMES[u]}</option>)}</select></label>
       </div>
       <label className="fld"><span className="k">Address</span><input className="in" value={d.baseUrl} inputMode="url" autoComplete="off" spellCheck={false} onChange={(e) => set({ baseUrl: e.target.value })} placeholder="https://api.example.com" /><span className="ds-hint">https and a public address only.</span></label>
       <div className="ds-two">

@@ -4,6 +4,7 @@
 // the AI never builds an address. These checks run on the server; the screens use them to show problems early.
 
 export type DataUse = 'general' | 'live' | 'weather';
+export const DATA_USE_NAMES: Record<DataUse, string> = { general: 'General data', live: 'Live information', weather: 'Weather' };
 export type DataAuth = 'none' | 'header' | 'query';
 /** Admin sources: one key for everyone (the admin's), or each person adds their own. */
 export type DataKeyMode = 'one' | 'own';
@@ -69,7 +70,9 @@ export const DATA_RESULT_CHARS = 4000;
  *  never shared between accounts. */
 export const DATA_CACHE_S = { live: 20, other: 300 } as const;
 export const DATA_CALL_STEPS = [500, 1000, 2000, 5000, 0] as const; // 0: no limit
-export const DATA_DEFAULTS = { own: false, calls: 1000 } as const;
+export const DATA_DEFAULTS = { own: false, calls: 1000, om: true, wxFirst: 'om' } as const;
+/** The built-in weather service's id in a weather order. */
+export const OPEN_METEO = 'open-meteo';
 
 const s = (v: unknown, max: number) => (typeof v === 'string' ? v : '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max);
 const slug = (v: string) => v.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
@@ -307,18 +310,19 @@ export function resultText(body: string, kind: 'json' | 'csv'): string {
 // ---------------------------------------------------------------- who may use what
 /** The admin's defaults: whether people may add their own sources, and the monthly number of data calls. Each admin
  *  source's own default comes from who it is offered to. */
-export interface DataDefaults { own: boolean; calls: number }
+export interface DataDefaults { own: boolean; calls: number; /** Open-Meteo (built in) for everyone. */ om: boolean; /** New accounts try Open-Meteo first, or other weather sources first. */ wxFirst: 'om' | 'others' }
 /** One person's changes to the defaults: `src:<id>` (an admin source), `own`, `calls`. */
 export type DataAccess = Record<string, boolean | number>;
 export function cleanDataDefaults(v: unknown): DataDefaults {
   const o = (v ?? {}) as Record<string, unknown>;
   const calls = Number(o.calls);
-  return { own: typeof o.own === 'boolean' ? o.own : DATA_DEFAULTS.own, calls: (DATA_CALL_STEPS as readonly number[]).includes(calls) ? calls : DATA_DEFAULTS.calls };
+  return { own: typeof o.own === 'boolean' ? o.own : DATA_DEFAULTS.own, calls: (DATA_CALL_STEPS as readonly number[]).includes(calls) ? calls : DATA_DEFAULTS.calls,
+    om: typeof o.om === 'boolean' ? o.om : DATA_DEFAULTS.om, wxFirst: o.wxFirst === 'others' ? 'others' : 'om' };
 }
 export function cleanDataAccess(v: unknown): DataAccess {
   const out: DataAccess = {};
   for (const [k, x] of Object.entries((v ?? {}) as Record<string, unknown>)) {
-    if ((k === 'own' || /^src:[0-9a-f-]{36}$/.test(k)) && typeof x === 'boolean') out[k] = x;
+    if ((k === 'own' || k === 'om' || /^src:[0-9a-f-]{36}$/.test(k)) && typeof x === 'boolean') out[k] = x;
     else if (k === 'calls' && (DATA_CALL_STEPS as readonly number[]).includes(Number(x))) out[k] = Number(x);
   }
   return out;
@@ -327,12 +331,33 @@ export function cleanDataAccess(v: unknown): DataAccess {
 export function dataAllowed(defaults: DataDefaults, own: DataAccess, sources: { id: string; offer: DataOffer; termsOk: boolean }[], isAdmin = false) {
   const src: Record<string, boolean> = {};
   for (const x of sources) src[x.id] = x.termsOk && (isAdmin || (typeof own[`src:${x.id}`] === 'boolean' ? own[`src:${x.id}`] as boolean : x.offer === 'everyone'));
-  return { src, own: isAdmin || (typeof own.own === 'boolean' ? own.own : defaults.own), calls: isAdmin ? 0 : typeof own.calls === 'number' ? own.calls : defaults.calls };
+  return { src, own: isAdmin || (typeof own.own === 'boolean' ? own.own : defaults.own), calls: isAdmin ? 0 : typeof own.calls === 'number' ? own.calls : defaults.calls,
+    om: isAdmin || (typeof own.om === 'boolean' ? own.om : defaults.om) };
 }
-/** A person's own choices: the admin sources they turned on, and actions they switched off ("sourceId:actionId"). */
-export interface DataPrefs { on: string[]; actionsOff: string[] }
+/** Connections · Weather: the order weather sources are tried in (Open-Meteo and data sources used as weather),
+ *  the ones switched off, the home place, units, and whether weather questions may carry the device's location.
+ *  Unset (never saved) means: Open-Meteo where the plan's order puts it, the home place and units from an older
+ *  Open-Meteo connection, location on. */
+export interface WeatherPrefs { order: string[]; off: string[]; home: string; units: 'C' | 'F'; location: boolean; saved: boolean }
+/** A person's own choices: the admin sources they turned on, actions they switched off ("sourceId:actionId"), and
+ *  their weather settings. */
+export interface DataPrefs { on: string[]; actionsOff: string[]; weather: WeatherPrefs }
+const WX_ID = /^([0-9a-f-]{36}|open-meteo)$/;
+export function cleanWeatherPrefs(v: unknown): WeatherPrefs {
+  const o = (v ?? {}) as Record<string, unknown>;
+  const ids = (x: unknown) => (Array.isArray(x) ? [...new Set(x.filter((y): y is string => typeof y === 'string' && WX_ID.test(y)))].slice(0, 30) : []);
+  return { order: ids(o.order), off: ids(o.off), home: s(o.home, 120), units: o.units === 'F' ? 'F' : 'C', location: o.location !== false, saved: o.saved === true };
+}
 export function cleanDataPrefs(v: unknown): DataPrefs {
   const o = (v ?? {}) as Record<string, unknown>;
   const ids = (x: unknown, re: RegExp) => (Array.isArray(x) ? [...new Set(x.filter((y): y is string => typeof y === 'string' && re.test(y)))].slice(0, 200) : []);
-  return { on: ids(o.on, /^[0-9a-f-]{36}$/), actionsOff: ids(o.actionsOff, /^[0-9a-f-]{36}:[a-z0-9-]{1,40}$/) };
+  return { on: ids(o.on, /^[0-9a-f-]{36}$/), actionsOff: ids(o.actionsOff, /^[0-9a-f-]{36}:[a-z0-9-]{1,40}$/), weather: cleanWeatherPrefs(o.weather) };
+}
+/** The weather order a person sees: their saved order first (only sources they can use), then any new ones, with
+ *  Open-Meteo first or last as the plan says until they choose. */
+export function weatherOrder(prefs: WeatherPrefs, available: string[], wxFirst: 'om' | 'others'): string[] {
+  const known = prefs.order.filter((id) => available.includes(id));
+  const fresh = available.filter((id) => !known.includes(id));
+  const om = fresh.filter((id) => id === OPEN_METEO), rest = fresh.filter((id) => id !== OPEN_METEO);
+  return prefs.saved ? [...known, ...rest, ...om] : wxFirst === 'om' ? [...om, ...known, ...rest] : [...known, ...rest, ...om];
 }

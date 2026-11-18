@@ -481,3 +481,4 @@ body { background: #07090d; }
 .dsa-empty b { font-weight: 500; font-size: 18px; }
 .dsa-gh { color: #fff !important; padding: 16px 0 4px; }
 @media (max-width: 900px) { .dsa-tr { grid-template-columns: minmax(0, 1fr) auto; } .dsa-tr > :nth-child(2), .dsa-tr > :nth-child(3) { display: none; } .dsa-tr.head { display: none; } }
+.dsa-name { display: flex; align-items: center; gap: 8px; }

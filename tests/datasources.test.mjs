@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {
   actionUrl, checkValues, cleanAction, cleanActions, cleanBaseUrl, cleanDataAccess, cleanDataPrefs, dataAllowed, dataBlock, dataTags, hostProblem,
-  openApiActions, privateIp, resultText, sampleValues, stripDataTags,
+  openApiActions, privateIp, resultText, sampleValues, stripDataTags, cleanWeatherPrefs, weatherOrder, cleanDataDefaults,
 } from '../packages/shared/src/dataSources.ts';
 import { dns, forgetDns, safeGet } from '../apps/api/src/safefetch.ts';
 import { DataProblem, runAction } from '../apps/api/src/datasources.ts';
@@ -111,7 +111,24 @@ await ok('who may use what: offered sources, terms, own sources, calls', () => {
   assert.deepEqual(Object.values(p.src), [true, true, false], 'terms not confirmed: off even when turned on for a person');
   assert.equal(p.own, true); assert.equal(p.calls, 2000);
   assert.equal(dataAllowed(d, {}, srcs, true).calls, 0);
-  assert.deepEqual(cleanDataPrefs({ on: ['x', srcs[0].id], actionsOff: [`${srcs[0].id}:air-now`, 'bad'] }), { on: [srcs[0].id], actionsOff: [`${srcs[0].id}:air-now`] });
+  const pr = cleanDataPrefs({ on: ['x', srcs[0].id], actionsOff: [`${srcs[0].id}:air-now`, 'bad'] });
+  assert.deepEqual([pr.on, pr.actionsOff], [[srcs[0].id], [`${srcs[0].id}:air-now`]]);
+});
+
+await ok('weather order: Open-Meteo where the plan puts it until the person chooses; new sources join; settings cleaned', () => {
+  const A = 'a'.repeat(8) + '-0000-4000-8000-' + 'a'.repeat(12), B = 'b'.repeat(8) + '-0000-4000-8000-' + 'b'.repeat(12);
+  const fresh = cleanWeatherPrefs({});
+  assert.deepEqual(fresh, { order: [], off: [], home: '', units: 'C', location: true, saved: false });
+  assert.deepEqual(weatherOrder(fresh, ['open-meteo', A], 'om'), ['open-meteo', A]);
+  assert.deepEqual(weatherOrder(fresh, ['open-meteo', A], 'others'), [A, 'open-meteo']);
+  const mine = cleanWeatherPrefs({ order: [A, 'open-meteo', 'junk'], off: ['open-meteo'], units: 'F', location: false, saved: true, home: 'Paris' });
+  assert.deepEqual(mine.order, [A, 'open-meteo']);
+  assert.deepEqual(weatherOrder(mine, ['open-meteo', A, B], 'om'), [A, 'open-meteo', B], 'a new source joins after their order');
+  assert.deepEqual(weatherOrder(mine, [A], 'om'), [A], 'Open-Meteo switched off by the admin disappears');
+  assert.equal(dataAllowed(cleanDataDefaults({}), {}, []).om, true);
+  assert.equal(dataAllowed(cleanDataDefaults({ om: false }), {}, []).om, false);
+  assert.equal(dataAllowed(cleanDataDefaults({ om: false }), cleanDataAccess({ om: true }), []).om, true);
+  assert.equal(cleanDataDefaults({ wxFirst: 'others' }).wxFirst, 'others');
 });
 
 // ---------------------------------------------------------------- the server side, with the network stood in for

@@ -7,7 +7,8 @@ import { appSettings, dataSources, users } from '@niko/db';
 import { cleanActions, cleanDataAccess, cleanDataDefaults, sampleValues, type DataAction, type DataOffer } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { audit, requireAdmin } from '../lib/session';
-import { cleanInput, DATA_DEFAULTS_KEY, dataCalls, dataDefaults, DataProblem, forgetDataDefaults, infoOf, runAction, type SourceInput, type SourceRow } from '../datasources';
+import { cleanInput, DATA_DEFAULTS_KEY, dataCalls, dataDefaults, DataProblem, forgetDataDefaults, infoOf, OM_KEY_SETTING, openMeteoKey, runAction, type SourceInput, type SourceRow } from '../datasources';
+import { seal } from '../lib/crypto';
 import { testActions } from './data';
 
 export const adminData = new Hono<AppEnv>();
@@ -24,6 +25,7 @@ adminData.get('/', async (c) => {
   const people = await db.select({ id: users.id, name: users.name, email: users.email, role: users.role, status: users.status, dataAccess: users.dataAccess }).from(users).orderBy(users.createdAt);
   return c.json({
     defaults: await dataDefaults(db, true),
+    openMeteo: { key: !!(await openMeteoKey(c.env, db)) },
     sources: rows.map((r) => ({ ...infoOf(r), calls: calls.bySource[r.id] ?? 0 })),
     own: { sources: own.length, people: ownIds.size, calls: Object.entries(calls.bySource).filter(([id]) => !rows.some((r) => r.id === id)).reduce((a, [, n]) => a + n, 0) },
     users: people.map((p) => ({ ...p, dataAccess: cleanDataAccess(p.dataAccess), calls: calls.byUser[p.id] ?? 0 })),
@@ -75,9 +77,9 @@ adminData.post('/test', async (c) => {
 
 /** The default for everyone: which admin sources are on (sets who each is offered to), own sources, monthly calls. */
 adminData.put('/default', async (c) => {
-  const b = await c.req.json<{ own?: unknown; calls?: unknown; sources?: Record<string, unknown> }>().catch(() => ({} as Record<string, never>));
+  const b = await c.req.json<{ own?: unknown; calls?: unknown; om?: unknown; wxFirst?: unknown; sources?: Record<string, unknown> }>().catch(() => ({} as Record<string, never>));
   const db = c.get('db');
-  const d = cleanDataDefaults({ ...(await dataDefaults(db, true)), ...(b.own !== undefined ? { own: b.own } : {}), ...(b.calls !== undefined ? { calls: b.calls } : {}) });
+  const d = cleanDataDefaults({ ...(await dataDefaults(db, true)), ...Object.fromEntries((['own', 'calls', 'om', 'wxFirst'] as const).filter((k) => b[k] !== undefined).map((k) => [k, b[k]])) });
   await db.insert(appSettings).values({ key: DATA_DEFAULTS_KEY, value: d }).onConflictDoUpdate({ target: appSettings.key, set: { value: d } });
   forgetDataDefaults();
   const rows = await db.select().from(dataSources).where(isNull(dataSources.ownerId));
@@ -89,7 +91,7 @@ adminData.put('/default', async (c) => {
     const offer: DataOffer = want ? 'everyone' : r.offer === 'everyone' ? 'chosen' : (r.offer as DataOffer);
     if (offer !== r.offer) { await db.update(dataSources).set({ offer }).where(eq(dataSources.id, r.id)); changed.push(`${r.name} ${want ? 'on' : 'off'}`); }
   }
-  await audit(c, 'data.default', { own: d.own ? 'allowed' : 'not allowed', calls: d.calls || 'no limit', sources: changed.join(', ') || 'unchanged' }, c.get('user').id);
+  await audit(c, 'data.default', { own: d.own ? 'allowed' : 'not allowed', calls: d.calls || 'no limit', openMeteo: d.om ? 'on' : 'off', weatherFirst: d.wxFirst, sources: changed.join(', ') || 'unchanged' }, c.get('user').id);
   return c.json({ ok: true, defaults: d });
 });
 adminData.put('/users/:id', async (c) => {
@@ -102,6 +104,7 @@ adminData.put('/users/:id', async (c) => {
   // A change that matches the default is not a change: only real differences are kept.
   const own = Object.fromEntries(Object.entries(cleanDataAccess(b.access)).filter(([k, v]) => {
     if (k === 'own') return v !== d.own;
+    if (k === 'om') return v !== d.om;
     if (k === 'calls') return v !== d.calls;
     const r = rows.find((x) => `src:${x.id}` === k);
     return !!r && v !== (r.offer === 'everyone');
@@ -109,4 +112,15 @@ adminData.put('/users/:id', async (c) => {
   await db.update(users).set({ dataAccess: own }).where(eq(users.id, target.id));
   await audit(c, 'data.user', { target: target.email, changes: Object.entries(own).map(([k, v]) => `${rows.find((r) => `src:${r.id}` === k)?.name ?? k} ${typeof v === 'boolean' ? (v ? 'on' : 'off') : v}`).join(', ') || 'follows the default' }, c.get('user').id);
   return c.json({ ok: true, access: own });
+});
+
+/** Open-Meteo's paid plan key: Niko then uses Open-Meteo's customer API (its terms ask a paid service for it). Empty removes it. */
+adminData.put('/open-meteo', async (c) => {
+  const b = await c.req.json<{ key?: unknown }>().catch(() => ({} as { key?: unknown }));
+  const key = typeof b.key === 'string' ? b.key.trim().slice(0, 200) : '';
+  const db = c.get('db');
+  if (key) await db.insert(appSettings).values({ key: OM_KEY_SETTING, value: { keyEnc: await seal(c.env.ENCRYPTION_KEY, key) } }).onConflictDoUpdate({ target: appSettings.key, set: { value: { keyEnc: await seal(c.env.ENCRYPTION_KEY, key) } } });
+  else await db.delete(appSettings).where(eq(appSettings.key, OM_KEY_SETTING));
+  await audit(c, 'data.open-meteo.key', { key: key ? 'added' : 'removed' }, c.get('user').id);
+  return c.json({ ok: true, key: !!key });
 });

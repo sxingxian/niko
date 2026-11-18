@@ -123,7 +123,7 @@ export function Connections() {
   const calDlg = useRef<HTMLDialogElement>(null);
 
   const load = useCallback(() => api<{ providers: Prov[]; apps: MyApp[]; redirectUrls: string[] }>('/connections')
-    .then((r) => { setList(r.providers.filter((p) => p.group !== 'ai')); setApps(r.apps); setRedirects(r.redirectUrls); return r; })
+    .then((r) => { setList(r.providers.filter((p) => p.group !== 'ai' && p.group !== 'weather')); setApps(r.apps); setRedirects(r.redirectUrls); return r; })
     .catch((e) => { setNote({ ok: false, text: e.message }); return null; }), []);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -212,12 +212,20 @@ export function Connections() {
         : <button className={'bt' + (p.linked ? '' : ' fill')} onClick={() => act(p)}>{p.linked ? 'Manage' : 'Connect'}</button>}
     </div>
   );
+  // Weather has its own page (Connections · Weather): where the forecast comes from, in what order, and the settings.
+  const weatherRow = (
+    <div className="row" key="weather">
+      <span className={'dot' + (me?.weather ? ' on' : '')} />
+      <span className="txt"><b>Weather</b><span className="sub">Where Niko gets the forecast, in what order · home place, units</span></span>
+      <Link className="bt" to="/connections/weather">Set up</Link>
+    </div>
+  );
   const panel = (id: string) => {
     const g = GROUPS.find((x) => x.id === id)!;
     return (
       <section key={id} className="g panel" aria-label={g.name}>
         <header><h2>{g.name}</h2><span className="sub">{g.note}</span></header>
-        {list.filter((p) => p.group === id).map(rowFor)}
+        {id === 'weather' ? weatherRow : list.filter((p) => p.group === id).map(rowFor)}
       </section>
     );
   };
@@ -238,7 +246,7 @@ export function Connections() {
         <div role="group" aria-label="Connection type" className="cph-tabs">
           {groups.map((g) => <button key={g.id} aria-pressed={tab === g.id} onClick={() => setTab(g.id)}>{g.name}</button>)}
         </div>
-        <section className="g cph-list" aria-label="Connections of this type">{list.filter((p) => p.group === tab).map(rowFor)}</section>
+        <section className="g cph-list" aria-label="Connections of this type">{tab === 'weather' ? weatherRow : list.filter((p) => p.group === tab).map(rowFor)}</section>
         <section className="g cph-list perms" aria-label="What Niko may do">{permRows}</section>
       </> : (
         <div className="cols conn">

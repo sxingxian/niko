@@ -6,6 +6,12 @@ import type { WeatherCard, WeatherIcon } from '@niko/shared';
 
 export interface Place { lat: number; lon: number; name: string }
 
+// The admin's Open-Meteo paid plan key (one for the whole of Niko). With it, Niko uses Open-Meteo's customer API, as
+// its terms ask of a paid service; without it, the free API.
+let omKey: string | null = null;
+export const setOpenMeteoKey = (k: string | null) => { omKey = k; };
+const om = (host: 'api' | 'geocoding-api', path: string) => `https://${omKey ? `customer-${host}` : host}.open-meteo.com${path}${omKey ? `&apikey=${encodeURIComponent(omKey)}` : ''}`;
+
 const WMO: Record<number, string> = {
   0: 'clear sky', 1: 'mainly clear', 2: 'partly cloudy', 3: 'overcast', 45: 'fog', 48: 'freezing fog',
   51: 'light drizzle', 53: 'drizzle', 55: 'heavy drizzle', 56: 'light freezing drizzle', 57: 'freezing drizzle',
@@ -37,7 +43,7 @@ async function cached<T>(key: string, ttlS: number, load: () => Promise<T>): Pro
 
 async function getJson(url: string): Promise<any> {
   const res = await fetch(url, { signal: AbortSignal.timeout(8000), headers: { accept: 'application/json' } });
-  if (!res.ok) throw new Error(`weather service answered ${res.status}`);
+  if (!res.ok) throw new Error(`weather service answered ${res.status}`); // never the address: it can hold the key
   return res.json();
 }
 
@@ -48,7 +54,7 @@ export async function geocode(query: string): Promise<Place | null> {
   return cached(`geo:${q.toLowerCase()}`, 7 * 86400, async () => {
     // The geocoder matches one name, so "Paris, France" is looked up as "Paris" and the rest picks between results.
     const [name, ...rest] = q.split(',').map((s) => s.trim()).filter(Boolean);
-    const j = await getJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name!)}&count=10&language=en&format=json`);
+    const j = await getJson(om('geocoding-api', `/v1/search?name=${encodeURIComponent(name!)}&count=10&language=en&format=json`));
     const list: any[] = Array.isArray(j?.results) ? j.results : [];
     const hint = rest.join(' ').toLowerCase();
     const r = (hint && list.find((x) => [x.country, x.country_code, x.admin1].some((v) => v && String(v).toLowerCase().includes(hint)))) || list[0];
@@ -68,7 +74,7 @@ async function forecast(place: Place, units: 'C' | 'F'): Promise<any> {
     daily: 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,uv_index_max,sunrise,sunset',
     ...(f ? { temperature_unit: 'fahrenheit', wind_speed_unit: 'mph', precipitation_unit: 'inch' } : {}),
   });
-  return cached(`fc:${params}`, 15 * 60, () => getJson(`https://api.open-meteo.com/v1/forecast?${params}`));
+  return cached(`fc:${params}`, 15 * 60, () => getJson(om('api', `/v1/forecast?${params}`)));
 }
 
 /** The forecast for one place as a short summary: now, the next 24 hours, and 7 days. */
