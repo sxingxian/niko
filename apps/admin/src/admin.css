@@ -430,3 +430,4 @@ body { background: #07090d; }
 .dz-see { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
 .dz-see li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: start; }
 .dz-see b { font-weight: 600; font-size: 16px; text-align: right; max-width: 220px; }
+.dz-amini.wide { width: 70px; background: #05070d; }

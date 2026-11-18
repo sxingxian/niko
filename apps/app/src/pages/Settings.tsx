@@ -6,13 +6,13 @@ import { KOKORO_DOWNLOAD_MB, kokoroDownload, kokoroReady, kokoroRemove, kokoroSp
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { AI_PRESETS, aiProviderOf, brainOrder, MAX_AI_KEYS, NOT_CHAT, presetOf, type AiKeyInfo, type BrainEntry, type BrainRest } from '@niko/shared';
-import { designInfo, type CalendarLink } from '@niko/shared';
+import { backgroundInfo, designInfo, type CalendarLink } from '@niko/shared';
 import { cleanGlancePrefs, GLANCE_LIMIT_DEFAULTS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_REMIND_STEPS, GLANCE_STEPS, glanceEvery, type GlancePart, type GlancePrefs } from '@niko/shared';
 import { AI_OPTION_GROUPS, aiAllowed, brainOption, hearOption, imageOption, voiceOption } from '@niko/shared';
 import { IMAGE_PROVIDERS, imageOrder, imagePresetOf, MAX_IMAGE_KEYS, type ImageKeyInfo, type ImageProvider, type ImageSource } from '@niko/shared';
 import { HEAR_PROVIDERS, hearOrder, hearPresetOf, MAX_HEAR_KEYS, type HearKeyInfo, type HearProvider, type HearSource } from '@niko/shared';
 import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, PAGE_SIZES, VOICE_NAMES, VOICE_PROVIDERS, VOICE_SOURCES, voiceName, voiceOrder, voicePresetOf, WORKERS_VOICES, type VoiceKeyInfo, type VoiceProvider, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
-import { api, DesignPreview, Field, Icon, PasswordField, setAppearance, Switch } from '@niko/ui';
+import { api, BackgroundPreview, DesignPreview, Field, Icon, PasswordField, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
 import { MapSettings, type MapLists } from './MapSettings';
 import { ScreenLock } from './ScreenLock';
@@ -1589,12 +1589,25 @@ export function Appearance() {
     <SettingsPage title="Appearance" sub="Your own background, and how long lists are shown. The particles and accents follow your colours." action={<button className="pri set-save" onClick={save}>{saved ? 'Saved' : 'Save'}</button>}>
       <section className="set-card set-niko" aria-label="Your Niko" style={{ marginBottom: 20 }}>
         <span className="set-niko-thumb"><DesignPreview design={me?.design ?? 'nebula'} particles={me?.design && me.design !== 'nebula' ? undefined : 420} /></span>
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div style={{ flex: '1 1 200px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span className="k">Your Niko</span>
           <b style={{ fontWeight: 500, fontSize: 18 }}>{designInfo(me?.design ?? 'nebula').name}</b>
           <span className="hint">How the core looks on Home and everywhere else.</span>
         </div>
         <Link to="/niko" className="sec" style={{ height: 44, fontSize: 14 }}>Choose your Niko</Link>
+      </section>
+      <section className="set-card set-niko" aria-label="Background behind Niko" style={{ marginBottom: 20, flexWrap: 'wrap' }}>
+        <span className="set-niko-thumb wide"><BackgroundPreview background={me?.background ?? 'glow'} paused /></span>
+        <div style={{ flex: '1 1 200px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span className="k">Background</span>
+          <b style={{ fontWeight: 500, fontSize: 18 }}>{backgroundInfo(me?.background ?? 'glow').name}</b>
+          <span className="hint">What moves behind Niko on Home, Inbox, Calendar and Notes.</span>
+        </div>
+        <Link to="/backgrounds" className="sec" style={{ height: 44, fontSize: 14 }}>Choose a background</Link>
+        <div style={{ flexBasis: '100%', display: 'flex', alignItems: 'center', gap: 14, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,.12)' }}>
+          <Switch on={a.bgMotion !== false} onChange={(on) => up({ bgMotion: on })} label="Move with Niko" />
+          <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span>Move with Niko</span><span className="hint">The background brightens as Niko listens and pulses as it speaks. Off: it drifts at its own pace.</span></span>
+        </div>
       </section>
       <div className="set-grid">
         <section className="set-card" aria-label="Background settings">

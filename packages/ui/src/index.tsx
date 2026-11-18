@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { currentHue, spots, startCore, startRing, type CoreHandle, type CoreMode } from './core';
 import { runDesign } from './designs';
+import { runBackground, type BackgroundHandle } from './backgrounds';
 export { sampleDesign } from './designs';
 
 export * from './core';
@@ -144,6 +145,36 @@ export function DesignPreview({ design, mode = 'idle', particles, className, lab
   }, [design, particles]);
   useEffect(() => { handle.current?.setMode(mode); }, [mode]);
   return <canvas ref={ref} className={className} {...(label ? { role: 'img', 'aria-label': label } : { 'aria-hidden': true })} style={{ display: 'block', width: '100%', height: '100%' }} />;
+}
+
+/** A live background (the big preview, picker tiles, Settings). Tiles pass paused: one settled frame and no more drawing,
+ * so a grid of twenty stays light; off screen it stops altogether. */
+export function BackgroundPreview({ background, mode = 'idle', paused = false, react = true, className, label }: { background: string; mode?: CoreMode; paused?: boolean; react?: boolean; className?: string; label?: string }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const handle = useRef<BackgroundHandle | null>(null);
+  const opts = useRef({ mode, paused, react });
+  opts.current = { mode, paused, react };
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const start = () => { if (!handle.current) handle.current = runBackground(el, background, currentHue, opts.current); };
+    const stop = () => { handle.current?.stop(); handle.current = null; };
+    if (typeof IntersectionObserver === 'undefined') { start(); return stop; }
+    const io = new IntersectionObserver(([e]) => (e?.isIntersecting ? start() : stop()), { rootMargin: '80px' });
+    io.observe(el);
+    return () => { io.disconnect(); stop(); };
+  }, [background]);
+  useEffect(() => { handle.current?.setMode(mode); }, [mode]);
+  useEffect(() => { handle.current?.setPaused(paused); }, [paused]);
+  useEffect(() => { handle.current?.setReact(react); }, [react]);
+  return <canvas ref={ref} className={className} {...(label ? { role: 'img', 'aria-label': label } : { 'aria-hidden': true })} style={{ display: 'block', width: '100%', height: '100%' }} />;
+}
+
+/** The page background behind Niko. Glow (or nothing chosen) is the plain CSS glow, as before, costing nothing to draw;
+ * any other background is drawn on a canvas inside the same .bg layer, so transitions that treat .bg specially still do. */
+export function Backdrop({ background, mode = 'idle', motion = true }: { background?: string; mode?: CoreMode; motion?: boolean }) {
+  const live = !!background && background !== 'glow';
+  return <div className={'bg' + (live ? ' bg-live' : '')}>{live && <BackgroundPreview background={background} mode={mode} react={motion} />}</div>;
 }
 
 export function PasswordField({ label, value, onChange, autoComplete, meter }: { label: string; value: string; onChange: (v: string) => void; autoComplete: string; meter?: boolean }) {

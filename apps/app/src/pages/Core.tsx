@@ -4,7 +4,7 @@ import { Link, NavLink, useLocation } from 'react-router-dom';
 import { aiAllowed, stripTags, PAGE_SIZES, SEND_COUNTDOWN_SECONDS, voiceName, voiceOption, voiceOrder, type Me } from '@niko/shared';
 /** The first voice this account may use (the admin may have turned some off); the device voice if none. */
 const firstVoice = (m: Me | null | undefined) => { const off = m?.aiOff ?? []; return off.includes('sec:voices') ? 'device' : voiceOrder(m?.engine).find((v) => v.startsWith('vkey:') || aiAllowed(off, voiceOption(v))) ?? 'device'; };
-import { api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
+import { Backdrop, api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
 import { useNiko } from '../niko';
 import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
 import { isStacked } from '../flow';
@@ -164,7 +164,7 @@ export function Home() {
   }, [aside, wide]);
   return (
     <div className={'home' + (open ? ' open' : '') + (closing && !card ? ' closing' : '') + (pic ? ' picture' : '') + (mapv ? ' mapping' : '') + (locked ? ' locked' : '')}>
-      <div className="bg" />
+      <Backdrop background={n.me?.background} mode={n.mode} motion={n.me?.appearance?.bgMotion !== false} />
       <div className="stage">
         <ParticleCore size="var(--s)" mode={n.mode} pad={wide ? 220 : 0} shift={wide && open ? -200 : 0} spot="home" design={n.me?.design} />
         {/* Locked: a tap anywhere on the core shows the code entry. */}
@@ -574,7 +574,7 @@ export function Workspace() {
 
   return (
     <div className="ws">
-      <div className="bg" />
+      <Backdrop background={n.me?.background} mode={n.mode} motion={n.me?.appearance?.bgMotion !== false} />
       <div className="head"><span className="wordmark">NIKO</span><h1>{title}</h1><span className="k">{String(count).padStart(2, '0')}</span></div>
       <Dock className="rail" />
       <div className="corewrap">
