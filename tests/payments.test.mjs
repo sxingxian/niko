@@ -1532,6 +1532,35 @@ await ok('a service out of its daily quota is skipped until it resets; the skip 
   assert.deepEqual(aiCalls.map((c) => c.host), ['api.groq.com'], 'the used-up service is not asked again');
 });
 
+await ok('the admin can add a person’s own key for a source; theirs replaces it, and turning the source off keeps the admin’s', async () => {
+  const nur = new Browser();
+  assert.equal((await nur.post('/auth/sign-in', { email: 'nur@example.com', password: PW })).status, 200);
+  const nurId = (await user('nur@example.com')).id;
+  const actions = [{ id: 'bus-arrivals', name: 'Bus arrivals', path: '/BusArrival', params: [{ name: 'BusStopCode', in: 'query', type: 'text', required: true, max: 5 }], live: true, example: '', on: true }];
+  const [src] = await q(`insert into data_sources (name, use_as, base_url, auth, auth_name, key_mode, actions, terms_ok, offer) values ('LTA DataMall', 'live', 'https://datamall2.mytransport.sg', 'header', 'AccountKey', 'own', $1::jsonb, true, 'everyone') returning id`, [JSON.stringify(actions)]);
+  let r = await admin.get(`/admin/data/users/${nurId}/keys`);
+  assert.deepEqual(r.data.keys, [{ source: src.id, name: 'LTA DataMall', keyName: 'AccountKey', key: null }]);
+  assert.equal((await admin.put(`/admin/data/users/${nurId}/keys/${src.id}`, { key: 'admin-set-key-1' })).status, 200);
+  const [row] = await q(`select key_enc, by_admin from data_source_keys where user_id = $1`, [nurId]);
+  assert.equal(row.by_admin, true); assert.ok(!row.key_enc.includes('admin-set-key-1'), 'sealed');
+  r = await nur.get('/data');
+  const seen = r.data.offered.find((x) => x.id === src.id);
+  assert.equal(seen.hasKey, true, 'ready for them'); assert.ok(!JSON.stringify(r.data).includes('admin-set-key-1') && !/by_admin|byAdmin|admin/i.test(JSON.stringify(seen)), 'no key and no mention of an admin');
+  // Turning it on and off again keeps the key the admin added.
+  assert.equal((await nur.put(`/data/included/${src.id}`, { on: true })).status, 200);
+  assert.equal((await nur.put(`/data/included/${src.id}`, { on: false })).status, 200);
+  assert.equal((await q(`select count(*)::int as n from data_source_keys where user_id = $1`, [nurId]))[0].n, 1);
+  // Their own key replaces it, and then the admin can't change it.
+  assert.equal((await nur.put(`/data/included/${src.id}`, { on: true, key: 'nur-own-key-2' })).status, 200);
+  assert.equal((await q(`select by_admin from data_source_keys where user_id = $1`, [nurId]))[0].by_admin, false);
+  r = await admin.put(`/admin/data/users/${nurId}/keys/${src.id}`, { key: 'admin-set-key-3' });
+  assert.equal(r.status, 409); assert.match(r.data.error, /their own key/);
+  assert.equal((await admin.get(`/admin/data/users/${nurId}/keys`)).data.keys[0].key, 'theirs');
+  await admin.del(`/admin/data/users/${nurId}/keys/${src.id}`);
+  assert.equal((await q(`select count(*)::int as n from data_source_keys where user_id = $1`, [nurId]))[0].n, 1, 'the admin removes only keys the admin added');
+  assert.equal((await nur.get(`/admin/data/users/${nurId}/keys`)).status === 200, false, 'members can’t reach it');
+});
+
 await sqlc.end();
 await closePools();
 try { run('pg_ctl', ['-D', join(dir, 'data'), '-m', 'immediate', 'stop']); } catch { /* already stopping */ }

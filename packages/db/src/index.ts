@@ -311,6 +311,8 @@ export const dataSourceKeys = pgTable('data_source_keys', {
   sourceId: uuid('source_id').notNull(),
   userId: uuid('user_id').notNull(),
   keyEnc: text('key_enc').notNull(),
+  /** Added by the admin in this person's setup (migration 0018); their own key replaces it. */
+  byAdmin: boolean('by_admin').notNull().default(false),
 }, (t) => [primaryKey({ columns: [t.sourceId, t.userId] })]);
 /** A dataset from a data source kept in one person's Knowledge (the table is in Knowledge's own database). */
 export const dataDatasets = pgTable('data_datasets', {

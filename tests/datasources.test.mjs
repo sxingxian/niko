@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {
   actionUrl, checkValues, cleanAction, cleanActions, cleanBaseUrl, cleanDataAccess, cleanDataPrefs, dataAllowed, dataBlock, dataTags, hostProblem,
-  openApiActions, privateIp, resultText, sampleValues, stripDataTags, cleanWeatherPrefs, weatherOrder, cleanDataDefaults, cleanLivePrefs, liveOrder, placesBlock, datasetTable, actionLine,
+  openApiActions, privateIp, resultText, sampleValues, stripDataTags, cleanWeatherPrefs, weatherOrder, cleanDataDefaults, cleanLivePrefs, liveOrder, placesBlock, datasetTable, actionLine, noteSeen, liveSuggestions, LIVE_SUGGEST_AT,
 } from '../packages/shared/src/dataSources.ts';
 import { dns, forgetDns, safeGet } from '../apps/api/src/safefetch.ts';
 import { DataProblem, runAction } from '../apps/api/src/datasources.ts';
@@ -235,4 +235,20 @@ await ok('running an action: key in a header or the address, shared cache only w
 });
 
 globalThis.fetch = realFetch;
+await ok('places from live questions: offered after a few times, not when already kept or turned down, forgotten after 60 days', () => {
+  const day = 86_400_000, t0 = Date.UTC(2026, 10, 1);
+  const item = { key: 'src:bus-arrivals:BusStopCode=83139', name: 'Bus arrivals', value: 'BusStopCode 83139' };
+  let seen = [];
+  for (let i = 0; i < LIVE_SUGGEST_AT - 1; i++) seen = noteSeen(seen, item, t0 + i * day);
+  const prefs = (x = {}) => ({ live: { everywhere: [], countries: {}, places: [] }, liveSeen: seen, liveNo: [], ...x });
+  assert.deepEqual(liveSuggestions(prefs(), t0 + 3 * day), [], 'not yet');
+  seen = noteSeen(seen, item, t0 + 3 * day);
+  assert.equal(liveSuggestions(prefs(), t0 + 3 * day)[0].count, LIVE_SUGGEST_AT);
+  assert.deepEqual(liveSuggestions(prefs({ live: { everywhere: [], countries: {}, places: [{ name: 'Usual stop', value: 'busstopcode 83139' }] } }), t0 + 3 * day), [], 'already one of their places');
+  assert.deepEqual(liveSuggestions(prefs({ liveNo: [item.key] }), t0 + 3 * day), [], 'turned down');
+  assert.deepEqual(liveSuggestions(prefs(), t0 + 64 * day), [], 'faded after 60 days');
+  assert.equal(noteSeen(seen, { key: 'other', name: 'x', value: 'y' }, t0 + 70 * day).length, 1, 'old ones are dropped');
+  assert.ok(noteSeen(Array.from({ length: 40 }, (_, i) => ({ key: `k${i}`, name: 'n', value: 'v', count: 1, first: t0, last: t0 })), item, t0).length <= 30, 'capped');
+});
+
 console.log(`${pass} data source checks passed`);

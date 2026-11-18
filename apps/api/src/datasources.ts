@@ -4,7 +4,7 @@
 import { and, eq, isNull, or, sql } from 'drizzle-orm';
 import { appSettings, dataSourceKeys, dataSources, usageCounts, users, type Db } from '@niko/db';
 import {
-  actionUrl, checkValues, cleanActions, cleanLivePrefs, type LivePrefs, cleanWeatherPrefs, OPEN_METEO, weatherOrder, type WeatherPrefs, cleanBaseUrl, cleanDataAccess, cleanDataDefaults, cleanDataPrefs, dataAllowed, DATA_CACHE_S, DATA_LIMITS,
+  actionUrl, checkValues, cleanActions, cleanLivePrefs, liveSuggestions, noteSeen, type LivePrefs, cleanWeatherPrefs, OPEN_METEO, weatherOrder, type WeatherPrefs, cleanBaseUrl, cleanDataAccess, cleanDataDefaults, cleanDataPrefs, dataAllowed, DATA_CACHE_S, DATA_LIMITS,
   resultText, type DataAction, type DataAuth, type DataDefaults, type DataKeyMode, type DataOffer, type DataSourceInfo, type DataUse,
 } from '@niko/shared';
 import type { Env } from './env';
@@ -203,7 +203,30 @@ export async function liveFor(db: Db, user: Who) {
   return {
     services: live.map((x) => ({ id: x.row.id, name: x.info.name, what: x.info.actions.filter((a) => a.on).map((a) => a.name).slice(0, 4).join(' · '), own: x.info.own, usedIn: usedIn(x.row.id) })),
     ...lists, places: p.places, canAdd: s.allowed.own, offered: s.offered.some((x) => x.info.use === 'live'),
+    suggested: liveSuggestions(s.prefs, Date.now()).map((x) => ({ key: x.key, name: x.name, value: x.value, count: x.count })),
   };
+}
+/** A live question named a place (a stop code, a line): counted, so Live info can offer it as one of their places
+ *  once it comes up again and again. Only the first value the action was given is kept, never the question. */
+export async function noteLivePlace(db: Db, userId: string, src: { id: string }, action: DataAction, values: Record<string, string>) {
+  const param = action.params.find((p) => (values[p.name] ?? '').trim());
+  if (!param) return;
+  const value = values[param.name]!.trim().slice(0, 80);
+  const fresh = (await db.select({ p: users.dataPrefs }).from(users).where(eq(users.id, userId)).limit(1))[0];
+  const p = cleanDataPrefs(fresh?.p);
+  const liveSeen = noteSeen(p.liveSeen, { key: `${src.id}:${action.id}:${param.name}=${value}`.slice(0, 200), name: action.name, value: `${param.name} ${value}` }, Date.now());
+  await db.update(users).set({ dataPrefs: { ...p, liveSeen } as unknown as Record<string, unknown> }).where(eq(users.id, userId));
+}
+/** Keeps a suggested place (it becomes one of their places) or turns it down (it isn't offered again). */
+export async function answerSuggestion(db: Db, userId: string, key: string, keep: boolean, name?: string) {
+  const fresh = (await db.select({ p: users.dataPrefs }).from(users).where(eq(users.id, userId)).limit(1))[0];
+  const p = cleanDataPrefs(fresh?.p);
+  const it = p.liveSeen.find((x) => x.key === key);
+  if (!it) return null;
+  const live = keep ? cleanLivePrefs({ ...p.live, places: [...p.live.places, { name: (name ?? '').trim() || it.name, value: it.value }] }) : p.live;
+  const next = { ...p, live, liveSeen: p.liveSeen.filter((x) => x.key !== key), liveNo: keep ? p.liveNo : [...p.liveNo, key].slice(-50) };
+  await db.update(users).set({ dataPrefs: next as unknown as Record<string, unknown> }).where(eq(users.id, userId));
+  return live;
 }
 export async function saveLive(db: Db, userId: string, l: Partial<LivePrefs>) {
   const fresh = (await db.select({ p: users.dataPrefs }).from(users).where(eq(users.id, userId)).limit(1))[0];

@@ -202,10 +202,22 @@ function KnowledgeCard({ reply, kn, tabbable, onCorrect }: { reply: string; kn: 
 const timeOf = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 /** Where an answer's data came from: each source and what was asked, when, and the credit its terms ask for. Live
  *  answers say how fresh they are, counting up while shown, and can be asked again. */
-function DataCard({ items, onRefresh, tabbable }: { items: DataUsed[]; onRefresh: () => void; tabbable: boolean }) {
+/** A live card asks again every minute while it's on screen and the page is in view, five times at most (each is an
+ *  AI round and a call to the service), then waits for Refresh. */
+const LIVE_EVERY_MS = 60_000, LIVE_TIMES = 5;
+function DataCard({ items, onRefresh, onAuto, tabbable }: { items: DataUsed[]; onRefresh: () => void; onAuto: () => Promise<void>; tabbable: boolean }) {
   const latest = Math.max(...items.map((d) => d.at)), live = items.some((d) => d.live);
   const [now, setNow] = useState(() => Date.now());
+  const times = useRef(0);
   useEffect(() => { if (!live) return; const t = window.setInterval(() => setNow(Date.now()), 5000); return () => window.clearInterval(t); }, [live]);
+  useEffect(() => {
+    if (!live) return;
+    const t = window.setInterval(() => {
+      if (document.visibilityState !== 'visible' || times.current >= LIVE_TIMES || Date.now() - latest < LIVE_EVERY_MS - 1000) return;
+      times.current++; void onAuto();
+    }, 5000);
+    return () => window.clearInterval(t);
+  }, [live, latest]); // eslint-disable-line react-hooks/exhaustive-deps
   const secs = Math.max(0, Math.round((now - latest) / 1000));
   const ago = secs < 60 ? `${Math.max(5, Math.round(secs / 5) * 5)} seconds ago` : secs < 3600 ? `${Math.round(secs / 60)} min ago` : `at ${timeOf(latest)}`;
   return (
@@ -215,7 +227,7 @@ function DataCard({ items, onRefresh, tabbable }: { items: DataUsed[]; onRefresh
         <li key={i}><span className="kn-src-n app">{i + 1}</span><span className="kn-src-t"><b>{d.source} · {d.action}</b><span>{[d.live ? 'Live' : `As of ${timeOf(d.at)}`, d.attribution].filter(Boolean).join(' · ')}</span></span></li>
       ))}</ol>
       {live && <div className="kn-src-b"><button type="button" className="sec" tabIndex={tabbable ? 0 : -1} onClick={onRefresh}>Refresh</button></div>}
-      <span className="kn-src-note">{live ? 'Live data always wins over files for times.' : 'Niko only asks a source what its actions allow.'}</span>
+      <span className="kn-src-note">{live ? 'Refreshes every minute while it’s on screen. Live data always wins over files for times.' : 'Niko only asks a source what its actions allow.'}</span>
     </section>
   );
 }
@@ -353,7 +365,7 @@ export function Home() {
           </div>
           {n.dataUsed?.for === shown.reply && !shown.kn && !followFor(n.followUp, shown.reply) && (
             <div className="card-build" style={{ ['--d' as string]: `${CARD_GAP}s` }}>
-              <DataCard items={n.dataUsed.items} tabbable={open} onRefresh={() => void n.ask(n.dataUsed!.question)} />
+              <DataCard items={n.dataUsed.items} tabbable={open} onRefresh={() => void n.ask(n.dataUsed!.question)} onAuto={n.refreshLive} />
               <Outline />
             </div>
           )}

@@ -122,6 +122,8 @@ interface NikoState {
   toggleMic: () => void;
   stop: () => void;
   ask: (text: string) => Promise<void>;
+  /** Asks a live question again without speaking, so a live card on screen stays fresh. */
+  refreshLive: () => Promise<void>;
   /** After a stop: true when there is an answer to carry on, or a question to ask again. */
   resumable: { canContinue: boolean } | null;
   /** Carries on the stopped answer from the sentence where it stopped. */
@@ -248,6 +250,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [knowledge, setKnowledge] = useState<{ for: string; k: KnowledgeAnswer } | null>(null);
   const [voiceChip, setVoiceChip] = useState(false);
   const [dataUsed, setDataUsed] = useState<{ for: string; items: DataUsed[]; question: string } | null>(null);
+  const dataUsedRef = useRef(dataUsed); dataUsedRef.current = dataUsed;
   const [voiceNote, setVoiceNote] = useState<{ for: string; learned: boolean } | null>(null);
   const [bannerLater, setBannerLater] = useState(() => { try { return sessionStorage.getItem('niko.voice.later') === '1'; } catch { return false; } });
   const [nextStep, setNextStep] = useState<FollowUp | null>(null);
@@ -740,12 +743,12 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     return askAI(text);
   }, [navigate, idle, say, goTo, listenForFollowUp, SR]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const askAI = async (text: string, opts: { pin?: KnTarget; taught?: { id: string; device: boolean } } = {}) => {
+  const askAI = async (text: string, opts: { pin?: KnTarget; taught?: { id: string; device: boolean }; silent?: boolean } = {}) => {
     const mine = ++askId.current;
     inFlight.current = mine;
     last.current = { question: text, answer: null, from: 0 };
-    setResumable(null); setReply(null);
-    setMode('thinking'); setLabel('Thinking'); setLine(`“${text}”`);
+    // A live card refreshing itself: the answer on screen stays until the new one replaces it, and nothing is said.
+    if (!opts.silent) { setResumable(null); setReply(null); setMode('thinking'); setLabel('Thinking'); setLine(`“${text}”`); }
     try {
       // A weather question carries where this device is, rounded to about 1 km, when a weather service is connected.
       const where = meRef.current?.weather && isWeatherQuestion(text) ? await whereAmI() : undefined;
@@ -777,6 +780,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // Stopped while Niko was thinking (or a newer question came): keep the answer for "continue", don't speak it.
       if (mine !== askId.current) { if (last.current?.question === text) setResumable({ canContinue: true }); return; }
       setBrief(r.brief);
+      if (opts.silent && (wantMap || image || item || asked)) return;
       if (wantMap && mapsOn(meRef.current?.aiOff ?? [])) {
         if (wantMap.to.toLowerCase() === 'same' && mapRef.current) { say(answer || 'Changing the route.', 0); if (wantMap.how !== 'any' && wantMap.how !== 'place') setMapModeFn(wantMap.how); return; }
         say(answer || 'Here’s the map.', 0);
@@ -797,7 +801,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         : learnedNow.length ? { for: answer, question: text, kind: 'learned', items: learnedNow, device: device && kept.length > 0 }
         : r.choices?.length ? { for: answer, question: text, kind: 'choices', options: r.choices }
         : r.judge ? { for: answer, question: text, kind: 'judge' } : null);
-      setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setVoiceNote(vmNext.current ? { for: answer, learned: vmNext.current.learned } : null); vmNext.current = null; setDataUsed(r.data?.length ? { for: answer, items: r.data, question: text } : null); setReply(answer); say(answer, 0);
+      setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setVoiceNote(vmNext.current ? { for: answer, learned: vmNext.current.learned } : null); vmNext.current = null; setDataUsed(r.data?.length ? { for: answer, items: r.data, question: text } : null); setReply(answer); if (!opts.silent) say(answer, 0);
       // Files kept in their own Notion, Drive or OneDrive: their copies are checked for changes after the answer is shown.
       if (r.knowledge?.check?.length) void api('/knowledge/check', { method: 'POST', body: { files: r.knowledge.check } }).catch(() => undefined);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) goSelf('/' + item.view); }
@@ -1351,6 +1355,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     carryOn: () => (wantRec.current ? listenForFollowUp() : idle()),
     voiceProblem,
     dataUsed,
+    refreshLive: async () => { const d = dataUsedRef.current; if (d?.items.some((x) => x.live) && inFlight.current === 0) await askAI(d.question, { silent: true }).catch(() => undefined); },
     voiceChip, thatWasMe: thatWasMeFn, dismissVoiceChip: hideVoiceChip, voiceNote,
     voiceBanner: vmOn && !!vmHere && !vmHere.setUp && !bannerLater,
     voiceMode: !vmOn || !vmHere ? null : vmHere.setUp ? 'you' : 'not-here',
