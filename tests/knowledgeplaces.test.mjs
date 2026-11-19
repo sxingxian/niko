@@ -15,6 +15,8 @@ import { piecesMarkdown, sheetCsv, splitText, parseDelimited } from '../packages
 import { notionBlocks, notionMarkdown, remoteFor, PlaceError, safeName } from '../apps/api/src/knPlaces.ts';
 import { addPieces, addSheet, finishFile, listFiles, startFile } from '../apps/api/src/knowledge.ts';
 import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile } from '../apps/api/src/knPlacesStore.ts';
+import { binLearnedCopy, learnedCopyOf, learnedMarkdown, markLearnedDirty, setLearnedCopy, syncLearnedCopy } from '../apps/api/src/knLearnedCopy.ts';
+import { confirmHabit, forgetAllFileMatches, forgetNotesOnly, keepHabit, listLearned, noticeHabit, saveNote } from '../apps/api/src/learned.ts';
 import { store, fakeDb } from './brains-stubs.mjs';
 
 let pass = 0;
@@ -277,6 +279,60 @@ await ok('a folder deleted there is made again; connection problems are kept on 
   p.writeDoc = async () => { throw new PlaceError('Your OneDrive connection has expired. Connect it again under Connections.', 401); };
   await assert.rejects(copyStep(k, p, A, hb), /expired/);
   assert.match((await listFiles(k, A)).find((x) => x.id === hb).copyError, /expired/);
+});
+
+await ok('what Niko learned: a copy to read, rewritten after changes (at most once a minute), never read back', async () => {
+  const C = '00000000-0000-4000-8000-0000000000c3';
+  await saveNote(k, env, C, { kind: 'person', said: 'the team', means: 'Design team · Telegram group', how: 'told' }, { cloudflare: true });
+  await saveNote(k, env, C, { kind: 'remembered', said: '# My desk is on level 12', means: '# My desk is on level 12', how: 'remember' }, { cloudflare: true });
+  await saveNote(k, env, C, { kind: 'file-match', said: 'office holidays', means: 'Handbook', how: 'yes', target: { fileId: hb, piece: '0', file: 'Handbook', heading: null, answer: 'yes' } }, { cloudflare: true });
+  for (const key of ['t1', 't2', 't3']) await noticeHabit(k, C, 'walk-short', key);
+  const md = learnedMarkdown(await listLearned(k, C));
+  assert.match(md, /^# What Niko learned\n/); assert.match(md, /aren’t read back/);
+  assert.match(md, /## People and names\n\n- “the team” → Design team · Telegram group/);
+  assert.match(md, /- # My desk is on level 12/, 'what people typed stays a list item, never a heading');
+  assert.ok(!/office holidays|Walk for trips/.test(md), 'no taught matches, no habits only suggested');
+  assert.ok(!learnedMarkdown([], false).startsWith('#'), 'Notion pages have their own title');
+  assert.match(learnedMarkdown([]), /Nothing yet/);
+  const place = fakePlace('gdrive');
+  await setLearnedCopy(k, C, 'gdrive');
+  let copy = await syncLearnedCopy(k, place, C, Date.now());
+  const first = copy.remoteId;
+  assert.equal(copy.dirty, false); assert.equal(place.items.get(first).title, 'What Niko learned');
+  assert.equal((await syncLearnedCopy(k, place, C)).remoteId, first, 'nothing changed: not written again');
+  // A change marks it; within a minute it waits, after that it's written anew and the old copy goes to the bin.
+  assert.equal(await markLearnedDirty(k, C), true);
+  assert.equal((await syncLearnedCopy(k, place, C, Date.now())).waited, true);
+  copy = await syncLearnedCopy(k, place, C, Date.now() + 61_000);
+  assert.notEqual(copy.remoteId, first); assert.ok(!place.items.has(first), 'the old copy went to the bin');
+  // Another place starts a new copy there; the old one stays where it is.
+  await setLearnedCopy(k, C, 'notion');
+  assert.equal((await learnedCopyOf(k, C)).remoteId, null);
+  await assert.rejects(syncLearnedCopy(k, place, C), /no copy kept there/);
+  const notion = fakePlace('notion');
+  copy = await syncLearnedCopy(k, notion, C);
+  assert.ok(!notion.items.get(copy.remoteId).text.startsWith('#'));
+  assert.ok(place.items.has(copy.remoteId) === false && place.items.size === 1, 'the Drive copy stays there');
+  // Forget everything: the copy goes to the bin there.
+  await binLearnedCopy(k, notion, C);
+  assert.equal(notion.items.size, 0); assert.equal((await learnedCopyOf(k, C)).remoteId, null);
+  // Problems are kept, plainly.
+  await markLearnedDirty(k, C);
+  notion.writeDoc = async () => { throw new PlaceError('Your Notion connection has expired. Connect it again under Connections.', 401); };
+  await assert.rejects(syncLearnedCopy(k, notion, C), /expired/);
+  assert.match((await learnedCopyOf(k, C)).error, /expired/);
+  await setLearnedCopy(k, C, null);
+  assert.equal(await learnedCopyOf(k, C), null);
+  assert.equal(await markLearnedDirty(k, C), false, 'no copy, nothing to mark');
+  // Moving notes elsewhere keeps the matches taught for files, and moving files keeps the notes.
+  const [hid] = (await listLearned(k, C)).filter((n) => n.kind === 'habit').map((n) => n.id);
+  await confirmHabit(k, C, hid);
+  assert.equal(await forgetNotesOnly(k, C), 3);
+  assert.deepEqual((await listLearned(k, C)).map((n) => n.kind), ['file-match']);
+  await keepHabit(k, C, 'inbox-morning');
+  assert.ok((await listLearned(k, C)).some((n) => n.kind === 'habit' && n.confirmed && n.habit === 'inbox-morning'), 'a habit said yes to comes over as said yes to');
+  assert.equal(await forgetAllFileMatches(k, C), 1);
+  assert.deepEqual((await listLearned(k, C)).map((n) => n.kind), ['habit']);
 });
 
 await pool.end();

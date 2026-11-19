@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { addPieces, addSheet, addSheetRows, databaseUsage, deleteFile, embed, finishFile, keepAsData, KnError, listFiles, listSheets, purgeAccount, readWithCloudflare, search, startFile, updateSheet, usage } from '../apps/api/src/knowledge.ts';
 import { searchWords } from '../packages/shared/src/learned.ts';
-import { cleanKnowledgeLimits, cleanKnowledgePrefs, knKindOf, knowledgeAccess, knowledgeLimits, KN_LIMIT_DEFAULTS } from '../packages/shared/src/knowledge.ts';
+import { cleanKnowledgeLimits, cleanKnowledgePrefs, knKindOf, knLearnPlaceOf, knowledgeAccess, knowledgeLimits, KN_LIMIT_DEFAULTS } from '../packages/shared/src/knowledge.ts';
 
 function pgBin() {
   if (process.env.PG_BIN && existsSync(join(process.env.PG_BIN, 'initdb'))) return process.env.PG_BIN;
@@ -238,11 +238,21 @@ await ok('Cloudflare reading: only PDF, Word and spreadsheets; size limit; pictu
   readReply = null;
 });
 await ok('each person’s choices and what their account allows', () => {
-  assert.deepEqual(cleanKnowledgePrefs({}), { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false, files: 0, learn: true, notes: 0, situations: true, habits: [], own: null });
-  assert.deepEqual(cleanKnowledgePrefs({ mode: 'only', modes: { Team: 'off', Bad: 'maybe', '': 'off' }, place: 'device', read: 'x', telegram: false, drafts: true }), { mode: 'only', modes: { Team: 'off' }, place: 'device', read: 'cloudflare', search: 'cloudflare', telegram: false, drafts: true, files: 0, learn: true, notes: 0, situations: true, habits: [], own: null });
+  assert.deepEqual(cleanKnowledgePrefs({}), { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false, files: 0, learn: true, notes: 0, situations: true, habits: [], own: null, learnPlace: 'niko' });
+  assert.deepEqual(cleanKnowledgePrefs({ mode: 'only', modes: { Team: 'off', Bad: 'maybe', '': 'off' }, place: 'device', read: 'x', telegram: false, drafts: true }), { mode: 'only', modes: { Team: 'off' }, place: 'device', read: 'cloudflare', search: 'cloudflare', telegram: false, drafts: true, files: 0, learn: true, notes: 0, situations: true, habits: [], own: null, learnPlace: 'device' });
+  // Before it was a choice, notes were kept with the files; a choice made is kept as made.
+  assert.equal(cleanKnowledgePrefs({ place: 'gdrive' }).learnPlace, 'niko');
+  assert.equal(cleanKnowledgePrefs({ place: 'device', learnPlace: 'notion' }).learnPlace, 'notion');
+  assert.equal(cleanKnowledgePrefs({ learnPlace: 'evil' }).learnPlace, 'niko');
   const off = new Set(['kn:cf-search']);
-  assert.deepEqual(knowledgeAccess((key) => !off.has(key)), { files: true, niko: true, device: true, cloudflareRead: true, cloudflareSearch: false, learning: true, ownKey: true, ownServer: true, notion: true, gdrive: true, onedrive: true, s3: true });
-  assert.deepEqual(knowledgeAccess((key) => key !== 'kn:files'), { files: false, niko: false, device: false, cloudflareRead: false, cloudflareSearch: false, learning: true, ownKey: false, ownServer: false, notion: false, gdrive: false, onedrive: false, s3: false });
+  assert.deepEqual(knowledgeAccess((key) => !off.has(key)), { files: true, niko: true, device: true, cloudflareRead: true, cloudflareSearch: false, learning: true, ownKey: true, ownServer: true, notion: true, gdrive: true, onedrive: true, s3: true, learnPlaces: { device: true, notion: true, gdrive: true, onedrive: true, s3: true } });
+  assert.deepEqual(knowledgeAccess((key) => key !== 'kn:files'), { files: false, niko: false, device: false, cloudflareRead: false, cloudflareSearch: false, learning: true, ownKey: false, ownServer: false, notion: false, gdrive: false, onedrive: false, s3: false, learnPlaces: { device: true, notion: true, gdrive: true, onedrive: true, s3: true } });
+  // Where notes may be kept follows learning, not files; Niko is the fallback when the choice isn't allowed.
+  const noLearn = knowledgeAccess((key) => key !== 'kn:learning');
+  assert.deepEqual(noLearn.learnPlaces, { device: false, notion: false, gdrive: false, onedrive: false, s3: false });
+  const noDevice = knowledgeAccess((key) => key !== 'kn:learn:device');
+  assert.equal(knLearnPlaceOf({ learnPlace: 'device' }, noDevice), 'niko');
+  assert.equal(knLearnPlaceOf({ learnPlace: 'notion' }, noDevice), 'notion');
 });
 
 await pool.end();

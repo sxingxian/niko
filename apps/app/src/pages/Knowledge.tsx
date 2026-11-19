@@ -3,16 +3,17 @@
 // Laid out as the Knowledge-Settings mockup, with the shared controls (Segmented, SettingRow, Status, Meter).
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactElement } from 'react';
 import { api, Meter, Segmented, SettingRow, Status, Switch } from '@niko/ui';
-import {
+import { knLearnPlaceOf,
   isRemotePlace, knKindOf, knModeOf, knNeedsCloudflare, knPlaceOf, knSearchOf, knShownPlace, KN_COL_TYPE_NAMES, KN_COL_TYPES, KN_DEVICE_MODEL_MB, KN_PLACE_NAMES,
   type KnColType, type KnColumn, type KnMode, type KnowledgeAccess, type KnowledgeLimits, type KnowledgePrefs, type KnPlace, type KnRemotePlace,
 } from '@niko/shared';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useNiko } from '../niko';
 import { LearnedAside, LearnedTab, TaughtSection } from './KnowledgeLearned';
+import { syncLearnedCopySoon } from '../knowledgeChat';
 import { addFile, addNumbersInNiko } from '../knowledge';
 import {
-  addFileHere, addNumbersHere, deviceFiles, keepHereAsData, missingNumbersHere, moveToDevice, moveToNiko, removeHere, sheetsHere, updateSheetHere,
+  addFileHere, addNumbersHere, deviceFiles, keepHereAsData, missingNumbersHere, moveNotesToDevice, moveNotesToNiko, moveToDevice, moveToNiko, removeHere, sheetsHere, updateSheetHere,
 } from '../knowledgeDevice';
 import { embedDownload, embedReady, embedRemove, embedSupported } from '../embed';
 import { Sheet } from './Designs';
@@ -27,7 +28,10 @@ type StorageShown = { endpoint: string; bucket: string; region: string; access: 
 type PlaceInfo = { connected: boolean; label: string | null; root: string | null; storage?: StorageShown };
 type StorageForm = { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string; accessId: string; accessSecret: string };
 const EMPTY_STORAGE: StorageForm = { endpoint: '', bucket: '', accessKeyId: '', secretAccessKey: '', accessId: '', accessSecret: '' };
-type State = { available: boolean; access: KnowledgeAccess; prefs: KnowledgePrefs; limits: KnowledgeLimits; usage: { files: number; bytes: number }; ownSearch?: OwnSource[]; places?: Partial<Record<KnRemotePlace, PlaceInfo>>; split?: 'browser' | 'server' };
+type LearnedCopy = { place: KnRemotePlace; url: string | null; dirty: boolean; syncedAt: string | null; error: string | null };
+type State = { available: boolean; access: KnowledgeAccess; prefs: KnowledgePrefs; limits: KnowledgeLimits; usage: { files: number; bytes: number }; ownSearch?: OwnSource[]; places?: Partial<Record<KnRemotePlace, PlaceInfo>>; split?: 'browser' | 'server';
+  /** Where what Niko learns can be kept besides Niko and this device, and the copy kept there now. */
+  learnPlaces?: Partial<Record<KnRemotePlace, PlaceInfo>>; learnedCopy?: LearnedCopy | null };
 type By = 'cloudflare' | 'device' | 'own';
 type Upload = { key: string; name: string; bytes: number; step: string; done: number; total: number; error?: string };
 
@@ -97,6 +101,9 @@ export function Knowledge() {
   const [removing, setRemoving] = useState<{ file: KnFile; bin: boolean } | null>(null);
   const [storageNote, setStorageNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [moving, setMoving] = useState<{ done: number; total: number; name: string } | null>(null);
+  // Where what Niko learns is kept: the place picked (before moving) and moving progress.
+  const [lPicked, setLPicked] = useState<KnPlace | null>(null);
+  const [lMoving, setLMoving] = useState<{ done: number; total: number } | null>(null);
   const [model, setModel] = useState<{ ready: boolean; p: number | null }>({ ready: embedReady(), p: null });
   // A search service of their own picked in the list, waiting for its model name before it's saved.
   const [ownPick, setOwnPick] = useState<{ ref: string; model: string } | null>(null);
@@ -390,6 +397,80 @@ export function Knowledge() {
       ? `Included in your plan, and works for Telegram replies.${files.length ? ` Changing it re-reads ${files.length === 1 ? 'your file' : `all ${files.length} files`}.` : ''}`
       : `Free; the search numbers are made on this computer. Telegram replies then search by words only.${files.length ? ` Changing it re-reads ${files.length === 1 ? 'your file' : `all ${files.length} files`}.` : ''}`;
 
+  // ---------------------------------------------------------------- where what Niko learns is kept
+  const learnNow = knLearnPlaceOf(prefs, access);
+  const lInfo = (p: KnPlace) => (isRemotePlace(p) ? st.learnPlaces?.[p] : undefined);
+  const learnSpots: KnPlace[] = SPOTS.filter((p) => (p === 'niko' ? true : p === 'device' ? access.learnPlaces.device : !!lInfo(p)));
+  const lShown: KnPlace = lPicked ?? learnNow;
+  const notesPlace: Place = learnNow === 'device' ? 'device' : 'niko';
+  const lCopy = st.learnedCopy && st.learnedCopy.place === learnNow ? st.learnedCopy : null;
+  const lStatus = (p: KnPlace) => p === learnNow ? 'In use' : p === 'niko' ? 'All your devices' : p === 'device' ? 'Stays on this computer'
+    : lInfo(p)?.connected ? `${p === 's3' ? 'Set up' : 'Connected'}${lInfo(p)?.label ? ` · ${lInfo(p)!.label}` : ''}` : p === 's3' ? 'Add it on the Files tab' : 'Not connected yet';
+  const lCanMove = !isRemotePlace(lShown) || !!lInfo(lShown)?.connected;
+  const ago = (iso: string) => { const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return m < 1 ? 'just now' : m === 1 ? '1 minute ago' : m < 60 ? `${m} minutes ago` : m < 120 ? 'an hour ago' : `${Math.round(m / 60)} hours ago`; };
+  const moveLearned = async (to: KnPlace) => {
+    setNote(null);
+    const from = learnNow;
+    let refused = false;
+    const commit = async () => { if (!(await savePrefs({ learnPlace: to }))) { refused = true; throw new Error('not saved'); } };
+    try {
+      setLMoving({ done: 0, total: 1 });
+      const step = (done: number, total: number) => setLMoving({ done, total: Math.max(1, total) });
+      if (to === 'device' && from !== 'device') await moveNotesToDevice(account, commit, step);
+      else if (from === 'device' && to !== 'device') await moveNotesToNiko(account, commit, step);
+      else await commit();
+      setLPicked(null);
+      await refreshMe();
+      if (isRemotePlace(to)) await api('/knowledge/learned/copy', { method: 'POST' }).catch((e) => setNote({ ok: false, text: (e as Error).message }));
+      setNote((x) => x ?? { ok: true, text: isRemotePlace(to) ? `Done. A copy of what Niko learned is ${inPlace(to)}.` : to === 'device' ? 'Done. What Niko learned is on this computer only.' : 'Done. What Niko learned is kept in Niko.' });
+    } catch (e) {
+      if (!refused) setNote({ ok: false, text: `${(e as Error).message} Nothing was moved.` });
+    } finally { setLMoving(null); await load(); }
+  };
+  const learnWhere = learnSpots.length > 1 || learnNow !== 'niko' ? (
+    <div className="kn-learn-where">
+      <div className="kn-head"><span className="srow-name">Where Niko keeps what it learns</span><span className="srow-hint">Now: {PLACE_NAME[learnNow]}</span></div>
+      <div className="kn-places">
+        {learnSpots.map((p) => (
+          <button key={p} type="button" className="kn-place" aria-pressed={lShown === p} disabled={!!lMoving} onClick={() => setLPicked(p === learnNow ? null : p)}>
+            <span className="kn-place-top">{PLACE_ICON[p]()}<b>{PLACE_NAME[p]}</b></span>
+            <span className={'srow-hint' + (p === learnNow ? ' ready' : isRemotePlace(p) && !lInfo(p)?.connected ? ' wait' : '')}>{lStatus(p)}</span>
+          </button>
+        ))}
+      </div>
+      <div className="kn-inset">
+        {lShown === 'niko' ? <span className="kn-lead">Kept by Niko, apart from your account details. Works on all your devices and for Telegram replies.</span>
+          : lShown === 'device' ? <>
+            <span className="kn-devwarn"><IconWarn />Only on this computer. Your phone won’t use what Niko learned here, Telegram replies can’t either, and clearing this site’s data deletes it.</span>
+            <span className="srow-hint">Never kept on Niko’s server. Locked to your account on this computer. Only the notes that fit a question go with it to the AI.</span>
+          </> : <>
+            <span className="kn-lead">{lShown === 'notion' ? 'A “What Niko learned” page on your Niko Knowledge page in Notion, kept up to date.' : lShown === 'gdrive' ? 'A “What Niko learned” Google Doc in your Niko Knowledge folder, kept up to date.' : lShown === 'onedrive' ? 'A “What Niko learned.md” file in Niko’s own folder in your OneDrive, kept up to date.' : 'A “What Niko learned.md” file in the niko-knowledge folder of your storage, kept up to date.'}</span>
+            <span className="srow-hint">Niko keeps the notes too, so it can look them up on every question. The copy is for you to read: changes made there aren’t read back, so nobody else can add to what Niko learned. Edit or forget notes here.</span>
+            {lShown === learnNow && lCopy && <div className="kn-move">
+              <span className={'srow-hint' + (lCopy.error ? ' bad' : ' ready')}>{lCopy.error ?? (lCopy.syncedAt ? `Copy updated ${ago(lCopy.syncedAt)}` : 'Writing the copy…')}</span>
+              {lCopy.error ? <button type="button" className="bt md" onClick={() => void api('/knowledge/learned/copy', { method: 'POST' }).then(load).catch((e) => setNote({ ok: false, text: (e as Error).message }))}>Try again</button>
+                : lCopy.url && <a className="bt md" href={lCopy.url} target="_blank" rel="noopener noreferrer">Open in {PLACE_NAME[learnNow]}</a>}
+            </div>}
+            {lShown !== learnNow && isRemotePlace(lShown) && !lInfo(lShown)?.connected && (lShown === 's3'
+              ? <span className="srow-hint wait">Add your storage first, on the Files tab under Where it’s kept.</span>
+              : <button type="button" className="bt md" style={{ alignSelf: 'flex-start' }} onClick={() => connect(lShown as KnRemotePlace)}>Connect {PLACE_NAME[lShown]}</button>)}
+          </>}
+        {(lShown !== learnNow || lMoving) && (
+          <div className="kn-move">
+            {lMoving ? <span className="kn-move-t"><Status tone="busy">Moving {Math.min(lMoving.done + 1, lMoving.total)} of {lMoving.total}</Status><Meter value={lMoving.done / lMoving.total} warnAt={2} label="Moving what Niko learned" /></span> : <>
+              <span className="srow-hint">{lShown === 'device' ? 'Moves what Niko learned to this computer, then removes it from Niko.'
+                : learnNow === 'device' ? `Moves what Niko learned from this computer into Niko${isRemotePlace(lShown) ? `, with a copy ${inPlace(lShown)}` : ''}, then removes it here.`
+                : isRemotePlace(lShown) ? `Writes a copy of what Niko learned ${inPlace(lShown)}. It stays in Niko too.${isRemotePlace(learnNow) ? ` The copy ${inPlace(learnNow)} stays there and isn’t updated any more.` : ''}`
+                : `Niko stops updating the copy ${inPlace(learnNow)}. The copy stays there.`}{lShown === 'device' || learnNow === 'device' ? ' Habits Niko only suggested start again there.' : ''}</span>
+              <span className="kn-acts"><button type="button" className="bt md" onClick={() => setLPicked(null)}>Cancel</button>
+                <button type="button" className="pri md" disabled={!lCanMove} onClick={() => void moveLearned(lShown)}>{lShown === 'device' || learnNow === 'device' ? 'Move notes' : isRemotePlace(lShown) ? 'Keep a copy there' : 'Use Niko'}</button></span>
+            </>}
+          </div>
+        )}
+      </div>
+    </div>
+  ) : null;
+
   return (
     <SettingsPage title="Knowledge" sub={sub}>
       <NoteLine note={note} />
@@ -399,7 +480,7 @@ export function Knowledge() {
       <div className="kn-page">
         <div className="kn-main">
           {tabs}
-          <LearnedTab account={account} place={place} files={access.files} learn={prefs.learn} onLearn={(v) => void savePrefs({ learn: v }).then(() => refreshMe())} situations={prefs.situations} onSituations={(v) => void savePrefs({ situations: v }).then(() => refreshMe())} />
+          <LearnedTab account={account} place={notesPlace} filesPlace={place} where={learnWhere} copied={isRemotePlace(learnNow)} files={access.files} learn={prefs.learn} onLearn={(v) => void savePrefs({ learn: v }).then(() => refreshMe())} situations={prefs.situations} onSituations={(v) => void savePrefs({ situations: v }).then(() => refreshMe())} />
         </div>
         <LearnedAside files={access.files} />
       </div>

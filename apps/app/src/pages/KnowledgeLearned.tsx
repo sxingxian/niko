@@ -1,42 +1,52 @@
 // Settings · Knowledge · What Niko learned, and the "Matches you taught" section of the Files tab, as the
-// Knowledge-Learned and Knowledge-Settings mockups. Notes are kept in Niko, or on this device when the person's
-// Knowledge is kept here.
-import { useCallback, useEffect, useMemo, useState } from 'react';
+// Knowledge-Learned and Knowledge-Settings mockups. Notes are kept where the person chose (in Niko, or on this device);
+// matches taught for files are kept with the files.
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api, Switch } from '@niko/ui';
 import { KN_LEARNED_KIND_NAMES, KN_LEARNED_KINDS_NOW, KN_LEVEL_NAMES, type KnLearnedItem, type KnLearnedKind } from '@niko/shared';
 import { declineHabitHere, editNoteHere, forgetAllHere, forgetNoteHere, keepHabitHere, notesHere } from '../knowledgeDevice';
 import { Sheet } from './Designs';
+import { syncLearnedCopySoon } from '../knowledgeChat';
 
 type Place = 'niko' | 'device';
 const LEVEL_FG = { sure: '#a8f0c6', fairly: '#9fdcf3', unsure: '#ffd38a' } as const;
 const NEVER_FG = '#8b93a3';
 
-/** Notes, wherever they're kept. */
-function useNotes(account: string, place: Place) {
+/** Notes, wherever they're kept: most where the person chose (`place`), matches taught for files with the files
+ *  (`filesPlace`). `changed` runs after any change (a copy in their own app is rewritten). */
+function useNotes(account: string, place: Place, filesPlace: Place = place, changed?: () => void) {
   const [items, setItems] = useState<KnLearnedItem[] | null>(null);
   const [err, setErr] = useState('');
+  const from = (p: Place) => (p === 'device' ? notesHere(account) : api<{ items: KnLearnedItem[] }>('/knowledge/learned').then((r) => r.items));
   const load = useCallback(async () => {
     setErr('');
-    try { setItems(place === 'device' ? await notesHere(account) : (await api<{ items: KnLearnedItem[] }>('/knowledge/learned')).items); }
+    try {
+      if (place === filesPlace) setItems(await from(place));
+      else {
+        const [notes, matches] = await Promise.all([from(place), from(filesPlace).catch(() => [] as KnLearnedItem[])]);
+        setItems([...notes.filter((n) => n.kind !== 'file-match'), ...matches.filter((n) => n.kind === 'file-match')]);
+      }
+    }
     catch (e) { setErr((e as Error).message); setItems([]); }
-  }, [account, place]);
+  }, [account, place, filesPlace]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { void load(); }, [load]);
+  const where = (id: string): Place => ((items ?? []).find((y) => y.id === id)?.kind === 'file-match' ? filesPlace : place);
   const forget = async (id: string) => {
-    if (place === 'device') await forgetNoteHere(account, id); else await api(`/knowledge/learned/${id}`, { method: 'DELETE' });
-    setItems((x) => x?.filter((y) => y.id !== id) ?? null);
+    if (where(id) === 'device') await forgetNoteHere(account, id); else await api(`/knowledge/learned/${id}`, { method: 'DELETE' });
+    setItems((x) => x?.filter((y) => y.id !== id) ?? null); changed?.();
   };
   const edit = async (id: string, b: { said: string; means: string }) => {
-    const it = place === 'device' ? await editNoteHere(account, id, b) : (await api<{ item: KnLearnedItem }>(`/knowledge/learned/${id}`, { method: 'PATCH', body: b })).item;
-    setItems((x) => x?.map((y) => (y.id === id ? it : y)) ?? null);
+    const it = where(id) === 'device' ? await editNoteHere(account, id, b) : (await api<{ item: KnLearnedItem }>(`/knowledge/learned/${id}`, { method: 'PATCH', body: b })).item;
+    setItems((x) => x?.map((y) => (y.id === id ? it : y)) ?? null); changed?.();
   };
   /** "Yes, keep" / "No" on a habit Niko suggested. */
   const answer = async (id: string, keep: boolean) => {
     if (place === 'device') { if (keep) await keepHabitHere(account, id); else await declineHabitHere(account, id); }
     else await api(`/knowledge/learned/${id}/${keep ? 'keep' : 'decline'}`, { method: 'POST' });
-    await load();
+    await load(); changed?.();
   };
   const forgetAll = async () => {
-    if (place === 'device') await forgetAllHere(account); else await api('/knowledge/learned', { method: 'DELETE' });
+    for (const p of new Set([place, filesPlace])) { if (p === 'device') await forgetAllHere(account); else await api('/knowledge/learned', { method: 'DELETE' }); }
     setItems([]);
   };
   return { items, err, setErr, forget, edit, forgetAll, load, answer };
@@ -47,8 +57,8 @@ const meaning = (n: KnLearnedItem) => n.kind === 'remembered' ? 'Kept as you sai
 const used = (n: KnLearnedItem) => (n.suggested ? `Fades in ${n.fadesIn ?? 60} ${n.fadesIn === 1 ? 'day' : 'days'}` : n.kind === 'habit' ? 'Kept' : n.uses ? `Used ${n.uses === 1 ? 'once' : `${n.uses} times`}` : 'Not used yet');
 
 /** The What Niko learned tab. */
-export function LearnedTab({ account, place, files, learn, onLearn, situations, onSituations }: { account: string; place: Place; files: boolean; learn: boolean; onLearn: (v: boolean) => void; situations: boolean; onSituations: (v: boolean) => void }) {
-  const { items, err, setErr, forget, edit, forgetAll, answer } = useNotes(account, place);
+export function LearnedTab({ account, place, filesPlace, where, copied, files, learn, onLearn, situations, onSituations }: { account: string; place: Place; filesPlace?: Place; where?: ReactNode; copied?: boolean; files: boolean; learn: boolean; onLearn: (v: boolean) => void; situations: boolean; onSituations: (v: boolean) => void }) {
+  const { items, err, setErr, forget, edit, forgetAll, answer } = useNotes(account, place, filesPlace ?? place, copied ? () => syncLearnedCopySoon() : undefined);
   const [kind, setKind] = useState<'all' | KnLearnedKind>('all');
   const [q, setQ] = useState('');
   const [editing, setEditing] = useState<{ id: string; said: string; means: string } | null>(null);
@@ -74,6 +84,7 @@ export function LearnedTab({ account, place, files, learn, onLearn, situations, 
           <div className="kn-level"><span><i className="dot" style={{ background: LEVEL_FG.fairly }} />Fairly sure</span><span className="srow-hint">Niko does it and tells you what it assumed. Say “no” to correct it.</span></div>
           <div className="kn-level"><span><i className="dot" style={{ background: LEVEL_FG.unsure }} />Not sure</span><span className="srow-hint">Niko asks you first, and remembers your answer.</span></div>
         </div>
+        {where}
       </section>
 
       <section className="g kn-card" aria-label="Everything Niko learned">
@@ -131,7 +142,7 @@ export function LearnedTab({ account, place, files, learn, onLearn, situations, 
         <Sheet onClose={() => setAsking(false)} labelledBy="kn-forget-h">
           <div className="kn-dlg">
             <b id="kn-forget-h" className="kn-dlg-h">Forget everything Niko learned?</b>
-            <span className="srow-hint lg">All {list.length.toLocaleString()} {list.length === 1 ? 'note goes' : 'notes go'}, including matches you taught. Your files stay. Niko starts learning again from your next question{learn ? '' : ', once learning is back on'}.</span>
+            <span className="srow-hint lg">All {list.length.toLocaleString()} {list.length === 1 ? 'note goes' : 'notes go'}, including matches you taught.{copied ? ' The copy in your own app goes to its bin.' : ''} Your files stay. Niko starts learning again from your next question{learn ? '' : ', once learning is back on'}.</span>
             <div className="kn-dlg-b"><button type="button" className="bt" onClick={() => setAsking(false)}>Cancel</button><button type="button" className="pri md" disabled={busy} onClick={() => void run(async () => { await forgetAll(); setAsking(false); })}>Forget everything</button></div>
           </div>
         </Sheet>

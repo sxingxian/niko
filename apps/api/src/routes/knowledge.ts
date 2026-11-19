@@ -4,11 +4,12 @@
 import { eq } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { users } from '@niko/db';
-import { aiAllowed, cleanKnowledgePrefs, cleanTarget, isHabit, isRemotePlace, KN_HABITS, KN_PLACE_NAMES, KN_REMOTE_PLACES, knowledgeAccess, knPlaceOf, knRemoteOf, knSearchOf, type KnowledgeAccess, type KnowledgePrefs, type KnRemotePlace } from '@niko/shared';
+import { aiAllowed, cleanKnowledgePrefs, cleanTarget, isHabit, isRemotePlace, KN_HABITS, KN_PLACE_NAMES, KN_REMOTE_PLACES, knowledgeAccess, knLearnPlaceOf, knPlaceOf, knRemoteOf, knSearchOf, type KnowledgeAccess, type KnowledgePrefs, type KnRemotePlace } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
 import { hmacSha256Hex } from '../lib/crypto';
-import { confirmHabit, declineHabit, editNote, forgetAll, forgetFileMatches, forgetNote, habitsOn, learnedCount, listLearned, noticeHabit, saveNote } from '../learned';
+import { binLearnedCopy, learnedCopyOf, markLearnedDirty, setLearnedCopy, syncLearnedCopy } from '../knLearnedCopy';
+import { confirmHabit, declineHabit, editNote, forgetAll, forgetAllFileMatches, forgetFileMatches, forgetNote, forgetNotesOnly, habitsOn, keepHabit, learnedCount, listLearned, noticeHabit, saveNote } from '../learned';
 import { offFor } from '../access';
 import { ownEmbedder, ownSearchSources } from '../ownEmbed';
 import { notionPage, notionPages, PlaceError, placeConnections, remoteFor } from '../knPlaces';
@@ -50,6 +51,8 @@ export async function syncNotes(c: C, k: Kdb) {
   const fresh = await c.get('db').select({ knowledge: users.knowledge }).from(users).where(eq(users.id, u.id)).limit(1);
   const prefs = { ...cleanKnowledgePrefs(fresh[0]?.knowledge), notes, habits };
   await c.get('db').update(users).set({ knowledge: prefs as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
+  // A copy of what Niko learned in their own app is rewritten on its next sync.
+  await markLearnedDirty(k, u.id);
 }
 /** Notes learned in Niko need the Knowledge database and learning in the person's plan (it works without files). */
 async function notesStore(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: KnowledgePrefs } | Response> {
@@ -75,6 +78,14 @@ async function placesInfo(c: C, k: Kdb, access: KnowledgeAccess) {
   const [conn, made, storage] = await Promise.all([placeConnections(c.get('db'), c.get('user').id), roots(k, c.get('user').id), access.s3 ? loadStorage(c.env, c.get('db'), c.get('user').id) : null]);
   return Object.fromEntries(allowed.map((p) => [p, { ...conn[p], root: made[p] ?? null, ...(p === 's3' && storage ? { storage: shownStorage(storage) } : {}) }]));
 }
+/** The places their plan allows for a copy of what Niko learns: connected or not. Their own storage is offered only
+ *  when it's saved, or when they can set it up on the Files tab. */
+async function learnPlacesInfo(c: C, k: Kdb, access: KnowledgeAccess) {
+  const allowed = KN_REMOTE_PLACES.filter((p) => access.learnPlaces[p]);
+  if (!allowed.length) return {};
+  const [conn, made] = await Promise.all([placeConnections(c.get('db'), c.get('user').id), roots(k, c.get('user').id)]);
+  return Object.fromEntries(allowed.filter((p) => p !== 's3' || conn.s3?.connected || access.s3).map((p) => [p, { ...conn[p], root: made[p] ?? null }]));
+}
 /** Their chosen place, signed in, for copying; a plain problem when it can't be used. */
 async function placeFor(c: C, s: { access: KnowledgeAccess; prefs: KnowledgePrefs }, place?: KnRemotePlace) {
   const p = place ?? knRemoteOf(s.prefs, s.access);
@@ -95,6 +106,9 @@ knowledge.get('/', async (c) => {
     split: settings.split, usage: k && w.access.niko ? await usage(k, u.id) : { files: 0, bytes: 0 },
     // The places their plan allows besides Niko and this device: connected or not, and Niko's folder or page there.
     places: k && w.access.niko ? await placesInfo(c, k, w.access) : {},
+    // Where what Niko learns can be kept besides Niko and this device, and the copy kept there now.
+    learnPlaces: k && w.access.learning ? await learnPlacesInfo(c, k, w.access) : {},
+    learnedCopy: k && w.access.learning ? await learnedCopyOf(k, u.id) : null,
     // Their own services that can make search numbers (only those their plan allows).
     ownSearch: w.access.ownKey || w.access.ownServer ? (await ownSearchSources(c.env, c.get('db'), u)).filter((x) => (x.ref === 'self-hosted-ai' ? w.access.ownServer : w.access.ownKey)) : [],
   });
@@ -104,11 +118,33 @@ knowledge.put('/prefs', async (c) => {
   const b = await c.req.json<Record<string, unknown>>().catch(() => ({}));
   const u = c.get('user');
   const { access } = await who(c);
-  if (!access.files) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  if (!access.files && !access.learning) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   const before = cleanKnowledgePrefs((u as { knowledge?: unknown }).knowledge);
+  // With learning but not files, only the learning settings can change.
+  const asked = access.files ? b : Object.fromEntries(Object.entries(b).filter(([key]) => key === 'learn' || key === 'situations' || key === 'learnPlace'));
   // The file count is kept by the server, never taken from the request.
-  const prefs = { ...cleanKnowledgePrefs({ ...before, ...b }), files: before.files, notes: before.notes, habits: before.habits };
+  const prefs = { ...cleanKnowledgePrefs({ ...before, ...asked }), files: before.files, notes: before.notes, habits: before.habits };
+  // Where what Niko learns is kept: Niko, or a place their plan allows. A copy in their own app needs it connected and
+  // Niko's page or folder made there now, so a connection problem shows straight away.
+  const learnTo = prefs.learnPlace, learnFrom = knLearnPlaceOf(before, access);
+  if (learnTo !== 'niko' && !access.learnPlaces[learnTo]) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  if (learnTo !== learnFrom) {
+    const k = accountKnowledge(c.env, u.id);
+    if (!k && learnTo !== 'device') return c.json({ error: NOT_HERE }, 503);
+    if (isRemotePlace(learnTo)) {
+      const remote = await remoteFor(c.env, c.get('db'), u.id, learnTo);
+      if (!remote) return c.json({ error: (learnTo === 's3' ? 'Add your storage first, on the Files tab.' : `Connect ${KN_PLACE_NAMES[learnTo]} first.`), connect: learnTo }, 409);
+      try { await placeRoot(k!, remote, u.id); } catch (e) { return placeFail(c, e); }
+    }
+    if (k) {
+      await setLearnedCopy(k, u.id, isRemotePlace(learnTo) ? learnTo : null);
+      // Moving to the device: the app has copied the notes there first; Niko keeps only the matches taught for files.
+      if (learnTo === 'device') await forgetNotesOnly(k, u.id);
+    }
+    await audit(c, 'knowledge.learned-place', { place: learnTo }, u.id);
+  }
   // A choice the account doesn't have is kept to what it does have.
+  if (access.files) {
   if (prefs.place === 'niko' && !access.niko && access.device) prefs.place = 'device';
   if (prefs.place === 'device' && !access.device && access.niko) prefs.place = 'niko';
   if (!access.cloudflareRead) prefs.read = 'device';
@@ -136,7 +172,9 @@ knowledge.put('/prefs', async (c) => {
       if (k) await clearOwnNumbers(k, u.id);
     }
   }
+  }
   await c.get('db').update(users).set({ knowledge: prefs as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
+  if (learnTo === 'device' && learnFrom !== 'device') { const k = accountKnowledge(c.env, u.id); if (k) await syncNotes(c, k); }
   if (prefs.learn !== before.learn) await audit(c, prefs.learn ? 'knowledge.learning-on' : 'knowledge.learning-paused', {}, u.id);
   return c.json({ ok: true, prefs });
 });
@@ -368,7 +406,7 @@ knowledge.post('/files/:id/numbers/cloudflare', async (c) => {
 // so files kept on a shared computer can only be read while that person is signed in. Never stored or logged.
 knowledge.get('/device-key', async (c) => {
   const { access } = await who(c);
-  if (!access.device) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  if (!access.device && !access.learnPlaces.device) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   c.header('Cache-Control', 'no-store');
   return c.json({ key: await hmacSha256Hex(c.env.ENCRYPTION_KEY, `niko.knowledge.device.v1:${c.get('user').id}`) });
 });
@@ -379,13 +417,18 @@ knowledge.get('/learned', async (c) => {
   const s = await notesStore(c); if (s instanceof Response) return s;
   return c.json({ items: await listLearned(s.k, c.get('user').id) });
 });
-// Bringing notes kept on the person's device into Niko when they move their Knowledge here. Names, corrections and
-// things to remember only, with the same checks as any note.
+// Bringing notes kept on the person's device into Niko when they move what Niko learned here: names, corrections,
+// playbooks, things to remember and habits said yes to, with the same checks as any note.
 knowledge.post('/learned', async (c) => {
   const s = await notesStore(c); if (s instanceof Response) return s;
   const u = c.get('user');
   if (await tooMany(c, 'kn-note:' + u.id, 1200, 60)) return c.json({ error: 'That’s a lot at once. Try again in a little while.' }, 429);
-  const b = await c.req.json<{ kind?: unknown; said?: unknown; means?: unknown; how?: unknown }>().catch(() => ({} as { kind?: unknown; said?: unknown; means?: unknown; how?: unknown }));
+  const b = await c.req.json<{ kind?: unknown; said?: unknown; means?: unknown; how?: unknown; habit?: unknown }>().catch(() => ({} as { kind?: unknown; said?: unknown; means?: unknown; how?: unknown; habit?: unknown }));
+  // A habit they said yes to on the device comes over as said yes to.
+  if (b.kind === 'habit') {
+    if (!isHabit(b.habit)) return c.json({ error: 'Nothing to keep.' }, 400);
+    try { await keepHabit(s.k, u.id, b.habit); await syncNotes(c, s.k); return c.json({ ok: true }); } catch (e) { return fail(c, e); }
+  }
   const kind = b.kind === 'person' || b.kind === 'correction' || b.kind === 'remembered' || b.kind === 'playbook' ? b.kind : null;
   if (!kind || typeof b.said !== 'string' || typeof b.means !== 'string') return c.json({ error: 'Nothing to keep.' }, 400);
   const how = (['told', 'corrected', 'chose', 'remember', 'confirmed', 'agreed'] as const).find((h) => h === b.how) ?? 'told';
@@ -410,10 +453,31 @@ knowledge.delete('/learned/:id', async (c) => {
 });
 knowledge.delete('/learned', async (c) => {
   const s = await notesStore(c); if (s instanceof Response) return s;
-  const n = await forgetAll(s.k, c.get('user').id);
+  const u = c.get('user'), only = c.req.query('only');
+  // Moving notes or files elsewhere: only the notes, or only the matches taught for files.
+  if (only === 'notes' || only === 'file-matches') {
+    const n = only === 'notes' ? await forgetNotesOnly(s.k, u.id) : await forgetAllFileMatches(s.k, u.id);
+    await syncNotes(c, s.k);
+    return c.json({ ok: true, forgot: n });
+  }
+  const n = await forgetAll(s.k, u.id);
+  const lp = knLearnPlaceOf(s.prefs, s.access);
+  if (isRemotePlace(lp)) await binLearnedCopy(s.k, await remoteFor(c.env, c.get('db'), u.id, lp).catch(() => null), u.id);
   await syncNotes(c, s.k);
   await audit(c, 'knowledge.forget-all', { notes: n }, c.get('user').id);
   return c.json({ ok: true, forgot: n });
+});
+// Rewrites the copy of what Niko learned in their own app, when something changed (at most once a minute). The app
+// calls this after a change, so the request that changed a note stays within Cloudflare's limits.
+knowledge.post('/learned/copy', async (c) => {
+  const s = await notesStore(c); if (s instanceof Response) return s;
+  const u = c.get('user'), lp = knLearnPlaceOf(s.prefs, s.access);
+  if (!isRemotePlace(lp)) return c.json({ error: 'What Niko learns isn’t copied anywhere.' }, 409);
+  if (await tooMany(c, 'kn-lcopy:' + u.id, 60, 3600)) return c.json({ error: 'That’s a lot of updates. Niko will catch up in a little while.' }, 429);
+  const remote = await remoteFor(c.env, c.get('db'), u.id, lp);
+  if (!remote) return c.json({ error: (lp === 's3' ? 'Add your storage first, on the Files tab.' : `Connect ${KN_PLACE_NAMES[lp]} again.`), connect: lp }, 409);
+  try { return c.json({ ok: true, copy: await syncLearnedCopy(s.k, remote, u.id) }); }
+  catch (e) { return placeFail(c, e); }
 });
 // Habits Niko notices: one sighting from the app's watcher (a short trip switched to walking, the inbox opened first
 // thing on a weekday morning). Suggested once, after enough sightings; kept only with a yes.

@@ -1310,3 +1310,10 @@ a.bt { text-decoration: none; display: inline-flex; align-items: center; justify
 .kn-dlg-b .pri.danger { background: #ffb3a8; border-color: #ffb3a8; color: #2a0905; }
 /* Engine · Live info: a place Niko noticed, offered for a yes. */
 .live-from { display: block; margin-top: 3px; font-size: 12px; color: #ffd38a; }
+
+/* Where Niko keeps what it learns (Settings · Knowledge · What Niko learned, Learning card). */
+.kn-learn-where { display: flex; flex-direction: column; gap: 12px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,.08); }
+.kn-acts { display: flex; gap: 8px; flex: none; }
+.srow-hint.bad { color: #ffb3a8; }
+.kn-inset .srow-hint.wait { color: #ffd38a; }
+@media (max-width: 720px) { .kn-acts { justify-content: flex-end; } }

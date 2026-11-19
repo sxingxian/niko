@@ -419,6 +419,7 @@ export async function purgeAccount(k: Kdb, account: string): Promise<void> {
   await k.q(`delete from kn_documents where account_id = $1`, [account]);
   await k.q(`delete from kn_learned where account_id = $1`, [account]);
   await k.q(`delete from kn_places where account_id = $1`, [account]);
+  await k.q(`delete from kn_learned_copy where account_id = $1`, [account]);
 }
 
 // ---------------------------------------------------------------- search

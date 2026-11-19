@@ -9,11 +9,25 @@ import { forgetDeviceKnowledge, keepNoteHere, lookupHere, searchHere } from './k
 export async function knowledgeFor(me: Me | null | undefined, text: string, opts: { pin?: KnTarget | null } = {}): Promise<Record<string, unknown> | null> {
   const k = me?.knowledge;
   if (!me || !k) return null;
+  // Files and what Niko learned can each be kept here or in Niko.
+  const notesHere = k.learnPlace === 'device';
   try {
-    if (k.place === 'device') return (await searchHere(me.id, text, { pin: opts.pin })) as unknown as Record<string, unknown> | null;
-    if (k.search === 'device' && embedReady()) { const v = (await embedTexts([text], 'query'))?.[0]; return v ? { vector: v } : null; }
+    if (k.place === 'device') return (await searchHere(me.id, text, { pin: opts.pin, notes: notesHere })) as unknown as Record<string, unknown> | null;
+    const out: Record<string, unknown> = notesHere ? { ...((await searchHere(me.id, text, { files: false, notes: true })) ?? {}) } : {};
+    if (k.search === 'device' && embedReady()) { const v = (await embedTexts([text], 'query'))?.[0]; if (v) out.vector = v; }
+    return Object.keys(out).length ? out : null;
   } catch { /* Knowledge never stops an answer: Niko answers without files */ }
   return null;
+}
+
+/** A copy of what Niko learned in their own app: rewritten a few seconds after something changed (Niko writes it at
+ *  most once a minute, so a change in between is caught up a minute later). */
+let copyTimer: number | undefined;
+export function syncLearnedCopySoon(ms = 3000) {
+  window.clearTimeout(copyTimer);
+  copyTimer = window.setTimeout(() => {
+    void api<{ copy?: { waited?: boolean } }>('/knowledge/learned/copy', { method: 'POST' }).then((r) => { if (r.copy?.waited) syncLearnedCopySoon(61_000); }).catch(() => undefined);
+  }, ms);
 }
 
 export async function chatWithTables<T>(me: Me | null | undefined, body: Record<string, unknown>): Promise<T> {
@@ -29,10 +43,10 @@ export function knowledgeAccount(id: string | null | undefined) {
   if ((id ?? null) !== lastAccount) { if (lastAccount) forgetDeviceKnowledge(); lastAccount = id ?? null; }
 }
 
-/** Notes the answer asked to keep, when the person's Knowledge is on this device: kept here, and returned with their ids
+/** Notes the answer asked to keep, when what Niko learns is kept on this device: kept here, and returned with their ids
  *  so "Undo" can forget them. */
 export async function keepDeviceNotes(me: Me | null | undefined, learn: unknown): Promise<{ id: string; kind: string; said: string; means: string }[]> {
-  if (!me || me.knowledge?.place !== 'device' || !Array.isArray(learn)) return [];
+  if (!me || me.knowledge?.learnPlace !== 'device' || !Array.isArray(learn)) return [];
   const out: { id: string; kind: string; said: string; means: string }[] = [];
   for (const raw of learn.slice(0, 2)) {
     const x = (raw && typeof raw === 'object' ? raw : {}) as { kind?: unknown; said?: unknown; means?: unknown; how?: unknown };

@@ -225,10 +225,11 @@ export async function updateSheetHere(account: string, fileId: string, sheetId: 
 /** Searches this device's files for a question and returns what may go with it to Niko, or null with no files here. */
 /** Searches this device's files (and what Niko learned here) for a question and returns what may go with it to
  *  Niko, or null when nothing is kept here. `pin` is a piece the person just said is the one. */
-export async function searchHere(account: string, text: string, opts: { pin?: KnTarget | null; files?: boolean } = {}): Promise<KnDeviceKnowledge | null> {
+export async function searchHere(account: string, text: string, opts: { pin?: KnTarget | null; files?: boolean; notes?: boolean } = {}): Promise<KnDeviceKnowledge | null> {
   const notes = await notesHere(account).catch(() => [] as KnLearnedItem[]);
   const L = opts.files === false ? null : await load(account);
-  const useful = notes.filter((n) => n.kind !== 'file-match' && !(n.kind === 'habit' && n.suggested) && (text.toLowerCase().includes(n.said.toLowerCase()) || wordsAlike(`${n.said} ${n.means}`, text) >= 0.2)).slice(0, 8);
+  // Notes other than matches taught for files go only when what Niko learns is kept here.
+  const useful = notes.filter((n) => opts.notes !== false && n.kind !== 'file-match' && !(n.kind === 'habit' && n.suggested) && (text.toLowerCase().includes(n.said.toLowerCase()) || wordsAlike(`${n.said} ${n.means}`, text) >= 0.2)).slice(0, 8);
   if (useful.length) void touchNotes(account, useful.map((n) => n.id));
   const learned = useful.map((n) => ({ kind: n.kind, said: n.said, means: n.means, level: n.level, how: n.how }));
   if (!L?.files.length) return learned.length ? { hits: [], tables: [], numbers: false, learned } : null;
@@ -307,6 +308,13 @@ export async function keepHabitHere(account: string, id: string): Promise<void> 
 export async function declineHabitHere(account: string, id: string): Promise<void> {
   const n = (await storedNotes(account)).find((x) => x.id === id && x.kind === 'habit');
   if (n?.habit && !n.confirmed) await putNote(account, id, { ...n, habit: { ...n.habit, declined: true }, updatedAt: new Date().toISOString() });
+}
+/** A habit already said yes to, brought here when notes move to this device. */
+export async function keepConfirmedHabitHere(account: string, habit: KnHabit): Promise<void> {
+  const all = await storedNotes(account);
+  const cur = all.find((n) => n.kind === 'habit' && n.habit?.habit === habit);
+  const now = new Date().toISOString(), id = cur?.id ?? crypto.randomUUID();
+  await putNote(account, id, { kind: 'habit', said: KN_HABITS[habit].said, means: KN_HABITS[habit].means, how: 'suggested', target: null, uses: KN_HABIT_AFTER, createdAt: cur?.createdAt ?? now, lastUsed: null, updatedAt: now, confirmed: true, habit: { habit, keys: [], offered: true } });
 }
 /** The habits said yes to, kept here. */
 export async function habitsHere(account: string): Promise<KnHabit[]> {
@@ -417,12 +425,9 @@ export async function moveToDevice(account: string, files: ServerFile[], onStep?
     await keep(account, { name: f.name, kind: f.kind, bytes: f.bytes, sha256: f.sha256, collection: f.collection, flagged: f.flagged, pieces, vectors: await numbersFor(pieces), sheets });
     await api(`/knowledge/files/${f.id}`, { method: 'DELETE' });
   }
-  // What Niko learned moves too (taught matches point at the old copies, so they're left behind and removed).
-  const learned = await api<{ items: KnLearnedItem[] }>('/knowledge/learned').catch(() => null);
-  for (const n of learned?.items ?? []) {
-    if (n.kind === 'person' || n.kind === 'correction' || n.kind === 'remembered' || n.kind === 'playbook') await keepNoteHere(account, { kind: n.kind, said: n.said, means: n.means, how: n.kind === 'remembered' ? 'remember' : n.kind === 'correction' ? 'corrected' : n.kind === 'playbook' ? 'confirmed' : 'told' }).catch(() => undefined);
-  }
-  if (learned?.items.length) await api('/knowledge/learned', { method: 'DELETE' }).catch(() => undefined);
+  // Matches taught for files point at the old copies, so they're removed. What Niko learned otherwise stays where it is
+  // kept (its own choice).
+  await api('/knowledge/learned?only=file-matches', { method: 'DELETE' }).catch(() => undefined);
 }
 /** Copies this device's files into Niko, then removes each copy here once Niko has it. */
 export async function moveToNiko(account: string, onStep?: (done: number, total: number, name: string) => void): Promise<void> {
@@ -450,10 +455,40 @@ export async function moveToNiko(account: string, onStep?: (done: number, total:
     }
     await dropFile(account, f.id);
   }
-  // What Niko learned here moves into Niko too (taught matches point at the old copies and are dropped).
-  for (const n of await storedNotes(account).catch(() => [])) {
-    if (n.kind === 'person' || n.kind === 'correction' || n.kind === 'remembered' || n.kind === 'playbook') await api('/knowledge/learned', { method: 'POST', body: { kind: n.kind, said: n.said, means: n.means, how: n.how } }).catch(() => undefined);
-  }
-  await forgetAllHere(account).catch(() => undefined);
+  // Matches taught for files point at the old copies and are dropped; other notes stay where they're kept.
+  await dropNotes(account, (await storedNotes(account).catch(() => [])).filter((n) => n.kind === 'file-match').map((n) => n.id)).catch(() => undefined);
   changed();
+}
+
+// ---------------------------------------------------------------- moving what Niko learned
+const movable = (n: { kind: string; confirmed?: boolean }) => n.kind === 'person' || n.kind === 'correction' || n.kind === 'remembered' || n.kind === 'playbook' || (n.kind === 'habit' && n.confirmed === true);
+/** How many notes would move (habits only suggested start again in the new place). */
+export async function movableNotesHere(account: string): Promise<number> { return (await storedNotes(account)).filter(movable).length; }
+/** Copies what Niko learned in Niko to this device, then `commit` (saving the choice, which removes them from Niko).
+ *  If saving fails, the copies made here are removed again, so nothing is kept twice. */
+export async function moveNotesToDevice(account: string, commit: () => Promise<void>, onStep?: (done: number, total: number) => void): Promise<void> {
+  const items = (await api<{ items: KnLearnedItem[] }>('/knowledge/learned')).items.filter(movable);
+  const made: string[] = [];
+  try {
+    for (let i = 0; i < items.length; i++) {
+      const n = items[i]!; onStep?.(i, items.length);
+      if (n.kind === 'habit') { if (n.habit) await keepConfirmedHabitHere(account, n.habit); continue; }
+      const it = await keepNoteHere(account, { kind: n.kind as 'person' | 'correction' | 'remembered' | 'playbook', said: n.said, means: n.means, how: n.kind === 'remembered' ? 'remember' : n.kind === 'correction' ? 'corrected' : n.kind === 'playbook' ? 'confirmed' : 'told' });
+      made.push(it.id);
+    }
+    await commit();
+  } catch (e) { await dropNotes(account, made).catch(() => undefined); throw e; }
+}
+/** Copies what Niko learned on this device into Niko, then `commit` (saving the choice), then removes it here. If
+ *  saving fails, the notes just sent are removed from Niko again. */
+export async function moveNotesToNiko(account: string, commit: () => Promise<void>, onStep?: (done: number, total: number) => void): Promise<void> {
+  const notes = (await storedNotes(account)).filter(movable);
+  try {
+    for (let i = 0; i < notes.length; i++) {
+      const n = notes[i]!; onStep?.(i, notes.length);
+      await api('/knowledge/learned', { method: 'POST', body: n.kind === 'habit' ? { kind: 'habit', habit: n.habit?.habit } : { kind: n.kind, said: n.said, means: n.means, how: n.how } });
+    }
+    await commit();
+  } catch (e) { await api('/knowledge/learned?only=notes', { method: 'DELETE' }).catch(() => undefined); throw e; }
+  await dropNotes(account, (await storedNotes(account)).filter((n) => n.kind !== 'file-match').map((n) => n.id)).catch(() => undefined);
 }
