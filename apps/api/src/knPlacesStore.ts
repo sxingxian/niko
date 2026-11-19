@@ -28,9 +28,10 @@ export async function placeRoot(k: Kdb, remote: Remote, account: string): Promis
 /** A Notion page they picked for the copies (or null: Niko makes its own page next time). */
 export async function setRoot(k: Kdb, account: string, place: KnRemotePlace, root: { id: string; name: string } | null): Promise<void> {
   if (!root) { await k.q(`delete from kn_places where account_id = $1 and place = $2`, [account, place]); return; }
-  await k.q(`insert into kn_places (account_id, place, root_id, root_name) values ($1, $2, $3, $4)
-             on conflict (account_id, place) do update set root_id = excluded.root_id, root_name = excluded.root_name, created_at = now()`, [account, place, root.id, root.name.slice(0, 200)]);
+  await k.q(`insert into kn_places (account_id, place, root_id, root_name, made) values ($1, $2, $3, $4, false)
+             on conflict (account_id, place) do update set root_id = excluded.root_id, root_name = excluded.root_name, made = false, created_at = now()`, [account, place, root.id, root.name.slice(0, 200)]);
 }
+
 export async function roots(k: Kdb, account: string): Promise<Partial<Record<KnRemotePlace, string>>> {
   const rows = await k.q<{ place: KnRemotePlace; root_name: string }>(`select place, root_name from kn_places where account_id = $1`, [account]);
   return Object.fromEntries(rows.map((r) => [r.place, r.root_name]));

@@ -5,6 +5,7 @@ import { and, eq } from 'drizzle-orm';
 import { connections, providerApps, users, type Db } from '@niko/db';
 import { PROVIDERS, type AppId, type EventItem, type MailItem, type NoteItem } from '@niko/shared';
 import { notionDeleted, notionTitle } from './details';
+import { isKnowledgeNotion } from './knNotes';
 import { icalList, pool } from './calendarlink';
 import { accountLimitsFor } from './limits';
 import { imapList, imapReply, isImapProvider } from './mailbox';
@@ -214,6 +215,13 @@ async function notionOwner(userId: string, token: string): Promise<string> {
   return id;
 }
 
+/** The Notion pages Niko made for this person's Knowledge (none when Knowledge isn't set up). */
+async function knowledgeNotes(env: Env, userId: string): Promise<Set<string>> {
+  const { accountKnowledge } = await import('./knowledge');
+  const { knowledgeNotionIds } = await import('./knNotes');
+  const k = accountKnowledge(env, userId);
+  return k ? knowledgeNotionIds(k, userId).catch(() => new Set<string>()) : new Set<string>();
+}
 export async function listNotes(env: Env, db: Db, userId: string, provider: string): Promise<NoteItem[]> {
   const s = await credentials(env, db, userId, provider);
   if (!s) return [];
@@ -224,7 +232,9 @@ export async function listNotes(env: Env, db: Db, userId: string, provider: stri
       body: JSON.stringify({ page_size: 70, sort: { direction: 'descending', timestamp: 'last_edited_time' }, filter: { property: 'object', value: 'page' } }),
     });
     const owner = await notionOwner(userId, s.accessToken);
-    return (j.results ?? []).filter((p: any) => !notionDeleted(p)).slice(0, LIST_MAX)
+    // Pages Niko made for Knowledge belong to Knowledge, not to their notes.
+    const hide = await knowledgeNotes(env, userId);
+    return (j.results ?? []).filter((p: any) => !notionDeleted(p) && !isKnowledgeNotion(p, hide)).slice(0, LIST_MAX)
       .map((p: any) => ({ id: String(p.id), provider, title: notionTitle(p), source: 'Notion', edited: Date.parse(p.last_edited_time) || undefined, ...(owner && p.last_edited_by?.id === owner ? { byMe: true } : {}) }));
   }
   if (provider === 'onenote') {
