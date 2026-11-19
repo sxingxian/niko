@@ -10,7 +10,8 @@ import { audit, tooMany } from '../lib/session';
 import { hmacSha256Hex } from '../lib/crypto';
 import { confirmHabit, declineHabit, editNote, forgetAll, forgetFileMatches, forgetNote, habitsOn, learnedCount, listLearned, noticeHabit, saveNote } from '../learned';
 import { offFor } from '../access';
-import { addCloudflareNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeDb, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
+import { ownEmbedder, ownSearchSources } from '../ownEmbed';
+import { addCloudflareNumbers, addOwnNumbers, clearOwnNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeDb, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
 
 export const knowledge = new Hono<AppEnv>();
 type C = Context<AppEnv>;
@@ -71,6 +72,8 @@ knowledge.get('/', async (c) => {
   return c.json({
     available: !!k && (w.access.files || w.access.learning), access: w.access, prefs: w.prefs, limits: await limitsFor(c.get('db'), u),
     split: settings.split, usage: k && w.access.niko ? await usage(k, u.id) : { files: 0, bytes: 0 },
+    // Their own services that can make search numbers (only those their plan allows).
+    ownSearch: w.access.ownKey || w.access.ownServer ? (await ownSearchSources(c.env, c.get('db'), u)).filter((x) => (x.ref === 'self-hosted-ai' ? w.access.ownServer : w.access.ownKey)) : [],
   });
 });
 
@@ -86,7 +89,19 @@ knowledge.put('/prefs', async (c) => {
   if (prefs.place === 'niko' && !access.niko && access.device) prefs.place = 'device';
   if (prefs.place === 'device' && !access.device && access.niko) prefs.place = 'niko';
   if (!access.cloudflareRead) prefs.read = 'device';
-  if (!access.cloudflareSearch) prefs.search = 'device';
+  if (prefs.search === 'cloudflare' && !access.cloudflareSearch) prefs.search = 'device';
+  // Their own service: allowed by the plan, and tried once before it's saved, so a wrong model is caught now.
+  if (prefs.search === 'own') {
+    if (!prefs.own || !(prefs.own.ref === 'self-hosted-ai' ? access.ownServer : access.ownKey)) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+    const changed = before.search !== 'own' || before.own?.ref !== prefs.own.ref || before.own?.model !== prefs.own.model;
+    if (changed) {
+      if (await tooMany(c, 'kn-own-try:' + u.id, 30, 3600)) return c.json({ error: 'That’s a lot of tries. Try again in a little while.' }, 429);
+      try { await (await ownEmbedder(c.env, c.get('db'), u, prefs.own))(['Niko']); }
+      catch (e) { return c.json({ error: (e as Error).message }, 400); }
+      const k = knowledgeDb(c.env);
+      if (k) await clearOwnNumbers(k, u.id);
+    }
+  }
   await c.get('db').update(users).set({ knowledge: prefs as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
   if (prefs.learn !== before.learn) await audit(c, prefs.learn ? 'knowledge.learning-on' : 'knowledge.learning-paused', {}, u.id);
   return c.json({ ok: true, prefs });
@@ -111,7 +126,10 @@ knowledge.post('/files', async (c) => {
 knowledge.post('/files/:id/pieces', async (c) => {
   const s = await store(c); if (s instanceof Response) return s;
   const b = await c.req.json<Record<string, unknown>>().catch(() => ({}));
-  try { return c.json({ ok: true, ...(await addPieces(s.k, c.env, c.get('user').id, c.req.param('id'), b, { cloudflare: useCloudflare(s.access, s.prefs) })) }); }
+  try {
+    const own = knSearchOf(s.prefs, s.access, 'niko') === 'own' ? await ownEmbedder(c.env, c.get('db'), c.get('user'), s.prefs.own!) : undefined;
+    return c.json({ ok: true, ...(await addPieces(s.k, c.env, c.get('user').id, c.req.param('id'), b, { cloudflare: useCloudflare(s.access, s.prefs), own })) });
+  }
   catch (e) { return fail(c, e); }
 });
 
@@ -183,6 +201,14 @@ knowledge.put('/files/:id/numbers', async (c) => {
   const s = await store(c); if (s instanceof Response) return s;
   const b = await c.req.json<Record<string, unknown>>().catch(() => ({}));
   try { return c.json({ ok: true, ...(await setDeviceNumbers(s.k, c.get('user').id, c.req.param('id'), b)) }); }
+  catch (e) { return fail(c, e); }
+});
+knowledge.post('/files/:id/numbers/own', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  const u = c.get('user');
+  if (knSearchOf(s.prefs, s.access, 'niko') !== 'own') return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  if (await tooMany(c, 'kn-own:' + u.id, 600, 60)) return c.json({ error: 'That’s a lot at once. Try again in a little while.' }, 429);
+  try { return c.json({ ok: true, ...(await addOwnNumbers(s.k, u.id, c.req.param('id'), await ownEmbedder(c.env, c.get('db'), u, s.prefs.own!))) }); }
   catch (e) { return fail(c, e); }
 });
 knowledge.post('/files/:id/numbers/cloudflare', async (c) => {

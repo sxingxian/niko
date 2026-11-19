@@ -6,8 +6,9 @@ import { tableTags, type KnColumn, type KnowledgeAccess, type KnowledgePrefs, ty
 /** Where files are kept and how they are searched, kept to what the account may use. */
 export const knPlaceOf = (p: Pick<KnowledgePrefs, 'place'>, a: Pick<KnowledgeAccess, 'niko' | 'device'>): 'niko' | 'device' =>
   (p.place === 'device' && a.device) || (!a.niko && a.device) ? 'device' : 'niko';
-export const knSearchOf = (p: Pick<KnowledgePrefs, 'search'>, a: Pick<KnowledgeAccess, 'cloudflareSearch'>, place: 'niko' | 'device'): 'cloudflare' | 'device' =>
-  place === 'niko' && a.cloudflareSearch && p.search === 'cloudflare' ? 'cloudflare' : 'device';
+export const knSearchOf = (p: Pick<KnowledgePrefs, 'search'> & { own?: KnowledgePrefs['own'] }, a: Pick<KnowledgeAccess, 'cloudflareSearch'> & Partial<Pick<KnowledgeAccess, 'ownKey' | 'ownServer'>>, place: 'niko' | 'device'): 'cloudflare' | 'device' | 'own' =>
+  place === 'niko' && a.cloudflareSearch && p.search === 'cloudflare' ? 'cloudflare'
+    : place === 'niko' && p.search === 'own' && !!p.own && (p.own.ref === 'self-hosted-ai' ? !!a.ownServer : !!a.ownKey) ? 'own' : 'device';
 
 /** How close (0 to 1) a piece must be, by the on-device search numbers (multilingual-e5-small), to lead the answer and
  *  to be offered at all. e5 scores sit higher than Cloudflare's: unrelated text is usually around 0.72 to 0.8 and a

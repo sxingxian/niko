@@ -66,7 +66,10 @@ export interface KnowledgePrefs {
   place: 'niko' | 'device';
   /** Who reads PDF and Word files, and who makes search numbers. */
   read: 'cloudflare' | 'device';
-  search: 'cloudflare' | 'device';
+  search: 'cloudflare' | 'device' | 'own';
+  /** With search 'own': which of their own services makes the search numbers (`key:<id>`, one of their AI keys, or
+   *  `self-hosted-ai`, their own model server) and the embedding model's name. */
+  own: { ref: string; model: string } | null;
   /** Telegram replies can use Knowledge. */
   telegram: boolean;
   /** Reply drafts can use Knowledge (off keeps drafts quick: they read only the message). */
@@ -82,7 +85,18 @@ export interface KnowledgePrefs {
   /** Habits this person said yes to (server-kept, so the app can apply them without asking Knowledge). */
   habits: string[];
 }
-export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false, files: 0, learn: true, notes: 0, situations: true, habits: [] };
+export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', own: null, telegram: true, drafts: false, files: 0, learn: true, notes: 0, situations: true, habits: [] };
+/** Their own search numbers: one of their AI keys or their own model server, and an embedding model's name. */
+export function cleanOwnSearch(v: unknown): { ref: string; model: string } | null {
+  const o = (v && typeof v === 'object' ? v : {}) as { ref?: unknown; model?: unknown };
+  const ref = typeof o.ref === 'string' && /^(key:[A-Za-z0-9_-]{1,40}|self-hosted-ai)$/.test(o.ref) ? o.ref : '';
+  const model = typeof o.model === 'string' ? o.model.trim().replace(/[^\w.:/@+-]/g, '').slice(0, 100) : '';
+  return ref && model ? { ref, model } : null;
+}
+/** How close (0 to 1) a piece must be, by search numbers from their own key or server, to lead and to be offered.
+ *  Embedding models differ, so these are cautious starting points (most score unrelated text under 0.4). */
+export const KN_OWN_LEAD = 0.6;
+export const KN_OWN_SIMILAR = 0.45;
 const isMode = (v: unknown): v is KnMode => v === 'files' || v === 'only' || v === 'off';
 /** How Niko answers from one collection. */
 export const knModeOf = (p: KnowledgePrefs, collection: string): KnMode => p.modes[collection] ?? p.mode;
@@ -94,7 +108,8 @@ export function cleanKnowledgePrefs(v: unknown): KnowledgePrefs {
     mode: isMode(o.mode) ? o.mode : d.mode, modes,
     place: o.place === 'device' ? 'device' : d.place,
     read: o.read === 'device' ? 'device' : d.read,
-    search: o.search === 'device' ? 'device' : d.search,
+    search: o.search === 'device' || o.search === 'own' ? o.search : d.search,
+    own: cleanOwnSearch(o.own),
     telegram: typeof o.telegram === 'boolean' ? o.telegram : d.telegram,
     drafts: typeof o.drafts === 'boolean' ? o.drafts : d.drafts,
     files: typeof o.files === 'number' && Number.isInteger(o.files) && o.files >= 0 ? o.files : d.files,
@@ -106,11 +121,12 @@ export function cleanKnowledgePrefs(v: unknown): KnowledgePrefs {
 }
 
 /** What one account may use, from its AI options (see AI_OPTION_GROUPS, group "knowledge"). */
-export interface KnowledgeAccess { files: boolean; niko: boolean; device: boolean; cloudflareRead: boolean; cloudflareSearch: boolean; learning: boolean }
+export interface KnowledgeAccess { files: boolean; niko: boolean; device: boolean; cloudflareRead: boolean; cloudflareSearch: boolean; learning: boolean; /** Search numbers from one of their AI keys, or their own model server. */ ownKey: boolean; ownServer: boolean }
 export function knowledgeAccess(allowed: (key: string) => boolean): KnowledgeAccess {
   const files = allowed('kn:files');
   return { files, niko: files && allowed('kn:place:niko'), device: files && allowed('kn:place:device'),
-    cloudflareRead: files && allowed('kn:cf-read'), cloudflareSearch: files && allowed('kn:cf-search'), learning: allowed('kn:learning') };
+    cloudflareRead: files && allowed('kn:cf-read'), cloudflareSearch: files && allowed('kn:cf-search'), learning: allowed('kn:learning'),
+    ownKey: files && allowed('kn:search-key'), ownServer: files && allowed('kn:search-server') };
 }
 
 /** What a sheet column holds, so counts and totals come out right. */

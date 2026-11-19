@@ -9,7 +9,7 @@ import { neon } from '@neondatabase/serverless';
 import { eq } from 'drizzle-orm';
 import { appSettings, type Db } from '@niko/db';
 import {
-  askedFromFiles, cleanKnowledgeLimits, contentWords, KN_DEVICE_LEAD, KN_DEVICE_SIMILAR, type KnDeviceKnowledge, type KnTarget, cleanKnowledgeSettings, knowledgeLimits, knKindOf, knModeOf, knNeedsCloudflare, KN_LEAD, KN_SIMILAR,
+  askedFromFiles, cleanKnowledgeLimits, contentWords, KN_DEVICE_LEAD, KN_DEVICE_SIMILAR, KN_OWN_LEAD, KN_OWN_SIMILAR, type KnDeviceKnowledge, type KnTarget, cleanKnowledgeSettings, knowledgeLimits, knKindOf, knModeOf, knNeedsCloudflare, KN_LEAD, KN_SIMILAR,
   KN_CLOUDFLARE_DIMS, KN_DEVICE_DIMS, KN_PIECE_CHARS, KN_PIECES_PER_CALL, KN_READ_MAX_BYTES,
   KN_COL_TYPES, KN_SHEET_CELL_CHARS, KN_SHEET_MAX_COLS, KN_SHEET_MAX_ROWS, KN_SHEET_ROWS_PER_CALL,
   type KnColType, type KnColumn, type KnKind, type KnowledgeLimits, type KnowledgePrefs, type KnowledgeSettings, type KnTableAsk,
@@ -127,7 +127,7 @@ async function readingFile(k: Kdb, account: string, id: string) {
 }
 
 /** Adds up to KN_PIECES_PER_CALL pieces, numbered from `start`, with search numbers from Cloudflare or the device. */
-export async function addPieces(k: Kdb, env: Pick<Env, 'AI'>, account: string, id: string, b: { start?: unknown; pieces?: unknown; vectors?: unknown }, how: { cloudflare: boolean }): Promise<{ added: number }> {
+export async function addPieces(k: Kdb, env: Pick<Env, 'AI'>, account: string, id: string, b: { start?: unknown; pieces?: unknown; vectors?: unknown }, how: { cloudflare: boolean; own?: (texts: string[]) => Promise<number[][]> }): Promise<{ added: number }> {
   await readingFile(k, account, id);
   const start = typeof b.start === 'number' && Number.isInteger(b.start) && b.start >= 0 && b.start < 1_000_000 ? b.start : -1;
   if (start < 0) throw new KnError('Where these pieces start is missing.');
@@ -140,8 +140,10 @@ export async function addPieces(k: Kdb, env: Pick<Env, 'AI'>, account: string, i
     if (body.length > KN_PIECE_CHARS) throw new KnError(`A piece can hold up to ${KN_PIECE_CHARS} characters.`);
     return { heading: cleanText(o.heading, 200) || null, body };
   });
-  let cf: (string | null)[] = pieces.map(() => null), dev: (string | null)[] = pieces.map(() => null);
-  if (how.cloudflare) {
+  let cf: (string | null)[] = pieces.map(() => null), dev: (string | null)[] = pieces.map(() => null), own: (string | null)[] = pieces.map(() => null);
+  if (how.own) {
+    own = (await how.own(pieces.map((p) => (p.heading ? `${p.heading}\n${p.body}` : p.body)))).map(vecText);
+  } else if (how.cloudflare) {
     cf = (await embed(env, pieces.map((p) => (p.heading ? `${p.heading}\n${p.body}` : p.body)))).map(vecText);
   } else if (b.vectors !== undefined) {
     // Search numbers made on the device. Without any, the pieces are found by their words only.
@@ -150,11 +152,11 @@ export async function addPieces(k: Kdb, env: Pick<Env, 'AI'>, account: string, i
     dev = vs.map((v) => vecText(checkVector(v, KN_DEVICE_DIMS)));
   }
   await k.q(
-    `insert into kn_chunks (account_id, document_id, ord, heading, body, embedding, embedding_device)
-     select $1, $2, t.o, t.h, t.b, t.e::halfvec, t.d::halfvec
-     from unnest($3::int[], $4::text[], $5::text[], $6::text[], $7::text[]) as t(o, h, b, e, d)
+    `insert into kn_chunks (account_id, document_id, ord, heading, body, embedding, embedding_device, embedding_own)
+     select $1, $2, t.o, t.h, t.b, t.e::halfvec, t.d::halfvec, t.w::halfvec
+     from unnest($3::int[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[]) as t(o, h, b, e, d, w)
      on conflict (document_id, ord) do nothing`,
-    [account, id, pieces.map((_, i) => start + i), pieces.map((p) => p.heading), pieces.map((p) => p.body), cf, dev]);
+    [account, id, pieces.map((_, i) => start + i), pieces.map((p) => p.heading), pieces.map((p) => p.body), cf, dev, own]);
   return { added: pieces.length };
 }
 
@@ -267,15 +269,16 @@ export async function finishFile(k: Kdb, account: string, id: string): Promise<{
 }
 
 export async function listFiles(k: Kdb, account: string): Promise<KnFile[]> {
-  const rows = await k.q<{ id: string; name: string; kind: KnKind; collection: string; bytes: number; status: KnFile['status']; error: string | null; chunk_count: number; flagged: boolean; sheets: number; rows: string; columns: number; cf: number; dev: number; sha256: string; created_at: string | Date }>(
+  const rows = await k.q<{ id: string; name: string; kind: KnKind; collection: string; bytes: number; status: KnFile['status']; error: string | null; chunk_count: number; flagged: boolean; sheets: number; rows: string; columns: number; cf: number; dev: number; own: number; sha256: string; created_at: string | Date }>(
     `select d.id, d.name, d.kind, d.collection, d.bytes, d.sha256, d.status, d.error, d.chunk_count, d.flagged, d.created_at,
             (select count(*)::int from kn_sheets s where s.document_id = d.id) as sheets,
             (select coalesce(sum(s.row_count), 0)::bigint from kn_sheets s where s.document_id = d.id) as rows,
             (select coalesce(max(jsonb_array_length(s.columns)), 0)::int from kn_sheets s where s.document_id = d.id) as columns,
             (select count(*)::int from kn_chunks c where c.document_id = d.id and c.embedding is not null) as cf,
-            (select count(*)::int from kn_chunks c where c.document_id = d.id and c.embedding_device is not null) as dev
+            (select count(*)::int from kn_chunks c where c.document_id = d.id and c.embedding_device is not null) as dev,
+            (select count(*)::int from kn_chunks c where c.document_id = d.id and c.embedding_own is not null) as own
      from kn_documents d where d.account_id = $1 order by d.created_at desc limit 1000`, [account]);
-  return rows.map((r) => ({ id: r.id, name: r.name, kind: r.kind, collection: r.collection, bytes: r.bytes, status: r.status, error: r.error, pieces: r.chunk_count, flagged: r.flagged, sheets: r.sheets, rows: Number(r.rows), columns: r.columns, numbers: { cloudflare: r.cf, device: r.dev }, sha256: r.sha256, addedAt: new Date(r.created_at).toISOString() }));
+  return rows.map((r) => ({ id: r.id, name: r.name, kind: r.kind, collection: r.collection, bytes: r.bytes, status: r.status, error: r.error, pieces: r.chunk_count, flagged: r.flagged, sheets: r.sheets, rows: Number(r.rows), columns: r.columns, numbers: { cloudflare: r.cf, device: r.dev, own: r.own }, sha256: r.sha256, addedAt: new Date(r.created_at).toISOString() }));
 }
 
 export async function deleteFile(k: Kdb, account: string, id: string): Promise<boolean> {
@@ -335,6 +338,23 @@ export async function addCloudflareNumbers(k: Kdb, env: Pick<Env, 'AI'>, account
   return { updated: rows.length, left: left?.n ?? 0 };
 }
 
+/** Search numbers from the person's own key or server, for pieces that don't have them yet (a page at a time). */
+export async function addOwnNumbers(k: Kdb, account: string, id: string, embedder: (texts: string[]) => Promise<number[][]>): Promise<{ updated: number; left: number }> {
+  await readyFile(k, account, id);
+  const rows = await k.q<{ id: string; heading: string | null; body: string }>(
+    `select id, heading, body from kn_chunks where document_id = $1 and account_id = $2 and embedding_own is null order by ord limit ${KN_PIECES_PER_CALL}`, [id, account]);
+  if (rows.length) {
+    const vecs = (await embedder(rows.map((p) => (p.heading ? `${p.heading}\n${p.body}` : p.body)))).map(vecText);
+    await k.q(`update kn_chunks c set embedding_own = t.e::halfvec from unnest($2::bigint[], $3::text[]) as t(i, e) where c.account_id = $1 and c.id = t.i`, [account, rows.map((r) => r.id), vecs]);
+  }
+  const [left] = await k.q<{ n: number }>(`select count(*)::int as n from kn_chunks where document_id = $1 and account_id = $2 and embedding_own is null`, [id, account]);
+  return { updated: rows.length, left: left?.n ?? 0 };
+}
+/** Forgets the numbers from their own service (they chose another model or service). */
+export async function clearOwnNumbers(k: Kdb, account: string): Promise<void> {
+  await k.q(`update kn_chunks set embedding_own = null where account_id = $1 and embedding_own is not null`, [account]);
+}
+
 /** Everything one account kept in Knowledge: files, pieces, sheets and what Niko learned. */
 export async function purgeAccount(k: Kdb, account: string): Promise<void> {
   await k.q(`delete from kn_documents where account_id = $1`, [account]);
@@ -346,17 +366,18 @@ export interface KnHit { id: number; fileId: string; file: string; collection: s
 /** Finds the pieces that best answer a question: word search and search numbers together (each list's rank counts,
  *  so neither has to be calibrated against the other). `similarity` is how close the closest meaning was (0 to 1),
  *  which the answer uses to decide whether a file leads. Only this account's finished files are searched. */
-export async function search(k: Kdb, env: Pick<Env, 'AI'>, account: string, query: string, how: { cloudflare: boolean; vector?: unknown; cfVector?: number[] | null; limit?: number }): Promise<KnHit[]> {
+export async function search(k: Kdb, env: Pick<Env, 'AI'>, account: string, query: string, how: { cloudflare: boolean; vector?: unknown; cfVector?: number[] | null; ownVector?: number[] | null; limit?: number }): Promise<KnHit[]> {
   const q = cleanText(query, 500);
   if (!q) return [];
   const limit = Math.min(Math.max(how.limit ?? 6, 1), 20);
   // Word search matches any of the question's words (ranked by how many and how close), not all of them: a whole
   // question rarely has every word in one piece. Words are letters and digits only.
   const anyWords = contentWords(q).slice(0, 30).map((w) => w.replace(/[^\p{L}\p{N}]/gu, '')).filter(Boolean).join(' | ') || 'zzzz';
-  let vec: string | null = null, col: 'embedding' | 'embedding_device' = 'embedding';
-  if (how.cloudflare) vec = vecText(how.cfVector ?? (await embed(env, [q]))[0]!);
+  let vec: string | null = null, col: 'embedding' | 'embedding_device' | 'embedding_own' = 'embedding';
+  if (how.ownVector?.length) { vec = vecText(how.ownVector); col = 'embedding_own'; }
+  else if (how.cloudflare) vec = vecText(how.cfVector ?? (await embed(env, [q]))[0]!);
   else if (how.vector !== undefined) { vec = vecText(checkVector(how.vector, KN_DEVICE_DIMS)); col = 'embedding_device'; }
-  // `col` is one of two fixed names above, never from the request.
+  // `col` is one of three fixed names above, never from the request.
   const near = vec ? `near as (
       select id, row_number() over (order by dist) as r, 1 - dist as sim from (
         select id, ${col} <=> $3::halfvec as dist from kn_chunks where account_id = $1 and ${col} is not null order by dist limit 30) x),` : `near as (select null::bigint as id, null::bigint as r, null::float8 as sim where false),`;
@@ -460,7 +481,7 @@ const ONLY_RULE = `The user asked for an answer from their own files only. Answe
 const TABLE_RULE = `Some FILES come from spreadsheets kept as tables, listed in TABLES with their columns. To count, add up, average, find the smallest or largest, or list rows, reply with only [[table:<T1>|<count|sum|avg|min|max|list>|<column, or * to count rows>|<filters>]] and nothing else, for example [[table:T1|sum|Spend|Active=Yes]] or [[table:T2|count|*|Region~north;Spend>1000]]. Filters are optional, joined with ";", each a column, then =, !=, ~ (contains), >, <, >= or <=, then a value. At most three tags. You will then be given the results; answer from them.`;
 
 /** Which search numbers made the similarities: Cloudflare's, the device's (a different scale), or none (words only). */
-type Scale = 'cloudflare' | 'device' | null;
+type Scale = 'cloudflare' | 'device' | 'own' | null;
 interface AnyHit { fileId?: string; piece?: number | string; file: string; heading: string | null; text: string; collection: string; similarity: number; taught?: boolean }
 interface Gate { only: boolean; usable: (collection: string) => boolean }
 /** Whether this question may use Knowledge at all, and which collections count for it. */
@@ -474,7 +495,7 @@ function gate(p: KnowledgePrefs, text: string): Gate | null {
 /** The pieces close enough to offer, and whether the closest should lead. */
 function pick<H extends AnyHit>(hits: H[], g: Gate, scale: Scale, situation = false): { close: H[]; lead: boolean } {
   const mine = hits.filter((h) => g.usable(h.collection));
-  const [similar, leadAt] = scale === 'device' ? [KN_DEVICE_SIMILAR, KN_DEVICE_LEAD] : [KN_SIMILAR, KN_LEAD];
+  const [similar, leadAt] = scale === 'device' ? [KN_DEVICE_SIMILAR, KN_DEVICE_LEAD] : scale === 'own' ? [KN_OWN_SIMILAR, KN_OWN_LEAD] : [KN_SIMILAR, KN_LEAD];
   // Close enough to offer: by meaning when there are search numbers, otherwise the best word matches.
   let close = scale ? mine.filter((h) => h.similarity >= similar) : mine.slice(0, situation ? 12 : 4);
   // A situational question gathers the rules from different files: up to 8 pieces, at most 2 from any one file.
@@ -539,6 +560,8 @@ async function wholeSections<H extends KnHit>(k: Kdb, account: string, hits: H[]
  *  there's nothing to add, so the answer goes on exactly as it would without Knowledge. */
 export async function knowledgeFor(k: Kdb, env: Pick<Env, 'AI'>, account: string, text: string, how: {
   prefs: KnowledgePrefs; cloudflare: boolean; vector?: unknown; cfVector?: number[] | null;
+  /** The question's numbers from their own key or server, when that's how they search. */
+  ownVector?: number[] | null;
   /** What the person taught for questions like this, the piece they just said is the one, and whether to ask. */
   taught?: { yes: KnTarget | null; no: KnTarget[] }; pin?: KnTarget | null; ask?: boolean;
   /** A situational question: more pieces, from different files, each with its whole section. */
@@ -548,9 +571,10 @@ export async function knowledgeFor(k: Kdb, env: Pick<Env, 'AI'>, account: string
   if (!p.files) return null; // no files kept: Knowledge is never asked
   const g = gate(p, text);
   if (!g) return null;
-  const vector = how.cloudflare ? null : deviceVector(how.vector);
-  const scale: Scale = how.cloudflare ? 'cloudflare' : vector ? 'device' : null;
-  let hits: (KnHit & { taught?: boolean })[] = await search(k, env, account, text, { cloudflare: how.cloudflare, cfVector: how.cfVector, ...(vector ? { vector } : {}), limit: how.situation ? 16 : 10 });
+  const own = how.ownVector?.length ? how.ownVector : null;
+  const vector = how.cloudflare || own ? null : deviceVector(how.vector);
+  const scale: Scale = own ? 'own' : how.cloudflare ? 'cloudflare' : vector ? 'device' : null;
+  let hits: (KnHit & { taught?: boolean })[] = await search(k, env, account, text, { cloudflare: how.cloudflare && !own, cfVector: how.cfVector, ownVector: own, ...(vector ? { vector } : {}), limit: how.situation ? 16 : 10 });
   // "Not this one": that piece isn't offered for questions like this again.
   const no = how.taught?.no ?? [];
   hits = hits.filter((h) => !no.some((t) => t.fileId === h.fileId && (t.piece === String(h.piece) || (!!t.heading && t.heading === h.heading))));
