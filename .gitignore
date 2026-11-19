@@ -7,3 +7,4 @@ apps/api/public/
 .env.*
 *.local
 .DS_Store
+eval-knowledge-report.md

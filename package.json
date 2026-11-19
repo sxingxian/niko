@@ -15,7 +15,8 @@
     "migrate": "node scripts/migrate.mjs",
     "release": "npm test && npm run migrate && node scripts/deploy-worker.mjs",
     "user": "node scripts/user.mjs",
-    "test": "node tests/run.mjs"
+    "test": "node tests/run.mjs",
+    "eval:knowledge": "node scripts/eval-knowledge.mjs"
   },
   "devDependencies": {
     "@neondatabase/serverless": "^1.0.0",

@@ -80,7 +80,7 @@ globalThis.fetch = async (input, init = {}) => {
   }
   if (u.hostname === 'api.groq.com' || u.hostname === 'openrouter.ai') {
     const auth = init.headers?.authorization ?? init.headers?.Authorization ?? '';
-    aiCalls.push({ host: u.hostname, path: u.pathname, auth });
+    aiCalls.push({ host: u.hostname, path: u.pathname, auth, body: typeof init.body === 'string' ? init.body : '' });
     if (u.pathname === '/api/v1/key') return Response.json({ data: { usage_monthly: 25.5, limit: 100, limit_remaining: 74.5, limit_reset: 'monthly' } });
     return Response.json({ choices: [{ message: { content: u.hostname === 'api.groq.com' ? 'From the included key.' : 'From my own key.' } }] });
   }
@@ -1530,6 +1530,24 @@ await ok('a service out of its daily quota is skipped until it resets; the skip 
   r = await nur.post('/chat', { message: 'second', tz: 0 });
   assert.equal(r.status, 200);
   assert.deepEqual(aiCalls.map((c) => c.host), ['api.groq.com'], 'the used-up service is not asked again');
+});
+
+await ok('release check: with Knowledge files on but nothing kept, everyday questions reach the AI exactly as with it off', async () => {
+  const nur = new Browser();
+  assert.equal((await nur.post('/auth/sign-in', { email: 'nur@example.com', password: PW })).status, 200);
+  const nurU = await user('nur@example.com');
+  // What the AI is told (the system prompt): the conversation so far is compared separately, below.
+  const sent = async (message) => { aiCalls.length = 0; const r = await nur.post('/chat', { message, tz: 0 }); assert.equal(r.status, 200, JSON.stringify(r.data)); const last = aiCalls.filter((c) => c.host === 'api.groq.com').at(-1); assert.ok(last, 'the AI was asked'); const m = JSON.parse(last.body).messages; return { system: m[0].content.replace(/\d{1,2}:\d{2}(:\d{2})?\s?(am|pm)?/gi, 'T'), last: m.at(-1) }; };
+  const everyday = ['What’s on my calendar today?', 'Write a short thank-you note to the team.', 'How far is the Moon?'];
+  const before = [];
+  for (const m of everyday) before.push(await sent(m));
+  assert.equal((await admin.put(`/admin/ai/users/${nurU.id}`, { access: { ...(nurU.ai_access ?? {}), 'kn:files': true } })).status, 200);
+  for (let i = 0; i < everyday.length; i++) {
+    const now = await sent(everyday[i]);
+    assert.equal(now.system, before[i].system, everyday[i]);
+    assert.deepEqual(now.last, { role: 'user', content: everyday[i] }, 'the question goes as it was asked, with nothing added');
+  }
+  assert.equal((await admin.put(`/admin/ai/users/${nurU.id}`, { access: nurU.ai_access ?? {} })).status, 200);
 });
 
 await ok('the admin can add a person’s own key for a source; theirs replaces it, and turning the source off keeps the admin’s', async () => {

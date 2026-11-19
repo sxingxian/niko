@@ -93,6 +93,16 @@ export const stripChoicesTag = (reply: string) => reply.replace(new RegExp(CHOIC
 
 // ---------------------------------------------------------------- what may be saved
 export const contentWords = (text: string) => [...new Set((text.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((w) => w.length > 2 || /\p{N}/u.test(w) || /[\p{Script=Han}\p{Script=Hangul}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(w)))];
+/** Words that say little about what a question is about. Word search in Niko's database ranks by how many of the
+ *  question's words a piece has, with no sense of how rare a word is, so "the", "how" and "much" would otherwise count as
+ *  much as "blender". The browser's own search weighs rare words already. */
+const COMMON_WORDS = new Set(('the and for are but not you your yours our ours his her its they them their this that these those '
+  + 'what when where which who whom whose why how much many does did doing done was were been being have has had having '
+  + 'can could would should will shall may might must any all some each every from into onto with without about above below '
+  + 'than then there here also just only very too out off over under again more most other such own same both few nor '
+  + 'let get got please tell know show give want need like one way').split(' '));
+/** The words to search for: the question's content words without the common ones (all of them, if that leaves none). */
+export const searchWords = (text: string) => { const all = contentWords(text); const some = all.filter((w) => !COMMON_WORDS.has(w)); return some.length ? some : all; };
 const inText = (part: string, text: string) => {
   const ws = contentWords(part);
   if (!ws.length) return text.toLowerCase().includes(part.toLowerCase().trim());
