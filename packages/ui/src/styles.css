@@ -47,6 +47,8 @@ html { -webkit-tap-highlight-color: transparent; }
 .ib:hover { background: rgba(255,255,255,.14); color: #fff; }
 .ib.on { background: #fff; color: #05070d; }
 .ib.line { border-color: rgba(255,255,255,.35); }
+/* A glass icon button keeps the glass outline, like the chips beside it. */
+.ib.g { border-color: var(--line); }
 .ic { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 
 .pri { height: 52px; padding: 0 26px; border-radius: 999px; border: 0; background: #fff; color: #05070d; font-size: 16px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 10px; text-decoration: none; }
