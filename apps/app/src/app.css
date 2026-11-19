@@ -1183,3 +1183,34 @@ button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; 
 @media (prefers-reduced-motion: reduce) { .vm-chip { animation: none; } }
 .vm-learned { margin: 12px 0 0; padding-left: 14px; border-left: 2px solid rgba(168,240,198,.8); font: 400 14px/1.45 system-ui, sans-serif; color: #c9f5da; }
 .vm-banner .pri, .vm-banner .sec { height: 44px; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+
+/* ---------------------------------------------------------------- Engine · Data sources */
+.eng-link { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 24px; border-radius: 22px; color: #fff; text-decoration: none; box-shadow: none; }
+.eng-link:hover { background: rgba(255,255,255,.09); }
+.eng-link-t { display: flex; flex-direction: column; gap: 4px; }
+.eng-link-t .k { color: #fff; }
+.eng-link-t .hint { margin: 0; }
+.dsp-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.dsp-list li { display: grid; grid-template-columns: minmax(0, 1fr) 90px 150px 90px auto; gap: 14px; align-items: center; padding: 14px 4px; border-top: 1px solid rgba(255,255,255,.08); }
+.dsp-list li.two { grid-template-columns: minmax(0, 1fr) auto; }
+.dsp-t { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.dsp-t b { font-weight: 500; font-size: 15px; }
+.dsp-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.dsp-from { color: #e6eaf1; }
+.dsp-state { display: flex; align-items: center; gap: 8px; font: 400 13px system-ui, sans-serif; color: #a8f0c6; }
+.dsp-state i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
+.dsp-state.off { color: #ffd38a; }
+.dsp-b { height: 38px; font-size: 13px; padding: 0 16px; }
+.dsp-add { flex-direction: row; align-items: center; justify-content: space-between; gap: 20px; }
+.dsp-add .dsp-b { height: 44px; font-size: 14px; }
+.dsp-empty { display: flex; flex-direction: column; gap: 6px; padding: 18px; border-radius: 16px; border: 1px dashed rgba(255,255,255,.25); }
+.dsp-empty b { font-weight: 500; font-size: 16px; }
+.dsp-danger { border-color: transparent !important; color: #ff9b9b !important; }
+.ds-hint.dim { color: #8b93a3; font-size: 11px; }
+@media (max-width: 900px) {
+  .dsp-list li { grid-template-columns: minmax(0, 1fr) auto; row-gap: 6px; }
+  .dsp-list li .dsp-tags, .dsp-list li .dsp-from { display: none; }
+  .dsp-list li .dsp-state { grid-column: 1; grid-row: 2; }
+  .dsp-list li .dsp-b { grid-column: 2; grid-row: 1 / span 2; }
+  .dsp-add { flex-direction: column; align-items: stretch; }
+}

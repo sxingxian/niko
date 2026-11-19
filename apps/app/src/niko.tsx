@@ -79,6 +79,8 @@ async function locationPermission(): Promise<PermissionState | 'unknown'> {
 }
 const MODE_WORDS: Record<MapMode | 'fly', string> = { drive: 'by car', transit: 'by public transport', walk: 'on foot', cycle: 'by bike', fly: 'of flying, roughly' };
 
+/** One data-source call an answer used. */
+export interface DataUsed { source: string; action: string; at: number; attribution: string; live: boolean }
 interface NikoState {
   me: Me | null | undefined; // undefined while loading
   refreshMe: () => Promise<void>;
@@ -97,6 +99,8 @@ interface NikoState {
   dismissVoiceChip: () => void;
   /** The answer that came from a "That was me" (and whether it was added to the voiceprint). */
   voiceNote: { for: string; learned: boolean } | null;
+  /** Data sources an answer came from (source, what was asked, when), for the answer it came with. */
+  dataUsed: { for: string; items: DataUsed[] } | null;
   /** On for this account, but this device has no voiceprint yet (Niko answers anyone here until it's set up). */
   voiceBanner: boolean;
   /** For the top bar: "Only you", or "Not set up here"; null when the setting is off. */
@@ -243,6 +247,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [weather, setWeather] = useState<{ for: string; card: WeatherCard } | null>(null);
   const [knowledge, setKnowledge] = useState<{ for: string; k: KnowledgeAnswer } | null>(null);
   const [voiceChip, setVoiceChip] = useState(false);
+  const [dataUsed, setDataUsed] = useState<{ for: string; items: DataUsed[] } | null>(null);
   const [voiceNote, setVoiceNote] = useState<{ for: string; learned: boolean } | null>(null);
   const [bannerLater, setBannerLater] = useState(() => { try { return sessionStorage.getItem('niko.voice.later') === '1'; } catch { return false; } });
   const [nextStep, setNextStep] = useState<FollowUp | null>(null);
@@ -751,7 +756,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // Roughly where the user is, for a situation, only when they shared it for a map in the last few minutes.
       const mh = mapHere.current, near = mh && Date.now() - mh.at < 5 * 60_000 ? { lat: Math.round(mh.lat * 100) / 100, lon: Math.round(mh.lng * 100) / 100 } : undefined;
       const body = { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}), ...(knowledge ? { knowledge } : {}), ...(opts.pin ? { pin: opts.pin } : {}), ...(quietRef.current ? { quiet: true } : {}), ...(near && meRef.current?.knowledge?.situations ? { near } : {}) };
-      const r = await chatWithTables<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer; learned?: { id: string; kind: string; said: string; means: string }[]; learn?: unknown; choices?: string[]; judge?: boolean }>(meRef.current, body).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
+      const r = await chatWithTables<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer; learned?: { id: string; kind: string; said: string; means: string }[]; learn?: unknown; choices?: string[]; judge?: boolean; data?: DataUsed[] }>(meRef.current, body).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
       const kept = await keepDeviceNotes(meRef.current, r.learn);
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
       // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
@@ -792,7 +797,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         : learnedNow.length ? { for: answer, question: text, kind: 'learned', items: learnedNow, device: device && kept.length > 0 }
         : r.choices?.length ? { for: answer, question: text, kind: 'choices', options: r.choices }
         : r.judge ? { for: answer, question: text, kind: 'judge' } : null);
-      setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setVoiceNote(vmNext.current ? { for: answer, learned: vmNext.current.learned } : null); vmNext.current = null; setReply(answer); say(answer, 0);
+      setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setVoiceNote(vmNext.current ? { for: answer, learned: vmNext.current.learned } : null); vmNext.current = null; setDataUsed(r.data?.length ? { for: answer, items: r.data } : null); setReply(answer); say(answer, 0);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) goSelf('/' + item.view); }
       else if (asked) goSelf(asked);
       else if (page && handler.current?.(page, true)) { /* the list on screen turned its page, quietly: Niko is speaking */ }
@@ -1070,7 +1075,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     if (was === path || !/^\/(inbox|calendar|notes)$/.test(p) || !meRef.current) return;
     const mine = Date.now() - selfNav.current < 2000; // Niko opened it and may be saying so: that line finishes
     askId.current++; inFlight.current = 0; failStreak.current = 0;
-    last.current = null; setResumable(null); setReply(null); setWeather(null); setKnowledge(null); setNextStep(null);
+    last.current = null; setResumable(null); setReply(null); setWeather(null); setKnowledge(null); setDataUsed(null); setNextStep(null);
     mapCtl.current?.abort(); mapRef.current = null; setMap(null); setPictureId(null);
     if (!mine) {
       stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; hearing.current++; active.current = false; unmuteMic();
@@ -1224,7 +1229,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     if (picCtl.current) { const c = picCtl.current; picCtl.current = null; c.abort(); }
     mapCtl.current?.abort(); mapRef.current = null; setMap(null);
     if (locationWait.current) { const w = locationWait.current; locationWait.current = null; w(false); }
-    setPictureId(null); setReply(null); setWeather(null); setKnowledge(null); setNextStep(null); setResumable(null); setPendingOpen(null); setBrief(null); last.current = null;
+    setPictureId(null); setReply(null); setWeather(null); setKnowledge(null); setDataUsed(null); setNextStep(null); setResumable(null); setPendingOpen(null); setBrief(null); last.current = null;
     setFullscreenAsk(false); setLockAsk(null); afterUnlock.current = null;
     if (here.current !== '/') navigate('/');
     idle();
@@ -1343,6 +1348,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     rest: idle,
     carryOn: () => (wantRec.current ? listenForFollowUp() : idle()),
     voiceProblem,
+    dataUsed,
     voiceChip, thatWasMe: thatWasMeFn, dismissVoiceChip: hideVoiceChip, voiceNote,
     voiceBanner: vmOn && !!vmHere && !vmHere.setUp && !bannerLater,
     voiceMode: !vmOn || !vmHere ? null : vmHere.setUp ? 'you' : 'not-here',
@@ -1372,7 +1378,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     unlock: unlockFn,
     unlockWithPasskey: unlockWithPasskeyFn,
     lockNow: lockNowFn,
-  }), [me, refreshMe, mode, label, line, reply, weather, knowledge, nextStep, quiet, habitAsk, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk, locked, lockAsk, voiceChip, voiceNote, vmOn, vmHere, bannerLater]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [me, refreshMe, mode, label, line, reply, weather, knowledge, nextStep, quiet, habitAsk, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk, locked, lockAsk, voiceChip, voiceNote, dataUsed, vmOn, vmHere, bannerLater]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

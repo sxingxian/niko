@@ -17,6 +17,7 @@ import { audit, clientIp, endSession, requireAdmin, requireAdminPassword, startS
 import { findUser, registrationMode } from './auth';
 import { includedByUser, nextReset } from '../usage';
 import { setup } from './setup';
+import { adminData } from './adminData';
 import { DEFAULT_DESIGN, DESIGNS, designInfo, designSettingsProblem, isDesign, nextDesignSettings } from '@niko/shared';
 import { DESIGNS_KEY, designSettings, forgetDesigns } from '../designs';
 import { BACKGROUNDS_KEY, backgroundSettings, forgetBackgrounds } from '../backgrounds';
@@ -465,6 +466,9 @@ admin.put('/registration', requireAdmin, async (c) => {
   await audit(c, 'registration.mode', { mode }, c.get('user').id);
   return c.json({ ok: true, mode });
 });
+
+// Data sources (Admin · Data sources): see adminData.ts.
+admin.route('/data', adminData);
 
 // ---------------------------------------------------------------- AI options (Engine and Voice screens)
 // The default for everyone, and each account's changes to it. Options that are off are hidden from that account and

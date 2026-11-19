@@ -8,6 +8,7 @@ export * from './speechtext';
 export * from './knowledge';
 export * from './knowledgeDevice';
 export * from './learned';
+export * from './dataSources';
 import { MAP_PROVIDERS, mapPreset, type MapProvider, type MapSource } from './maps';
 
 export type ProviderGroup = 'mail' | 'calendar' | 'notes' | 'automation' | 'messaging' | 'weather' | 'ai';
@@ -438,6 +439,8 @@ export interface Me {
   appearance: Appearance; engine: EnginePrefs; permissions: Permissions;
   /** A weather service is connected, so weather questions may carry the device's rounded location. */
   weather?: boolean;
+  /** Engine · Data sources is shown: the plan includes a source or lets them add their own. */
+  data?: boolean;
   /** AI options the admin has turned off for this account (hidden here, refused by the server). */
   aiOff?: string[];
   /** The admin's limits for new items on Home, as they apply to this account. */

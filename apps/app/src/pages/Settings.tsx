@@ -992,6 +992,8 @@ export function Engine() {
       <NoteLine note={note} />
       {usage && <AccountInfo usage={usage} />}
       {usage && <IncludedCard usage={usage} kinds={['brain', 'image', 'map']} other={{ to: '/voice', label: 'Voice and listening are on the Voice page' }} />}
+      {/* Shown only when the plan includes a data source or lets them add their own. */}
+      {me?.data && <Link to="/engine/data" className="g eng-link"><span className="eng-link-t"><span className="k">Data sources</span><span className="hint">Data sites Niko can answer from, such as air quality now or your company’s orders.</span></span><span aria-hidden="true">→</span></Link>}
       <section className="g eng-card wide" aria-label="Brain">
         <span className="k" style={{ paddingBottom: 6 }}>Brain · Niko uses in this order</span>
         <p className="hint" style={{ paddingBottom: 8 }}>Niko answers with the first one that works. When one reaches its usage limit, refuses its key, stops answering or what’s included this month runs out, Niko moves to the next straight away.</p>
