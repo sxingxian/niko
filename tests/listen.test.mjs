@@ -47,11 +47,11 @@ ok('steady noise that seemed to start (a fan, traffic) ends as noise and sends n
   assert.ok(!out.includes('end'), 'not sent');
   assert.ok(out.includes('noise') || !out.includes('start'));
 });
-ok('it ends after a pause of about 1.3 seconds', () => {
+ok('it ends after a pause of about 1.1 seconds', () => {
   const out = play([[0.002, 300], [0.03, 600], [0.002, 3000]]);
   const quietFrames = at(out, 'end') - (Math.ceil(300 / F) + Math.ceil(600 / F)) + 1;
   void quietFrames;
-  assert.ok(quietFrames * F >= 1300 && quietFrames * F <= 1400, `${quietFrames * F} ms`);
+  assert.ok(quietFrames * F >= 1100 && quietFrames * F <= 1250, `${quietFrames * F} ms`);
 });
 ok('listening nobody asked for (after an answer) ignores a video or talk across the room, but not someone speaking to it', () => {
   const far = []; for (let i = 0; i < 10; i++) far.push([0.009, 200], [0.0025, 80]);
@@ -59,5 +59,19 @@ ok('listening nobody asked for (after an answer) ignores a video or talk across 
   assert.ok(!play([[0.0025, 400], ...far, [0.0025, 1600]], { strict: true }).includes('start'), 'unasked, it is not');
   const near = []; for (let i = 0; i < 6; i++) near.push([0.04, 250], [0.004, 80]);
   assert.ok(play([[0.0025, 400], ...near, [0.0025, 1600]], { strict: true }).includes('start'), 'someone talking to it is');
+});
+ok('typing does not start it, asked or not', () => {
+  const keys = []; for (let i = 0; i < 25; i++) keys.push([0.04, 30], [0.002, 120]);
+  assert.equal(at(play([[0.002, 400], ...keys]), 'start'), -1, 'after a tap');
+  assert.equal(at(play([[0.002, 400], ...keys], { strict: true }), 'start'), -1, 'after an answer');
+});
+ok('typing or a TV after they stop talking doesn’t keep it listening', () => {
+  const keys = []; for (let i = 0; i < 30; i++) keys.push([0.04, 30], [0.002, 120]);
+  let out = play([[0.002, 400], [0.03, 1200], ...keys]);
+  const speechEnd = Math.ceil(400 / F) + Math.ceil(1200 / F);
+  assert.ok(at(out, 'end') > 0 && (at(out, 'end') - speechEnd) * F <= 1300, `typing: ended ${(at(out, 'end') - speechEnd) * F} ms after`);
+  const tv = []; for (let i = 0; i < 20; i++) tv.push([0.0055, 200], [0.003, 100]);
+  out = play([[0.002, 400], [0.03, 1200], ...tv]);
+  assert.ok(at(out, 'end') > 0 && (at(out, 'end') - speechEnd) * F <= 1300, `TV: ended ${(at(out, 'end') - speechEnd) * F} ms after`);
 });
 console.log(`${pass} listening checks passed`);

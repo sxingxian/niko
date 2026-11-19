@@ -1328,3 +1328,23 @@ a.bt { text-decoration: none; display: inline-flex; align-items: center; justify
 .kn-where-row { display: flex; gap: 8px; align-items: center; }
 .kn-where-row .in { flex: 1; min-width: 0; height: 42px; border-radius: 12px; font-size: 14px; }
 .srow-hint .no, .kn-where .no { color: #ffb3a8; }
+
+/* Talking: the mic sends straight away. Typing: the mic is paused (a tap still talks). */
+.micbtn.send { background: #fff; color: #05060a; box-shadow: 0 0 40px rgba(255, 255, 255, .3); }
+.micbtn.paused { background: rgba(255, 255, 255, .12); color: #c3cad6; box-shadow: none; border: 1px solid rgba(255, 255, 255, .3); }
+/* Listening for a follow-up after an answer: runs down until Niko stops listening. */
+.follow-bar { display: block; width: 180px; max-width: 60%; height: 3px; margin: 10px auto 0; border-radius: 999px; background: rgba(255, 255, 255, .12); overflow: hidden; }
+.follow-bar i { display: block; height: 100%; background: hsl(var(--h) 100% 78%); transform-origin: left; animation: followdown linear forwards; }
+@keyframes followdown { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+@media (prefers-reduced-motion: reduce) { .follow-bar i { animation: none; } }
+
+/* Near you (public transport questions): the stations and bus stops, nearest first. */
+.near { display: flex; flex-direction: column; gap: 6px; padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px solid rgba(255, 255, 255, .1); }
+.near-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.near-list li { display: flex; gap: 10px; align-items: flex-start; }
+.near-pill { flex: none; font: 500 10px var(--mono, 'JetBrains Mono', monospace); letter-spacing: .08em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .3); margin-top: 2px; }
+.near-pill.rail { border-color: #4bd18b; color: #a8f0c6; }
+.near-pill.bus { border-color: #9fdcf3; color: #cdeefb; }
+.near-t { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.near-t b { font-weight: 500; font-size: 14px; }
+.near-t span { font-size: 12px; color: var(--sub, #c3cad6); }

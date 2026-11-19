@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, sessions, users, type Db } from '@niko/db';
-import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, type MapAskMode, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource, type WeatherCard, plainText, stripTags, cleanKnowledgePrefs, knowledgeAccess, stripTableTags, tableTags, isRemotePlace, knLearnPlaceOf, knPlaceOf, knRemoteOf, knSearchOf, cleanDeviceKnowledge, cleanTableResults, cleanTarget, learnTags, learnAllowed, stripLearnTags, choicesTag, stripChoicesTag, situationOf, judgeTag, stripJudgeTag, type KnHow, type KnLearnAsk, dataBlock, dataTags, stripDataTags, DATA_RULE, LIVE_RULE, liveOrder, placesBlock } from '@niko/shared';
+import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, isTransportQuestion, MAP_ENTRY, MAP_MODES, type MapAskMode, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource, type WeatherCard, plainText, stripTags, cleanKnowledgePrefs, knowledgeAccess, stripTableTags, tableTags, isRemotePlace, knLearnPlaceOf, knPlaceOf, knRemoteOf, knSearchOf, cleanDeviceKnowledge, cleanTableResults, cleanTarget, learnTags, learnAllowed, stripLearnTags, choicesTag, stripChoicesTag, situationOf, judgeTag, stripJudgeTag, type KnHow, type KnLearnAsk, dataBlock, dataTags, stripDataTags, DATA_RULE, LIVE_RULE, liveOrder, placesBlock } from '@niko/shared';
 import { accessState, APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -15,6 +15,7 @@ import { cleanWhere, forecastCard, forecastText, geocode, setOpenMeteoKey, strip
 import { audioProblem, defaultHearLabel, hear, hearServerKey, HEAR_PROVIDERS_LIST, hearKeyInfo, hearKeyProblem, hearKeys, loadHearKeys, MAX_AUDIO_BYTES, saveHearKeys, type HearKey } from '../hears';
 import { NOT_ON_ACCOUNT, offFor } from '../access';
 import { forgetLearnedInNiko } from '../knLearnOff';
+import { cleanStopsNear, nearBlock, stopsNear } from '../transitNear';
 import { diffGlance, limitsFor } from '../glance';
 import { Declined, defaultImageLabel, serverKey, IMAGE_PROVIDERS_LIST, imageKeyInfo, imageKeyProblem, imageKeys, loadImageKeys, MAX_PROMPT, paint, saveImageKeys, type ImageKey } from '../images';
 import { defaultVoiceLabel, Gone, listVoices, loadVoiceKeys, voiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
@@ -904,7 +905,7 @@ function screenText(v: unknown): string {
   return `<SCREEN>\nRoute from ${clean(m.from, 120) || 'the user’s location'} to ${clean(m.to, 120)} by ${mode}: about ${mins} min, ${km.toFixed(1)} km.${lines.length ? `\nSteps:\n${lines.join('\n')}` : ''}\n</SCREEN>\n`;
 }
 app.post('/chat', async (c) => {
-  const b = await c.req.json<{ message?: string; tz?: number; purpose?: string; where?: unknown; screen?: unknown; provider?: string; knowledge?: unknown; tableResults?: unknown; pin?: unknown; quiet?: unknown; near?: unknown; country?: unknown; here?: unknown }>();
+  const b = await c.req.json<{ message?: string; tz?: number; purpose?: string; where?: unknown; screen?: unknown; provider?: string; knowledge?: unknown; tableResults?: unknown; pin?: unknown; quiet?: unknown; near?: unknown; country?: unknown; here?: unknown; stops?: unknown }>();
   const text = String(b.message ?? '').trim().slice(0, b.purpose === 'draft' ? 5000 : 2000); // a draft being rewritten is sent along with the request
   // A draft for the workspace is a one-off: it neither sees nor joins the spoken conversation.
   const oneOff = b.purpose === 'draft';
@@ -1006,7 +1007,11 @@ app.post('/chat', async (c) => {
     ds.sources = ds.sources.filter((x) => x.row.useAs !== 'live' || order.list.includes(x.row.id));
     liveTags = order.list.map((id) => ds.sources.find((x) => x.row.id === id)?.tag).filter((t): t is string => !!t);
   }
-  const liveBlock = lv ? `${liveTags.length ? `\n<LIVE ORDER${liveFrom ? ` for ${liveFrom}` : ''}>\n${liveTags.join(', then ')}, then map timetables (not live)\n</LIVE ORDER>` : ''}${placesBlock(lv.places) ? `\n${placesBlock(lv.places)}` : ''}` : '';
+  // A public transport question: the stops and stations near where the app says the user is (to about 110 m, used only
+  // for this look-up), so buses and the MRT can be given together.
+  const stopsHere = !oneOff && isTransportQuestion(text) ? cleanStopsNear(b.stops) : null;
+  const nearStops = stopsHere ? await stopsNear(stopsHere) : [];
+  const liveBlock = `${lv ? `${liveTags.length ? `\n<LIVE ORDER${liveFrom ? ` for ${liveFrom}` : ''}>\n${liveTags.join(', ')} (this order only between services that answer the same thing), then map timetables (not live)\n</LIVE ORDER>` : ''}${placesBlock(lv.places) ? `\n${placesBlock(lv.places)}` : ''}` : ''}${nearStops.length ? `\n${nearBlock(nearStops)}` : ''}`;
   const dsBlock = dataBlock(ds.sources);
   const onScreen = oneOff ? '' : screenText(b.screen);
   const msgs = [
@@ -1117,7 +1122,7 @@ app.post('/chat', async (c) => {
   const knCheck = kn && !kn.device && kn.fileIds.length && knRemoteOf(knPrefs, knAccess) ? kn.fileIds.slice(0, 10) : [];
   const knowledge = kn && !oneOff && kn.sources.length ? { lead: kn.lead, only: kn.only, taught: kn.taught, ...(kn.ask ? { ask: kn.ask } : {}), ...(knCheck.length ? { check: knCheck } : {}), sources: kn.sources.slice(0, 4).map(({ n, file, heading, collection }) => ({ n, file, heading, collection })) } : null;
   return c.json({ reply, engine: used, switched: used !== first, ...(oneOff ? {} : { brief }), ...(card ? { weather: card } : {}), ...(knowledge ? { knowledge } : {}),
-    ...(learnedNow.length ? { learned: learnedNow } : {}), ...(toLearn.length && notesHere ? { learn: toLearn } : {}), ...(learnedNow.length && isRemotePlace(learnPlace) ? { learnedCopy: true } : {}), ...(choices.length && !oneOff ? { choices } : {}), ...(judge ? { judge: true } : {}), ...(situated ? { situation: { people: sit.people } } : {}), ...(dataUsed.length && !oneOff ? { data: dataUsed } : {}) });
+    ...(learnedNow.length ? { learned: learnedNow } : {}), ...(toLearn.length && notesHere ? { learn: toLearn } : {}), ...(learnedNow.length && isRemotePlace(learnPlace) ? { learnedCopy: true } : {}), ...(choices.length && !oneOff ? { choices } : {}), ...(judge ? { judge: true } : {}), ...(situated ? { situation: { people: sit.people } } : {}), ...(nearStops.length && !oneOff ? { near: nearStops } : {}), ...(dataUsed.length && !oneOff ? { data: dataUsed } : {}) });
 });
 
 // ---------------------------------------------------------------- sending, with the countdown rule enforced here

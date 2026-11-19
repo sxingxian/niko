@@ -481,6 +481,11 @@ export interface Me {
 }
 
 /** Whether a message is about the weather. Only then is the device's location asked for and sent. */
+/** A question about public transport near the user (a bus, the MRT, a train, a stop or a station), for which the app
+ *  sends where it is, to about 110 m, so Niko can name the stops and stations nearby. */
+export function isTransportQuestion(text: string): boolean {
+  return /\b(bus(es)?|mrt|lrt|metro|subway|tube|trains?|stations?|(bus|my|nearest|next) stops?|public transport|transit|arriv(al|als|ing|e))\b/i.test(text);
+}
 export function isWeatherQuestion(text: string): boolean {
   return /\b(weather|forecast|rain(ing|y)?|drizzl(e|ing|y)|showers?|storms?|stormy|thunder(storms?)?|snow(ing)?|sunny|sunshine|cloudy|umbrella|temperature|degrees|hot|cold|warm|chilly|humid(ity)?|wind(y)?|uv|heatwave|typhoon|monsoon|haze|fog(gy)?)\b/i.test(text);
 }
