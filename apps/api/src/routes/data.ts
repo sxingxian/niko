@@ -8,7 +8,9 @@ import { cleanActions, cleanDataPrefs, DATA_LIMITS, sampleValues, type DataActio
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
 import { seal } from '../lib/crypto';
-import { cleanInput, DataProblem, dataCalls, runAction, sourcesFor, type SourceInput, type SourceRow } from '../datasources';
+import { cleanInput, DataProblem, dataCalls, runAction, saveWeather, sourcesFor, weatherFor, type SourceInput, type SourceRow } from '../datasources';
+import { credentials } from '../providers';
+import { geocode } from '../weather';
 
 export const data = new Hono<AppEnv>();
 type C = Context<AppEnv>;
@@ -131,4 +133,26 @@ data.post('/test', async (c) => {
     if (!src) return c.json({ error: 'No such source.' }, 404);
     return c.json({ results: await testActions((a) => runAction(c.env, db, u.id, src.row, a, sampleValues(a), 0, { test: true }), src.info.actions) });
   } catch (e) { return fail(c, e); }
+});
+
+// ---------------------------------------------------------------- Connections · Weather
+const legacy = (c: C) => () => credentials(c.env, c.get('db'), c.get('user').id, 'open-meteo') as Promise<{ home?: string; units?: string } | null>;
+data.get('/weather', async (c) => c.json(await weatherFor(c.env, c.get('db'), c.get('user'), legacy(c))));
+/** Saves the order, which sources are on, the home place (checked now), units and location. */
+data.put('/weather', async (c) => {
+  const b = await c.req.json<{ order?: unknown; off?: unknown; home?: unknown; units?: unknown; location?: unknown }>().catch(() => ({} as Record<string, unknown>));
+  const u = c.get('user'), db = c.get('db');
+  const now = await weatherFor(c.env, db, u, legacy(c));
+  const ids = now.list.map((x) => x.id);
+  const pick = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && ids.includes(x)) : undefined);
+  let home = typeof b.home === 'string' ? b.home.replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 120) : now.home;
+  if (home && home !== now.home) {
+    let place;
+    try { place = await geocode(home); } catch { return c.json({ error: 'The weather service couldn’t be reached to check the place. Try again in a moment.' }, 502); }
+    if (!place) return c.json({ error: `No place called “${home}” was found. Try a city name, such as Singapore or Paris, France.` }, 400);
+    home = place.name;
+  }
+  const order = pick(b.order) ?? now.list.map((x) => x.id);
+  await saveWeather(db, u.id, { order: [...order, ...ids.filter((x) => !order.includes(x))], off: pick(b.off) ?? now.list.filter((x) => !x.on).map((x) => x.id), home, units: b.units === 'F' ? 'F' : b.units === 'C' ? 'C' : now.units, location: typeof b.location === 'boolean' ? b.location : now.location });
+  return c.json(await weatherFor(c.env, db, u));
 });

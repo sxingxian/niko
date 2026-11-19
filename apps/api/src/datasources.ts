@@ -2,9 +2,9 @@
 // action with every value checked, a short shared cache for answers that hold nothing personal, and the monthly number
 // of calls. Nothing is built in: a fresh install has no sources until the admin or a person adds one.
 import { and, eq, isNull, or, sql } from 'drizzle-orm';
-import { appSettings, dataSourceKeys, dataSources, usageCounts, type Db } from '@niko/db';
+import { appSettings, dataSourceKeys, dataSources, usageCounts, users, type Db } from '@niko/db';
 import {
-  actionUrl, checkValues, cleanActions, cleanBaseUrl, cleanDataAccess, cleanDataDefaults, cleanDataPrefs, dataAllowed, DATA_CACHE_S, DATA_LIMITS,
+  actionUrl, checkValues, cleanActions, cleanWeatherPrefs, OPEN_METEO, weatherOrder, type WeatherPrefs, cleanBaseUrl, cleanDataAccess, cleanDataDefaults, cleanDataPrefs, dataAllowed, DATA_CACHE_S, DATA_LIMITS,
   resultText, type DataAction, type DataAuth, type DataDefaults, type DataKeyMode, type DataOffer, type DataSourceInfo, type DataUse,
 } from '@niko/shared';
 import type { Env } from './env';
@@ -82,7 +82,7 @@ export async function cleanInput(env: Env, b: SourceInput, opts: { admin: boolea
   let keyEnc: string | null = opts.before && !moved ? opts.before.keyEnc : null;
   if (key) keyEnc = await seal(env.ENCRYPTION_KEY, key);
   if (auth === 'none' || keyMode === 'own') keyEnc = null;
-  const use: DataUse = b.use === 'live' ? 'live' : 'general';
+  const use: DataUse = b.use === 'live' || b.use === 'weather' ? b.use : 'general';
   const offer: DataOffer = b.offer === 'everyone' || b.offer === 'chosen' ? b.offer : 'nobody';
   return {
     name, useAs: use, baseUrl: base.url, auth, authName, keyMode, keyEnc, actions: actions as unknown as unknown[],
@@ -136,4 +136,40 @@ export async function dataCalls(db: Db, userId?: string): Promise<{ byUser: Reco
   const byUser: Record<string, number> = {}, bySource: Record<string, number> = {};
   for (const r of rows) { byUser[r.userId] = (byUser[r.userId] ?? 0) + r.n; bySource[r.entry] = (bySource[r.entry] ?? 0) + r.n; }
   return { byUser, bySource };
+}
+
+// ---------------------------------------------------------------- weather (Connections · Weather)
+export const OM_KEY_SETTING = 'open-meteo-key';
+/** The admin's Open-Meteo paid plan key (customer API), or null for the free API. */
+export async function openMeteoKey(env: Env, db: Db): Promise<string | null> {
+  const row = (await db.select().from(appSettings).where(eq(appSettings.key, OM_KEY_SETTING)).limit(1).catch(() => []))[0];
+  const sealed = (row?.value as { keyEnc?: string } | undefined)?.keyEnc ?? null;
+  return sealed ? await unseal<string>(env.ENCRYPTION_KEY, sealed).catch(() => null) : null;
+}
+export interface WeatherSource { id: string; name: string; badge: 'Built in' | 'Included in your plan' | 'Added by you'; what: string; on: boolean; tag?: string }
+/** This person's weather sources in their order (Open-Meteo if their plan has it, and data sources used as weather that
+ *  they turned on or added), their settings, and which are on. The home place and units of an older Open-Meteo
+ *  connection carry over until the person saves this page. */
+export async function weatherFor(env: Env, db: Db, user: Who, legacy?: () => Promise<{ home?: string; units?: string } | null>) {
+  const s = await sourcesFor(db, user);
+  const d = await dataDefaults(db);
+  const prefs = s.prefs.weather;
+  const wxSources = [...s.offered.filter((x) => x.on && (x.info.auth === 'none' || x.info.hasKey)), ...s.mine.filter((x) => x.on)].filter((x) => x.info.use === 'weather');
+  const available = [...(s.allowed.om ? [OPEN_METEO] : []), ...wxSources.map((x) => x.row.id)];
+  const order = weatherOrder(prefs, available, d.wxFirst);
+  const list: WeatherSource[] = order.map((id) => {
+    const x = wxSources.find((w) => w.row.id === id);
+    return x ? { id, name: x.info.name, badge: x.info.own ? 'Added by you' : 'Included in your plan', what: x.info.actions.filter((a) => a.on).map((a) => a.name).slice(0, 3).join(' · ') || 'Weather', on: !prefs.off.includes(id) }
+      : { id, name: 'Open-Meteo', badge: 'Built in', what: 'Forecasts anywhere · no key · credited to Open-Meteo', on: !prefs.off.includes(id) };
+  });
+  let home = prefs.home, units = prefs.units;
+  if (!prefs.saved && legacy) { const old = await legacy().catch(() => null); if (old) { home = old.home ?? home; units = /^\s*°?f/i.test(old.units ?? '') ? 'F' : units; } }
+  return { list, on: list.filter((x) => x.on).map((x) => x.id), home, units, location: prefs.location, canAdd: s.allowed.own, omInPlan: s.allowed.om };
+}
+export async function saveWeather(db: Db, userId: string, w: Partial<WeatherPrefs>) {
+  const fresh = (await db.select({ p: users.dataPrefs }).from(users).where(eq(users.id, userId)).limit(1))[0];
+  const p = cleanDataPrefs(fresh?.p);
+  const weather = cleanWeatherPrefs({ ...p.weather, ...w, saved: true });
+  await db.update(users).set({ dataPrefs: { ...p, weather } as unknown as Record<string, unknown> }).where(eq(users.id, userId));
+  return weather;
 }
