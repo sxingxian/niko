@@ -5,8 +5,9 @@
 // time it's used. Every call uses the person's own connection, with the narrowest access each app offers: Drive's
 // "only files this app made", OneDrive's own app folder, and in Notion only the pages Niko makes or they pick.
 // Text from these places is the person's own file text: it's searched and quoted as data, never followed.
-import type { Db } from '@niko/db';
-import { parseDelimited, sheetCsv, type KnRemotePlace } from '@niko/shared';
+import { eq } from 'drizzle-orm';
+import { users, type Db } from '@niko/db';
+import { cleanKnowledgePrefs, knFolder, parseDelimited, sheetCsv, type KnRemotePlace } from '@niko/shared';
 import type { Env } from './env';
 import { credentials, getConnection } from './providers';
 
@@ -18,9 +19,11 @@ export interface SheetOut { title: string; columns: string[]; rows: string[][] }
 /** One place, signed in as one person. */
 export interface Remote {
   place: KnRemotePlace;
-  /** Makes Niko's own folder or page there ("Niko Knowledge"), the first time. */
-  makeRoot(): Promise<{ id: string; name: string; url?: string | null }>;
+  /** Makes Niko's own folder or page there ("Niko Knowledge", or the name they chose), the first time. */
+  makeRoot(name?: string): Promise<{ id: string; name: string; url?: string | null }>;
   writeDoc(root: string, title: string, markdown: string): Promise<Written>;
+  /** Rewrites a document in place, where the place can (Obsidian), instead of a new one and the old to the bin. */
+  replaceDoc?(id: string, title: string, markdown: string): Promise<Written>;
   /** Writes a sheet, or (for places that take rows a few at a time) the next rows of it. `done` counts rows written. */
   writeSheet(root: string, sheet: SheetOut, state: { id: string | null; done: number }): Promise<Written & { done: number }>;
   /** The copy's current version, or null when it's gone (deleted or in the bin). */
@@ -35,7 +38,7 @@ export interface Remote {
 export const ROOT_NAME = 'Niko Knowledge';
 const ROOT_NOTE = 'Files Niko keeps for you. Edit them here: Niko reads the changes the next time it uses a file.';
 const MB = 1024 * 1024;
-const PLACE_NAMES: Record<KnRemotePlace, string> = { notion: 'Notion', gdrive: 'Google Drive', onedrive: 'OneDrive', s3: 'your storage' };
+const PLACE_NAMES: Record<KnRemotePlace, string> = { notion: 'Notion', gdrive: 'Google Drive', onedrive: 'OneDrive', s3: 'your storage', obsidian: 'Obsidian' };
 /** A file name that's safe in every place: no slashes or control characters, not too long. */
 export const safeName = (s: string) => s.replace(/[\u0000-\u001f\u007f/\\:*?"<>|#%]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) || 'File';
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -116,10 +119,10 @@ function notion(token: string): Remote {
   };
   return {
     place: 'notion',
-    async makeRoot() {
+    async makeRoot(name = ROOT_NAME) {
       // A private page in their workspace (public integrations may make one there).
-      const p = await json<{ id: string; url?: string }>(await req('/pages', { method: 'POST', json: { parent: { type: 'workspace', workspace: true }, properties: title(ROOT_NAME), children: notionBlocks(ROOT_NOTE) } }));
-      return { id: p.id, name: ROOT_NAME, url: p.url ?? null };
+      const p = await json<{ id: string; url?: string }>(await req('/pages', { method: 'POST', json: { parent: { type: 'workspace', workspace: true }, properties: title(name), children: notionBlocks(ROOT_NOTE) } }));
+      return { id: p.id, name, url: p.url ?? null };
     },
     async writeDoc(root, name, markdown) {
       const blocks = notionBlocks(markdown);
@@ -224,9 +227,9 @@ function gdrive(token: string): Remote {
   const exportAs = async (id: string, type: string) => (await call('gdrive', `${DRIVE}/files/${id}/export?mimeType=${encodeURIComponent(type)}`, token)).text();
   return {
     place: 'gdrive',
-    async makeRoot() {
-      const f = await json<{ id: string; webViewLink?: string }>(await call('gdrive', `${DRIVE}/files?fields=id,webViewLink`, token, { method: 'POST', json: { name: ROOT_NAME, mimeType: G_FOLDER, description: ROOT_NOTE } }));
-      return { id: f.id, name: ROOT_NAME, url: f.webViewLink ?? null };
+    async makeRoot(name = ROOT_NAME) {
+      const f = await json<{ id: string; webViewLink?: string }>(await call('gdrive', `${DRIVE}/files?fields=id,webViewLink`, token, { method: 'POST', json: { name, mimeType: G_FOLDER, description: ROOT_NOTE } }));
+      return { id: f.id, name, url: f.webViewLink ?? null };
     },
     async writeDoc(root, title, markdown) {
       // Google turns Markdown into a Doc with real headings; older behaviour (plain text) is the fallback.
@@ -280,14 +283,14 @@ function onedrive(token: string): Remote {
   };
   return {
     place: 'onedrive',
-    async makeRoot() {
+    async makeRoot(name = ROOT_NAME) {
       const app = await json<{ id: string }>(await call('onedrive', `${GRAPH}/special/approot`, token));
-      const made = await call('onedrive', `${GRAPH}/items/${encodeURIComponent(app.id)}/children`, token, { method: 'POST', json: { name: ROOT_NAME, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' } }).catch(async (e) => {
-        if (e instanceof PlaceError && e.status === 502) return call('onedrive', `${GRAPH}/special/approot:/${encodeURIComponent(ROOT_NAME)}`, token);
+      const made = await call('onedrive', `${GRAPH}/items/${encodeURIComponent(app.id)}/children`, token, { method: 'POST', json: { name, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' } }).catch(async (e) => {
+        if (e instanceof PlaceError && e.status === 502) return call('onedrive', `${GRAPH}/special/approot:/${encodeURIComponent(name)}`, token);
         throw e;
       });
       const f = await json<{ id: string; webUrl?: string }>(made);
-      return { id: f.id, name: ROOT_NAME, url: f.webUrl ?? null };
+      return { id: f.id, name, url: f.webUrl ?? null };
     },
     async writeDoc(root, title, markdown) {
       const f = await put(root, `${safeName(title)}.md`, markdown, 'text/markdown');
@@ -310,11 +313,24 @@ function onedrive(token: string): Remote {
 // ---------------------------------------------------------------- which place
 /** The person's place, signed in with their own connection; null when it isn't connected. */
 export async function remoteFor(env: Env, db: Db, userId: string, place: KnRemotePlace): Promise<Remote | null> {
+  const r = await adapterFor(env, db, userId, place);
+  if (!r) return null;
+  // Niko's own page or folder there gets the name they chose (Where in …), else the default.
+  const folder = await folderFor(db, userId, place);
+  return { ...r, makeRoot: () => r.makeRoot(folder) };
+}
+async function adapterFor(env: Env, db: Db, userId: string, place: KnRemotePlace): Promise<Remote | null> {
   if (place === 's3') { const { storageRemote } = await import('./knStorage'); return storageRemote(env, db, userId); }
+  if (place === 'obsidian') { const { obsidianRemote } = await import('./knObsidian'); return obsidianRemote(env, db, userId); }
   const provider = place === 'gdrive' ? 'google-drive' : place;
   const s = await credentials(env, db, userId, provider).catch(() => null);
   if (!s?.accessToken) return null;
   return place === 'notion' ? notion(s.accessToken) : place === 'gdrive' ? gdrive(s.accessToken) : onedrive(s.accessToken);
+}
+/** The name of Niko's page or folder in a place, from their Knowledge settings. */
+async function folderFor(db: Db, userId: string, place: KnRemotePlace): Promise<string> {
+  const [u] = await db.select({ knowledge: users.knowledge }).from(users).where(eq(users.id, userId)).limit(1).catch(() => [] as { knowledge: unknown }[]);
+  return knFolder(cleanKnowledgePrefs(u?.knowledge), place);
 }
 /** Whether each place is connected, and the account name shown with it. */
 export async function placeConnections(db: Db, userId: string): Promise<Record<KnRemotePlace, { connected: boolean; label: string | null }>> {
@@ -323,6 +339,6 @@ export async function placeConnections(db: Db, userId: string): Promise<Record<K
     const m = (c?.meta ?? {}) as Record<string, unknown>;
     return { connected: !!c, label: c ? String(m.workspace ?? m.label ?? m.teamName ?? '') || null : null };
   };
-  const [notionC, gdriveC, onedriveC, s3C] = await Promise.all([one('notion'), one('google-drive'), one('onedrive'), one('kn-storage')]);
-  return { notion: notionC, gdrive: gdriveC, onedrive: onedriveC, s3: s3C };
+  const [notionC, gdriveC, onedriveC, s3C, obsidianC] = await Promise.all([one('notion'), one('google-drive'), one('onedrive'), one('kn-storage'), one('kn-obsidian')]);
+  return { notion: notionC, gdrive: gdriveC, onedrive: onedriveC, s3: s3C, obsidian: obsidianC };
 }

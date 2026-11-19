@@ -111,6 +111,25 @@ await ok('moving what Niko learned to the device and back; habits said yes to co
   await access({ 'kn:learning': true });
 });
 
+await ok('where in each app: a folder name is cleaned and kept; a Notion page Niko makes gets the chosen name', async () => {
+  let r = await jason.put('/knowledge/places/gdrive/folder', { name: '  Work / Niko  ' });
+  assert.equal(r.status, 200, JSON.stringify(r.data)); assert.equal(r.data.folder, 'Work Niko'); assert.deepEqual(r.data.relocated, { files: 0, learned: false });
+  assert.equal((await jason.get('/knowledge')).data.prefs.folders.gdrive, 'Work Niko');
+  assert.equal((await jason.put('/knowledge/places/gdrive/folder', { name: '...' })).status, 400);
+  assert.equal((await jason.put('/knowledge/places/evil/folder', { name: 'x' })).status, 404);
+  r = await jason.put('/knowledge/places/notion', { page: null, name: 'My Niko notes' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal((await jason.get('/knowledge')).data.prefs.folders.notion, 'My Niko notes');
+  await jason.put('/knowledge/prefs', { learn: true, folders: { notion: 'Sneaky' } });
+  assert.equal((await jason.get('/knowledge')).data.prefs.folders.notion, 'My Niko notes', 'not changed through the settings save');
+  // The default name isn't stored; a place the plan doesn't allow is refused.
+  await jason.put('/knowledge/places/gdrive/folder', { name: 'Niko Knowledge' });
+  assert.equal((await jason.get('/knowledge')).data.prefs.folders.gdrive, undefined);
+  await access({ 'kn:learning': true, 'kn:learn:onedrive': false });
+  assert.equal((await jason.put('/knowledge/places/onedrive/folder', { name: 'X' })).status, 403);
+  await access({ 'kn:learning': true });
+});
+
 await ok('notes are only ever this person’s: row security applies to the copy record too', async () => {
   const other = '00000000-0000-4000-8000-00000000ffff';
   await kn.query(`insert into kn_learned_copy (account_id, place) values ($1, 'notion')`, [other]);

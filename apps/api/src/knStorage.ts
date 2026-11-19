@@ -127,8 +127,20 @@ const readText = async (res: Response) => {
   return t;
 };
 const etag = (res: Response) => (res.headers.get('etag') ?? '').replace(/^W\//, '').replace(/"/g, '');
-const objectKey = (title: string, ext: string) => `${STORAGE_FOLDER}${safeName(title).replace(/ /g, '-')}-${crypto.randomUUID().slice(0, 8)}.${ext}`;
+/** A new object in Niko's folder (`root`, ending in /). */
+const objectKey = (root: string, title: string, ext: string) => `${root || STORAGE_FOLDER}${safeName(title).replace(/ /g, '-')}-${crypto.randomUUID().slice(0, 8)}.${ext}`;
 
+/** Plain object operations on their storage, for other places that keep files in a bucket (an Obsidian vault synced
+ *  through S3): write, read (null when it's gone), its version (null when gone) and delete. */
+export function storageOps(cfg: StorageConfig) {
+  const gone = (e: unknown) => e instanceof PlaceError && e.gone;
+  return {
+    async put(key: string, body: string, type: string) { return etag(await s3(cfg, 'PUT', key, body, type)); },
+    async get(key: string) { try { return await readText(await s3(cfg, 'GET', key)); } catch (e) { if (gone(e)) return null; throw e; } },
+    async stat(key: string) { try { return etag(await s3(cfg, 'HEAD', key)); } catch (e) { if (gone(e)) return null; throw e; } },
+    async del(key: string) { try { await s3(cfg, 'DELETE', key); } catch (e) { if (!gone(e)) throw e; } },
+  };
+}
 /** Tries their storage: writes a small file in niko-knowledge/, reads it back, and removes it. */
 export async function testStorage(cfg: StorageConfig): Promise<void> {
   const key = `${STORAGE_FOLDER}.niko-test-${crypto.randomUUID().slice(0, 8)}`;
@@ -142,14 +154,14 @@ export function storageRemoteOf(cfg: StorageConfig): Remote {
   const link = (key: string) => null as string | null; // buckets are private: no link to open
   return {
     place: 's3',
-    async makeRoot() { return { id: STORAGE_FOLDER, name: STORAGE_FOLDER.replace(/\/$/, '') }; },
-    async writeDoc(_root, title, markdown) {
-      const key = objectKey(title, 'md');
+    async makeRoot(name) { const folder = name ? `${name.replace(/\/+$/, '')}/` : STORAGE_FOLDER; return { id: folder, name: folder.replace(/\/$/, '') }; },
+    async writeDoc(root, title, markdown) {
+      const key = objectKey(root, title, 'md');
       const res = await s3(cfg, 'PUT', key, markdown, 'text/markdown; charset=utf-8');
       return { id: key, url: link(key), version: etag(res) };
     },
-    async writeSheet(_root, sheet) {
-      const key = objectKey(sheet.title, 'csv');
+    async writeSheet(root, sheet) {
+      const key = objectKey(root, sheet.title, 'csv');
       const res = await s3(cfg, 'PUT', key, sheetCsv(sheet.columns.map((name) => ({ name })), sheet.rows), 'text/csv; charset=utf-8');
       return { id: key, url: link(key), version: etag(res), done: sheet.rows.length };
     },

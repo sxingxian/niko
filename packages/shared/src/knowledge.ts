@@ -88,16 +88,32 @@ export interface KnowledgePrefs {
   /** Where what Niko learns is kept: in Niko, on their device only, or in Niko with a copy to read in their own app or
    *  storage. Separate from where their files are kept; matches taught for a file stay with that file. */
   learnPlace: KnPlace;
+  /** Where in each place Niko keeps things: the name of the page or folder Niko makes (Notion, Drive, OneDrive), or a
+   *  folder path (their storage, their Obsidian vault). Missing means the default (KN_DEFAULT_FOLDER). */
+  folders: Partial<Record<KnRemotePlace, string>>;
 }
-/** Where Knowledge can be kept. The last four keep a copy of each file in the person's own app or storage. */
+/** Where Knowledge can be kept. The last five keep a copy of each file in the person's own app, storage or Obsidian vault. */
 export type KnPlace = 'niko' | 'device' | KnRemotePlace;
-export type KnRemotePlace = 'notion' | 'gdrive' | 'onedrive' | 's3';
-export const KN_REMOTE_PLACES: KnRemotePlace[] = ['notion', 'gdrive', 'onedrive', 's3'];
+export type KnRemotePlace = 'notion' | 'gdrive' | 'onedrive' | 's3' | 'obsidian';
+export const KN_REMOTE_PLACES: KnRemotePlace[] = ['notion', 'gdrive', 'onedrive', 's3', 'obsidian'];
 export const isRemotePlace = (v: unknown): v is KnRemotePlace => (KN_REMOTE_PLACES as unknown[]).includes(v);
-export const KN_PLACE_NAMES: Record<KnPlace, string> = { niko: 'Niko', device: 'This device only', notion: 'Notion', gdrive: 'Google Drive', onedrive: 'OneDrive', s3: 'Your own storage' };
+export const KN_PLACE_NAMES: Record<KnPlace, string> = { niko: 'Niko', device: 'This device only', notion: 'Notion', gdrive: 'Google Drive', onedrive: 'OneDrive', s3: 'Your own storage', obsidian: 'Obsidian' };
 /** The connection each place writes through (their own storage is set up on the Knowledge screen itself). */
-export const KN_PLACE_PROVIDER: Record<KnRemotePlace, string> = { notion: 'notion', gdrive: 'google-drive', onedrive: 'onedrive', s3: 'kn-storage' };
-export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', own: null, telegram: true, drafts: false, files: 0, learn: true, notes: 0, situations: true, habits: [], learnPlace: 'niko' };
+export const KN_PLACE_PROVIDER: Record<KnRemotePlace, string> = { notion: 'notion', gdrive: 'google-drive', onedrive: 'onedrive', s3: 'kn-storage', obsidian: 'kn-obsidian' };
+/** The page or folder Niko makes in each place unless the person names another. */
+export const KN_DEFAULT_FOLDER: Record<KnRemotePlace, string> = { notion: 'Niko Knowledge', gdrive: 'Niko Knowledge', onedrive: 'Niko Knowledge', s3: 'niko-knowledge', obsidian: 'Niko Knowledge' };
+/** Their storage and their vault take a folder path ("Areas/Niko Knowledge"); the others one name. */
+export const knFolderIsPath = (p: KnRemotePlace) => p === 's3' || p === 'obsidian';
+/** A page or folder name every place accepts: no slashes or characters file systems and links refuse, no leading dot,
+ *  not too long. For their storage and vault, up to five such names joined with "/". Null when nothing usable is left. */
+export function cleanFolder(place: KnRemotePlace, v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const one = (s: string) => s.replace(/[\u0000-\u001f\u007f\\:*?"<>|#%[\]^]/g, ' ').replace(/\s+/g, ' ').replace(/^[.\s]+/, '').trim().slice(0, 80);
+  const parts = (knFolderIsPath(place) ? v.split('/') : [v.replace(/\//g, ' ')]).map(one).filter((x) => x && x !== '.' && x !== '..');
+  return parts.length && parts.length <= 5 ? parts.join('/') : null;
+}
+export const knFolder = (p: Pick<KnowledgePrefs, 'folders'>, place: KnRemotePlace) => p.folders[place] ?? KN_DEFAULT_FOLDER[place];
+export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', own: null, telegram: true, drafts: false, files: 0, learn: true, notes: 0, situations: true, habits: [], learnPlace: 'niko', folders: {} };
 /** Their own search numbers: one of their AI keys or their own model server, and an embedding model's name. */
 export function cleanOwnSearch(v: unknown): { ref: string; model: string } | null {
   const o = (v && typeof v === 'object' ? v : {}) as { ref?: unknown; model?: unknown };
@@ -131,13 +147,14 @@ export function cleanKnowledgePrefs(v: unknown): KnowledgePrefs {
     habits: Array.isArray(o.habits) ? [...new Set(o.habits.filter((h): h is string => h === 'walk-short' || h === 'inbox-morning'))] : [],
     // Before this was a choice, notes were kept with the files: on the device when the files were.
     learnPlace: o.learnPlace === 'niko' || o.learnPlace === 'device' || isRemotePlace(o.learnPlace) ? o.learnPlace : o.place === 'device' ? 'device' : 'niko',
+    folders: Object.fromEntries(KN_REMOTE_PLACES.map((p) => [p, cleanFolder(p, (o.folders as Record<string, unknown> | undefined)?.[p])]).filter(([, v]) => v)) as Partial<Record<KnRemotePlace, string>>,
   };
 }
 
 /** What one account may use, from its AI options (see AI_OPTION_GROUPS, group "knowledge"). */
 export interface KnowledgeAccess { files: boolean; niko: boolean; device: boolean; cloudflareRead: boolean; cloudflareSearch: boolean; learning: boolean; /** Search numbers from one of their AI keys, or their own model server. */ ownKey: boolean; ownServer: boolean;
   /** Keeping a copy of their files in their own Notion, Google Drive, OneDrive or S3 storage (Niko keeps the pieces). */
-  notion: boolean; gdrive: boolean; onedrive: boolean; s3: boolean;
+  notion: boolean; gdrive: boolean; onedrive: boolean; s3: boolean; obsidian: boolean;
   /** Where they may keep what Niko learns, besides Niko itself (only with learning). */
   learnPlaces: Record<'device' | KnRemotePlace, boolean> }
 /** Where what Niko learns is kept now: their choice when their plan allows it, else Niko. Notes kept in Niko or with a copy

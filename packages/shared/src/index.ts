@@ -402,6 +402,7 @@ export const AI_OPTION_GROUPS: AiOptionGroup[] = [
     { key: 'kn:place:gdrive', name: 'Google Drive', sub: 'A copy in their Drive · Niko keeps the pieces' },
     { key: 'kn:place:onedrive', name: 'OneDrive', sub: 'A copy in their OneDrive · Niko keeps the pieces' },
     { key: 'kn:place:s3', name: 'Their own storage', sub: 'A copy in S3 storage they set up · Niko keeps the pieces' },
+    { key: 'kn:place:obsidian', name: 'Obsidian', sub: 'A copy in their vault · Niko keeps the pieces' },
     { key: 'kn:cf-read', name: 'Cloudflare reads files', sub: 'PDF, Word and spreadsheets into text · keeps nothing' },
     { key: 'kn:cf-search', name: 'Cloudflare search', sub: 'Search numbers for their files · keeps nothing' },
     { key: 'kn:search-key', name: 'Search with their AI key', sub: 'An embedding model on one of their own AI keys · their key' },
@@ -412,7 +413,8 @@ export const AI_OPTION_GROUPS: AiOptionGroup[] = [
     { key: 'kn:learn:notion', name: 'Notion', sub: 'A copy to read in their Notion · Niko keeps the notes' },
     { key: 'kn:learn:gdrive', name: 'Google Drive', sub: 'A copy to read in their Drive · Niko keeps the notes' },
     { key: 'kn:learn:onedrive', name: 'OneDrive', sub: 'A copy to read in their OneDrive · Niko keeps the notes' },
-    { key: 'kn:learn:s3', name: 'Their own storage', sub: 'A copy to read in their storage · Niko keeps the notes' } ] },
+    { key: 'kn:learn:s3', name: 'Their own storage', sub: 'A copy to read in their storage · Niko keeps the notes' },
+    { key: 'kn:learn:obsidian', name: 'Obsidian', sub: 'A copy to read in their vault · Niko keeps the notes' } ] },
 ];
 const OFF_BY_DEFAULT = new Set(AI_OPTION_GROUPS.flatMap((g) => g.items.filter((i) => i.offByDefault).map((i) => i.key)));
 /** Whether an option is on in the default for everyone: what the admin saved, else the option's own starting value. */
@@ -472,7 +474,7 @@ export interface Me {
   /** Where this person keeps Knowledge and how it is searched, when their plan includes Knowledge files. */
   knowledge?: { place: 'niko' | 'device'; search: 'cloudflare' | 'device';
     /** Where what Niko learns is kept (with a copy in their own app for the last four). */
-    learnPlace?: 'niko' | 'device' | 'notion' | 'gdrive' | 'onedrive' | 's3';
+    learnPlace?: 'niko' | 'device' | 'notion' | 'gdrive' | 'onedrive' | 's3' | 'obsidian';
     /** Learning is in the plan and not paused; situations may use the calendar and time; habits said yes to. */
     learn?: boolean; situations?: boolean; habits?: string[] };
 }

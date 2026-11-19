@@ -6,15 +6,15 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const here = fileURLToPath(new URL('.', import.meta.url));
 let failed = false;
-for (const name of (process.env.ONLY ? process.env.ONLY.split(',') : ['mail', 'ical', 'voice', 'brains', 'weather', 'voices', 'lists', 'hears', 'images', 'maps', 'speechtext', 'provided', 'listen', 'rest', 'lock', 'access', 'glance', 'billing', 'designs', 'backgrounds', 'payments', 'knowledgedb', 'knowledge', 'knowledgesplit', 'knowledgeanswer', 'knowledgedevice', 'learned', 'situations', 'voicematch', 'datasources', 'ownsearch', 'knowledgeplaces', 'knowledgestorage', 'knowledgesecurity', 'learnplace'])) {
+for (const name of (process.env.ONLY ? process.env.ONLY.split(',') : ['mail', 'ical', 'voice', 'brains', 'weather', 'voices', 'lists', 'hears', 'images', 'maps', 'speechtext', 'provided', 'listen', 'rest', 'lock', 'access', 'glance', 'billing', 'designs', 'backgrounds', 'payments', 'knowledgedb', 'knowledge', 'knowledgesplit', 'knowledgeanswer', 'knowledgedevice', 'learned', 'situations', 'voicematch', 'datasources', 'ownsearch', 'knowledgeplaces', 'knowledgestorage', 'knowledgeobsidian', 'knowledgesecurity', 'learnplace'])) {
   const out = `${here}.out-${name}.mjs`;
   await build({
     entryPoints: [`${here}${name}.test.mjs`], bundle: true, platform: 'node', format: 'esm', outfile: out, logLevel: 'error',
-    alias: { 'cloudflare:sockets': `${here}cf-sockets-shim.mjs`, '@niko/shared': `${here}../packages/shared/src/index.ts`, ...(['brains', 'voices', 'hears', 'images', 'maps', 'access', 'glance', 'rest', 'ownsearch', 'knowledgeplaces', 'knowledgestorage'].includes(name) ? { '@niko/db': `${here}brains-stubs.mjs` } : {}),
+    alias: { 'cloudflare:sockets': `${here}cf-sockets-shim.mjs`, '@niko/shared': `${here}../packages/shared/src/index.ts`, ...(['brains', 'voices', 'hears', 'images', 'maps', 'access', 'glance', 'rest', 'ownsearch', 'knowledgeplaces', 'knowledgestorage', 'knowledgeobsidian'].includes(name) ? { '@niko/db': `${here}brains-stubs.mjs` } : {}),
       // The payments test runs the real Worker routes against a local PostgreSQL.
       ...(name === 'payments' || name === 'learnplace' ? { '@niko/db': `${here}db-node.mjs` } : {}) },
     // The brain tests read saved keys from a stand-in instead of the database.
-    plugins: ['brains', 'voices', 'hears', 'images', 'maps', 'access', 'glance', 'ownsearch', 'knowledgeplaces', 'knowledgestorage'].includes(name) ? [{ name: 'stub-providers', setup(b) { b.onResolve({ filter: /^\.\/providers$/ }, () => ({ path: `${here}brains-stubs.mjs` })); } }]
+    plugins: ['brains', 'voices', 'hears', 'images', 'maps', 'access', 'glance', 'ownsearch', 'knowledgeplaces', 'knowledgestorage', 'knowledgeobsidian'].includes(name) ? [{ name: 'stub-providers', setup(b) { b.onResolve({ filter: /^\.\/providers$/ }, () => ({ path: `${here}brains-stubs.mjs` })); } }]
       // The learning place test runs the Worker with the Knowledge database too, Neon's driver stood in for locally.
       : name === 'learnplace' ? [{ name: 'knowledge-db', setup(b) { b.onResolve({ filter: /^@neondatabase\/serverless$/ }, (a) => (/apps[\\/]api[\\/]src[\\/]knowledge\.ts$/.test(a.importer) ? { path: `${here}eval/neon-shim.mjs` } : undefined)); } }] : [],
     external: ['hoodiecrow-imap', 'smtp-server', 'pg', 'pg-native'],

@@ -62,7 +62,7 @@ export async function syncLearnedCopy(k: Kdb, remote: Remote, account: string, n
   try {
     const root = await placeRoot(k, remote, account);
     const md = learnedMarkdown(await listLearned(k, account), remote.place !== 'notion');
-    const w = await remote.writeDoc(root.id, LEARNED_COPY_TITLE, md);
+    const w = copy.remoteId && remote.replaceDoc ? await remote.replaceDoc(copy.remoteId, LEARNED_COPY_TITLE, md) : await remote.writeDoc(root.id, LEARNED_COPY_TITLE, md);
     if (copy.remoteId && copy.remoteId !== w.id) await remote.trash(copy.remoteId, 'doc').catch(() => undefined);
     const [r] = await k.q<Row>(`update kn_learned_copy set remote_id = $2, remote_url = $3, dirty = false, synced_at = now(), error = null where account_id = $1
        returning place, remote_id, remote_url, dirty, synced_at, error`, [account, w.id, w.url]);

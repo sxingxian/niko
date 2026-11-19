@@ -11,6 +11,8 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useNiko } from '../niko';
 import { LearnedAside, LearnedTab, TaughtSection } from './KnowledgeLearned';
 import { syncLearnedCopySoon } from '../knowledgeChat';
+import { ObsidianPanel, type ObsidianShown } from './KnowledgeObsidian';
+import { PlaceWhere, type Relocated } from './KnowledgeWhere';
 import { addFile, addNumbersInNiko } from '../knowledge';
 import {
   addFileHere, addNumbersHere, deviceFiles, keepHereAsData, missingNumbersHere, moveNotesToDevice, moveNotesToNiko, moveToDevice, moveToNiko, removeHere, sheetsHere, updateSheetHere,
@@ -25,7 +27,7 @@ type KnFile = { id: string; name: string; kind: string; collection: string; byte
 type KnSheet = { id: string; name: string; columns: KnColumn[]; rows: number; header: boolean; example: string[] };
 type OwnSource = { ref: string; name: string; example: string };
 type StorageShown = { endpoint: string; bucket: string; region: string; access: boolean };
-type PlaceInfo = { connected: boolean; label: string | null; root: string | null; storage?: StorageShown };
+type PlaceInfo = { connected: boolean; label: string | null; root: string | null; picked?: boolean; storage?: StorageShown; obsidian?: ObsidianShown };
 type StorageForm = { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string; accessId: string; accessSecret: string };
 const EMPTY_STORAGE: StorageForm = { endpoint: '', bucket: '', accessKeyId: '', secretAccessKey: '', accessId: '', accessSecret: '' };
 type LearnedCopy = { place: KnRemotePlace; url: string | null; dirty: boolean; syncedAt: string | null; error: string | null };
@@ -58,15 +60,19 @@ const IconWarn = () => <svg className="kn-ic sm" viewBox="0 0 24 24" aria-hidden
 const IconNotion = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l3 3v15H6z" /><path d="M9 10h6M9 14h6M9 18h4" /></svg>;
 const IconDrive = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h6l2 2h10v10H3z" /></svg>;
 const IconCloud = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10a4 4 0 0 0 .5-8A6 6 0 0 0 6 9.5 4.3 4.3 0 0 0 7 18z" /></svg>;
+const IconVault = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5l7 4.5-1.5 9.5L12 21.5l-5.5-5L5 7z" /><path d="M12 2.5L9 12l3 9.5M9 12l-4-5M9 12l8.5 4.5" /></svg>;
 const IconServer = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="2" /><rect x="4" y="13" width="16" height="7" rx="2" /><path d="M8 7.5h.01M8 16.5h.01" /></svg>;
-const PLACE_ICON: Record<KnPlace, () => ReactElement> = { niko: IconNiko, notion: IconNotion, gdrive: IconDrive, onedrive: IconCloud, s3: IconServer, device: IconDevice };
+const PLACE_ICON: Record<KnPlace, () => ReactElement> = { niko: IconNiko, notion: IconNotion, gdrive: IconDrive, onedrive: IconCloud, s3: IconServer, obsidian: IconVault, device: IconDevice };
 /** The places in the order the mockup shows them. */
-const SPOTS: KnPlace[] = ['niko', 'notion', 'gdrive', 'onedrive', 's3', 'device'];
+const SPOTS: KnPlace[] = ['niko', 'notion', 'gdrive', 'onedrive', 'obsidian', 's3', 'device'];
 /** The connection each place uses, for its Connect button. */
 const CONNECT: Partial<Record<KnRemotePlace, string>> = { notion: 'notion', gdrive: 'google-drive', onedrive: 'onedrive' };
 /** "in Niko", "in Google Drive", "on this device". */
-const inPlace = (p: KnPlace) => (p === 'device' ? 'on this device' : p === 's3' ? 'in your own storage' : `in ${KN_PLACE_NAMES[p]}`);
+const inPlace = (p: KnPlace) => (p === 'device' ? 'on this device' : p === 's3' ? 'in your own storage' : p === 'obsidian' ? 'in your Obsidian vault' : `in ${KN_PLACE_NAMES[p]}`);
 const PLACE_NAME = KN_PLACE_NAMES;
+/** Links to a copy: https pages, or obsidian:// to open the note in the app (no new tab for that one). Anything else
+ *  isn't shown as a link. */
+const copyLink = (url: string | null | undefined) => (!url ? null : /^https:\/\//i.test(url) ? { href: url, target: '_blank', rel: 'noopener noreferrer' } : /^obsidian:\/\/open\?/i.test(url) ? { href: url } : null);
 /** A place's name inside a sentence (“Move to your own storage”). */
 const toName = (p: KnPlace) => (p === 's3' ? 'your own storage' : p === 'device' ? 'this device' : PLACE_NAME[p]);
 /** Where files are read and searched: Niko (files in their own apps too) or this device. */
@@ -96,7 +102,6 @@ export function Knowledge() {
   const [drag, setDrag] = useState(false);
   const [picked, setPicked] = useState<KnPlace | null>(null);
   const [copying, setCopying] = useState<{ done: number; total: number; name: string; rows?: { done: number; total: number } } | null>(null);
-  const [notionPages, setNotionPages] = useState<{ id: string; title: string }[] | null>(null);
   const [storage, setStorage] = useState<StorageForm | null>(null);
   const [removing, setRemoving] = useState<{ file: KnFile; bin: boolean } | null>(null);
   const [storageNote, setStorageNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -307,10 +312,16 @@ export function Knowledge() {
     try { await api('/knowledge/places/storage', { method: 'DELETE' }); setStorage(null); await load(); }
     catch (e) { setStorageNote({ ok: false, text: (e as Error).message }); }
   };
-  const pickNotionPage = async (v: string) => {
+  // Another page or folder in a place: files kept there and what Niko learned are copied to it.
+  const relocated = async (p: KnRemotePlace, r: Relocated, text: string) => {
     setNote(null);
-    try { await api('/knowledge/places/notion', { method: 'PUT', body: { page: v === 'new' ? null : v } }); await load(); }
-    catch (e) { setNote({ ok: false, text: (e as Error).message }); }
+    await load();
+    try {
+      if (r.files && spot === p) await copyAll(p);
+      if (r.learned) await api('/knowledge/learned/copy', { method: 'POST' });
+      setNote({ ok: true, text });
+    } catch (e) { setNote({ ok: false, text: `${(e as Error).message} Copies not made yet can be made from here later.` }); }
+    finally { setCopying(null); await load(); }
   };
 
   // Making search numbers again: for files in Niko, by Cloudflare, their own service or on this device; for files
@@ -377,7 +388,7 @@ export function Knowledge() {
   const info = (p: KnPlace) => (isRemotePlace(p) ? st.places?.[p] : undefined);
   const places: KnPlace[] = SPOTS.filter((p) => (p === 'niko' ? access.niko : p === 'device' ? access.device : !!info(p)));
   const placeStatus = (p: KnPlace) => p === spot ? `In use · ${n(files.length, 'file', 'files')}` : p === 'niko' ? 'All your devices' : p === 'device' ? 'Stays on this computer'
-    : info(p)?.connected ? `${p === 's3' ? 'Set up' : 'Connected'}${info(p)?.label ? ` · ${info(p)!.label}` : ''}` : p === 's3' ? 'Add your storage' : 'Not connected yet';
+    : info(p)?.connected ? `${p === 's3' || p === 'obsidian' ? 'Set up' : 'Connected'}${info(p)?.label ? ` · ${info(p)!.label}` : ''}` : p === 's3' ? 'Add your storage' : p === 'obsidian' ? 'Set it up below' : 'Not connected yet';
   const shownInfo = info(shown);
   const canMoveTo = !isRemotePlace(shown) || !!shownInfo?.connected;
   const notCopied = remote ? files.filter((f) => f.status === 'ready' && !f.copied) : [];
@@ -405,7 +416,7 @@ export function Knowledge() {
   const notesPlace: Place = learnNow === 'device' ? 'device' : 'niko';
   const lCopy = st.learnedCopy && st.learnedCopy.place === learnNow ? st.learnedCopy : null;
   const lStatus = (p: KnPlace) => p === learnNow ? 'In use' : p === 'niko' ? 'All your devices' : p === 'device' ? 'Stays on this computer'
-    : lInfo(p)?.connected ? `${p === 's3' ? 'Set up' : 'Connected'}${lInfo(p)?.label ? ` · ${lInfo(p)!.label}` : ''}` : p === 's3' ? 'Add it on the Files tab' : 'Not connected yet';
+    : lInfo(p)?.connected ? `${p === 's3' || p === 'obsidian' ? 'Set up' : 'Connected'}${lInfo(p)?.label ? ` · ${lInfo(p)!.label}` : ''}` : p === 's3' || p === 'obsidian' ? 'Set it up on the Files tab' : 'Not connected yet';
   const lCanMove = !isRemotePlace(lShown) || !!lInfo(lShown)?.connected;
   const ago = (iso: string) => { const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return m < 1 ? 'just now' : m === 1 ? '1 minute ago' : m < 60 ? `${m} minutes ago` : m < 120 ? 'an hour ago' : `${Math.round(m / 60)} hours ago`; };
   const moveLearned = async (to: KnPlace) => {
@@ -444,15 +455,16 @@ export function Knowledge() {
             <span className="kn-devwarn"><IconWarn />Only on this computer. Your phone won’t use what Niko learned here, Telegram replies can’t either, and clearing this site’s data deletes it.</span>
             <span className="srow-hint">Never kept on Niko’s server. Locked to your account on this computer. Only the notes that fit a question go with it to the AI.</span>
           </> : <>
-            <span className="kn-lead">{lShown === 'notion' ? 'A “What Niko learned” page on your Niko Knowledge page in Notion, kept up to date.' : lShown === 'gdrive' ? 'A “What Niko learned” Google Doc in your Niko Knowledge folder, kept up to date.' : lShown === 'onedrive' ? 'A “What Niko learned.md” file in Niko’s own folder in your OneDrive, kept up to date.' : 'A “What Niko learned.md” file in the niko-knowledge folder of your storage, kept up to date.'}</span>
+            <span className="kn-lead">{lShown === 'notion' ? 'A “What Niko learned” page on your Niko Knowledge page in Notion, kept up to date.' : lShown === 'gdrive' ? 'A “What Niko learned” Google Doc in your Niko Knowledge folder, kept up to date.' : lShown === 'onedrive' ? 'A “What Niko learned.md” file in Niko’s own folder in your OneDrive, kept up to date.' : lShown === 'obsidian' ? 'A “What Niko learned” note in the Niko Knowledge folder of your vault, kept up to date.' : 'A “What Niko learned.md” file in the niko-knowledge folder of your storage, kept up to date.'}</span>
             <span className="srow-hint">Niko keeps the notes too, so it can look them up on every question. The copy is for you to read: changes made there aren’t read back, so nobody else can add to what Niko learned. Edit or forget notes here.</span>
+            {lShown === learnNow && isRemotePlace(lShown) && lInfo(lShown)?.connected && <PlaceWhere place={lShown} folder={prefs.folders?.[lShown]} root={lInfo(lShown)!.root} picked={lInfo(lShown)!.picked} workspace={lInfo(lShown)!.label} busy={!!lMoving} onRelocated={(r, text) => relocated(lShown as KnRemotePlace, r, text)} />}
             {lShown === learnNow && lCopy && <div className="kn-move">
               <span className={'srow-hint' + (lCopy.error ? ' bad' : ' ready')}>{lCopy.error ?? (lCopy.syncedAt ? `Copy updated ${ago(lCopy.syncedAt)}` : 'Writing the copy…')}</span>
               {lCopy.error ? <button type="button" className="bt md" onClick={() => void api('/knowledge/learned/copy', { method: 'POST' }).then(load).catch((e) => setNote({ ok: false, text: (e as Error).message }))}>Try again</button>
-                : lCopy.url && <a className="bt md" href={lCopy.url} target="_blank" rel="noopener noreferrer">Open in {PLACE_NAME[learnNow]}</a>}
+                : copyLink(lCopy.url) && <a className="bt md" {...copyLink(lCopy.url)!}>Open in {PLACE_NAME[learnNow]}</a>}
             </div>}
-            {lShown !== learnNow && isRemotePlace(lShown) && !lInfo(lShown)?.connected && (lShown === 's3'
-              ? <span className="srow-hint wait">Add your storage first, on the Files tab under Where it’s kept.</span>
+            {lShown !== learnNow && isRemotePlace(lShown) && !lInfo(lShown)?.connected && (lShown === 's3' || lShown === 'obsidian'
+              ? <span className="srow-hint wait">{lShown === 's3' ? 'Add your storage first' : 'Set up Obsidian first'}, on the Files tab under Where it’s kept.</span>
               : <button type="button" className="bt md" style={{ alignSelf: 'flex-start' }} onClick={() => connect(lShown as KnRemotePlace)}>Connect {PLACE_NAME[lShown]}</button>)}
           </>}
         {(lShown !== learnNow || lMoving) && (
@@ -512,25 +524,15 @@ export function Knowledge() {
                   {place === 'device' && files.length > 0 && <span className="srow-hint">{n(files.length, 'file', 'files')} · {size(bytes)} on this computer · up to {limits.files.toLocaleString()} files</span>}
                 </> : <>
                   {shown === 'notion' && <>
-                    <span className="kn-lead">Your files go on a “Niko Knowledge” page in Notion: documents as pages, spreadsheets as databases. Edit them in Notion; Niko picks up changes the next time it uses them.</span>
+                    <span className="kn-lead">Your files go on a page in Notion: documents as pages, spreadsheets as databases. Edit them in Notion; Niko picks up changes the next time it uses them.</span>
                     <span className="srow-hint">Niko also keeps the search pieces and rows, so answers stay quick and totals still work. Niko can only see the pages it puts there. Big spreadsheets take a while the first time, about 3 rows a second.</span>
-                    {shownInfo?.connected && <label className="kn-field"><span className="kn-k">Notion page</span>
-                      <select className="in" aria-label="Notion page" value="" disabled={busy}
-                        onFocus={() => { if (!notionPages) void api<{ pages: { id: string; title: string }[] }>('/knowledge/places/notion/pages').then((r) => setNotionPages(r.pages)).catch((e) => setNote({ ok: false, text: (e as Error).message })); }}
-                        onChange={(e) => { if (e.target.value) void pickNotionPage(e.target.value); }}>
-                        <option value="">{shownInfo.root ? `Using “${shownInfo.root}”` : `Create “Niko Knowledge” in ${shownInfo.label ? `${shownInfo.label}’s workspace` : 'your workspace'}`}</option>
-                        {shownInfo.root && <option value="new">Create a new “Niko Knowledge” page</option>}
-                        {(notionPages ?? []).map((pg) => <option key={pg.id} value={pg.id}>{pg.title}</option>)}
-                        {!notionPages && <option value="" disabled>Use an existing page…</option>}
-                      </select>
-                    </label>}
                   </>}
                   {shown === 'gdrive' && <>
-                    <span className="kn-lead">A “Niko Knowledge” folder in your Drive: documents as Google Docs, spreadsheets as Google Sheets. Edit them in Drive; Niko picks up changes the next time it uses them.</span>
+                    <span className="kn-lead">A folder in your Drive: documents as Google Docs, spreadsheets as Google Sheets. Edit them in Drive; Niko picks up changes the next time it uses them.</span>
                     <span className="srow-hint">Niko also keeps the search pieces and rows, so answers stay quick and totals still work. Niko can only see the files it puts there, nothing else in your Drive.</span>
                   </>}
                   {shown === 'onedrive' && <>
-                    <span className="kn-lead">{shownInfo?.connected ? '' : 'Connect OneDrive first. Personal and work Microsoft accounts both work. '}Files go in Niko’s own folder in your OneDrive (Apps › Niko › Niko Knowledge): documents as .md, spreadsheets as .csv.</span>
+                    <span className="kn-lead">{shownInfo?.connected ? '' : 'Connect OneDrive first. Personal and work Microsoft accounts both work. '}Files go in Niko’s own folder in your OneDrive (in Apps › Niko): documents as .md, spreadsheets as .csv.</span>
                     <span className="srow-hint">Niko can only see its own folder. It also keeps the search pieces and rows.</span>
                   </>}
                   {shown === 's3' && (() => {
@@ -538,7 +540,7 @@ export function Knowledge() {
                     const set = (k: keyof StorageForm) => (e: { target: { value: string } }) => setStorage({ ...f, [k]: e.target.value });
                     const keyHint = saved ? 'Saved · type to change' : '';
                     return <>
-                      <span className="kn-lead">Storage you run or rent that speaks S3, such as a NAS behind your own Cloudflare Tunnel, Cloudflare R2 or MinIO. Files go in a niko-knowledge folder: documents as .md, spreadsheets as .csv. Niko also keeps the search pieces and rows.</span>
+                      <span className="kn-lead">Storage you run or rent that speaks S3, such as a NAS behind your own Cloudflare Tunnel, Cloudflare R2 or MinIO. Files go in a folder of your bucket: documents as .md, spreadsheets as .csv. Niko also keeps the search pieces and rows.</span>
                       <form className="kn-store" autoComplete="off" onSubmit={(e) => { e.preventDefault(); void storageSend(true); }}>
                         <div className="kn-grid2">
                           <label className="kn-field"><span className="kn-k">Address</span><input className="in" value={f.endpoint} onChange={set('endpoint')} placeholder="https://s3.example.com" inputMode="url" spellCheck={false} maxLength={300} disabled={busy} /></label>
@@ -565,6 +567,8 @@ export function Knowledge() {
                       </form>
                     </>;
                   })()}
+                  {shown === 'obsidian' && <ObsidianPanel saved={shownInfo?.obsidian} busy={busy} inUse={spot === 'obsidian' || learnNow === 'obsidian'} onSaved={load} />}
+                  {isRemotePlace(shown) && shownInfo?.connected && <PlaceWhere place={shown} folder={prefs.folders?.[shown]} root={shownInfo.root} picked={shownInfo.picked} workspace={shownInfo.label} busy={busy} onRelocated={(r, text) => relocated(shown as KnRemotePlace, r, text)} />}
                   {isRemotePlace(shown) && !shownInfo?.connected && CONNECT[shown] && <span><button type="button" className="bt md" disabled={busy} onClick={() => connect(shown)}>Connect {PLACE_NAME[shown]}</button></span>}
                   {shown === spot && copying && <span className="kn-move-t"><Status tone="busy">Copying {Math.min(copying.done + 1, copying.total)} of {copying.total}{copying.name ? ` · ${copying.name}` : ''}{copying.rows && copying.rows.total > 20 ? ` · ${copying.rows.done.toLocaleString()} of ${copying.rows.total.toLocaleString()} rows` : ''}</Status><Meter value={copying.total ? (copying.done + (copying.rows ? copying.rows.done / Math.max(1, copying.rows.total) : 0)) / copying.total : 0} warnAt={2} label="Copying files" /></span>}
                   {shown === spot && !copying && notCopied.length > 0 && <div className="kn-move">
@@ -644,7 +648,7 @@ export function Knowledge() {
                       <span className="kn-more" onClick={(e) => e.stopPropagation()}>
                         <button type="button" className="more-b" aria-label={`More for ${f.name}`} aria-haspopup="menu" aria-expanded={menu === f.id} onClick={() => setMenu(menu === f.id ? null : f.id)}>⋯</button>
                         {menu === f.id && <span className="kn-menu g" role="menu">
-                          {f.url && f.place && isRemotePlace(f.place) && <a role="menuitem" href={f.url} target="_blank" rel="noopener noreferrer" onClick={() => setMenu(null)}>Open in {PLACE_NAME[f.place]}</a>}
+                          {copyLink(f.url) && f.place && isRemotePlace(f.place) && <a role="menuitem" {...copyLink(f.url)!} onClick={() => setMenu(null)}>Open in {PLACE_NAME[f.place]}</a>}
                           {f.sheets > 0 && <button type="button" role="menuitem" onClick={() => { setMenu(null); setChecking(f); }}>Check columns</button>}
                           <button type="button" role="menuitem" className="danger" disabled={busy} onClick={() => void remove(f)}>Remove file</button>
                         </span>}
@@ -776,10 +780,10 @@ function CheckColumns({ file, ops, onClose }: { file: KnFile; ops: Ops; onClose:
 /** Removing a file kept elsewhere: keep its copy there (the default) or remove that too. */
 function RemoveCopy({ file, bin, onBin, onClose, onRemove }: { file: KnFile; bin: boolean; onBin: (bin: boolean) => void; onClose: () => void; onRemove: () => void }) {
   const place = (file.place ?? 'gdrive') as KnRemotePlace;
-  const what = place === 'gdrive' ? (file.sheets ? 'Google Sheet' : 'Google Doc') : place === 'notion' ? (file.sheets ? 'Notion database' : 'Notion page') : 'copy';
-  const keepSub = place === 'gdrive' ? 'It stays in your Niko Knowledge folder in Drive.' : place === 'notion' ? 'It stays on your Niko Knowledge page in Notion.' : place === 'onedrive' ? 'It stays in Niko’s folder in your OneDrive.' : 'It stays in the niko-knowledge folder of your storage.';
-  const binLabel = place === 's3' ? 'Also delete the file in your storage' : `Also move the ${what} to the bin`;
-  const binSub = place === 's3' ? 'It can’t be brought back.' : place === 'gdrive' ? 'You can get it back from Drive’s bin for 30 days.' : place === 'notion' ? 'You can get it back from Notion’s trash.' : 'You can get it back from OneDrive’s recycle bin.';
+  const what = place === 'gdrive' ? (file.sheets ? 'Google Sheet' : 'Google Doc') : place === 'notion' ? (file.sheets ? 'Notion database' : 'Notion page') : place === 'obsidian' ? 'note in Obsidian' : 'copy';
+  const keepSub = place === 'gdrive' ? 'It stays in your Niko Knowledge folder in Drive.' : place === 'notion' ? 'It stays on your Niko Knowledge page in Notion.' : place === 'onedrive' ? 'It stays in Niko’s folder in your OneDrive.' : place === 'obsidian' ? 'It stays in the Niko Knowledge folder of your vault.' : 'It stays in the niko-knowledge folder of your storage.';
+  const binLabel = place === 's3' ? 'Also delete the file in your storage' : place === 'obsidian' ? 'Also delete the note in your vault' : `Also move the ${what} to the bin`;
+  const binSub = place === 's3' ? 'It can’t be brought back.' : place === 'obsidian' ? 'Obsidian’s File recovery may still have a copy.' : place === 'gdrive' ? 'You can get it back from Drive’s bin for 30 days.' : place === 'notion' ? 'You can get it back from Notion’s trash.' : 'You can get it back from OneDrive’s recycle bin.';
   return (
     <Sheet onClose={onClose} labelledBy="kn-rm-h">
       <div className="kn-dlg">

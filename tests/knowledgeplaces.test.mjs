@@ -16,7 +16,7 @@ import { notionBlocks, notionMarkdown, remoteFor, PlaceError, safeName } from '.
 import { addPieces, addSheet, finishFile, listFiles, startFile } from '../apps/api/src/knowledge.ts';
 import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile } from '../apps/api/src/knPlacesStore.ts';
 import { isKnowledgeNotion, knowledgeNotionIds } from '../apps/api/src/knNotes.ts';
-import { setRoot } from '../apps/api/src/knPlacesStore.ts';
+import { relocate, rootsMade, setRoot } from '../apps/api/src/knPlacesStore.ts';
 import { binLearnedCopy, learnedCopyOf, learnedMarkdown, markLearnedDirty, setLearnedCopy, syncLearnedCopy } from '../apps/api/src/knLearnedCopy.ts';
 import { confirmHabit, forgetAllFileMatches, forgetNotesOnly, keepHabit, listLearned, noticeHabit, saveNote } from '../apps/api/src/learned.ts';
 import { store, fakeDb } from './brains-stubs.mjs';
@@ -361,6 +361,23 @@ await ok('Niko’s Notes leaves out the Notion pages Niko made for Knowledge, no
   assert.ok(isKnowledgeNotion({ id: docId, parent: { page_id: 'work-wiki' } }, ids));
   assert.ok(!isKnowledgeNotion({ id: 'their-page', parent: { page_id: 'work-wiki' } }, ids), 'their own pages on it stay too');
   assert.deepEqual([...await knowledgeNotionIds(k, '00000000-0000-4000-8000-0000000000e5')], [], 'another account: nothing');
+});
+
+await ok('another page or folder: copies are made again there, the old ones stay, Niko’s old folder is forgotten', async () => {
+  const E = '00000000-0000-4000-8000-0000000000e6';
+  const drive2 = fakePlace('gdrive');
+  const f = await addDoc(E, 'Plan.md', [{ heading: 'A', body: 'Text.' }], 'f'.repeat(64));
+  await copyStep(k, drive2, E, f);
+  await setLearnedCopy(k, E, 'gdrive'); await syncLearnedCopy(k, drive2, E);
+  assert.equal((await rootsMade(k, E)).gdrive.made, true);
+  assert.deepEqual(await relocate(k, E, 'gdrive'), { files: 1, learned: true });
+  assert.equal((await rootsMade(k, E)).gdrive, undefined, 'Niko makes the new folder next time');
+  assert.deepEqual(await notCopied(k, E, 'gdrive'), [f], 'to be copied again');
+  assert.equal((await learnedCopyOf(k, E)).remoteId, null);
+  assert.equal(drive2.items.size, 2, 'the old copies stay where they are');
+  await copyStep(k, drive2, E, f);
+  assert.equal(drive2.roots, 2, 'a new folder was made');
+  assert.deepEqual(await relocate(k, E, 'notion'), { files: 0, learned: false }, 'nothing kept in Notion');
 });
 
 await pool.end();

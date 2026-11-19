@@ -1304,7 +1304,7 @@ a.bt { text-decoration: none; display: inline-flex; align-items: center; justify
 .kn-opts { display: flex; flex-direction: column; gap: 10px; }
 .kn-opt { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border-radius: 14px; border: 1px solid rgba(255,255,255,.16); cursor: pointer; }
 .kn-opt.on { border-color: #9fdcf3; }
-.kn-opt input { margin-top: 3px; width: 18px; height: 18px; accent-color: #9fdcf3; flex: none; }
+.kn-opt input[type=radio], .kn-opt input[type=checkbox] { margin-top: 3px; width: 18px; height: 18px; accent-color: #9fdcf3; flex: none; }
 .kn-opt > span { display: flex; flex-direction: column; gap: 3px; }
 .kn-opt-t { font-size: 15px; }
 .kn-dlg-b .pri.danger { background: #ffb3a8; border-color: #ffb3a8; color: #2a0905; }
@@ -1317,3 +1317,14 @@ a.bt { text-decoration: none; display: inline-flex; align-items: center; justify
 .srow-hint.bad { color: #ffb3a8; }
 .kn-inset .srow-hint.wait { color: #ffd38a; }
 @media (max-width: 720px) { .kn-acts { justify-content: flex-end; } }
+
+/* Where in … (Knowledge kept in their own app). */
+.kn-where { display: flex; flex-direction: column; gap: 10px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.1); }
+.kn-where-b { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+.kn-where-b .in { width: 100%; height: 42px; margin: 0; border-radius: 12px; font-size: 14px; max-width: 420px; box-sizing: border-box; }
+.kn-where-b select.in { background-color: #11161e; padding: 0 12px; }
+.kn-where-acts { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.kn-where-f { max-width: 520px; }
+.kn-where-row { display: flex; gap: 8px; align-items: center; }
+.kn-where-row .in { flex: 1; min-width: 0; height: 42px; border-radius: 12px; font-size: 14px; }
+.srow-hint .no, .kn-where .no { color: #ffb3a8; }
