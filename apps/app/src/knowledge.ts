@@ -3,6 +3,7 @@
 // plan's small CPU allowance. PDF, Word and spreadsheet files are first turned into text by Cloudflare (when that is
 // allowed and chosen); nothing else leaves this browser except the pieces themselves.
 import { api, ApiError } from '@niko/ui';
+import { embedReady, embedTexts } from './embed';
 import {
   KN_PIECE_CHARS, KN_PIECES_PER_CALL, KN_SHEET_CELL_CHARS, KN_SHEET_ROWS_PER_CALL, KN_SHEET_MAX_COLS, KN_SHEET_MAX_ROWS, KN_SHEET_ROW_PIECES_MAX,
   knIsSheet, knKindOf, knNeedsCloudflare, type KnColType, type KnColumn, type KnKind,
@@ -255,5 +256,23 @@ export async function addFile(file: File, collection: string, opts: { readWithCl
   } catch (e) {
     await api(`/knowledge/files/${started.id}`, { method: 'DELETE' }).catch(() => undefined);
     throw e;
+  }
+}
+
+/** Makes this device's search numbers for a file kept in Niko (after choosing "On this device" for search), a page of
+ *  pieces at a time: the pieces' text comes from Niko, the numbers are made here and sent back. */
+export async function addNumbersInNiko(fileId: string, onBatch?: (done: number) => void): Promise<void> {
+  if (!embedReady()) throw new Error('Download the search model to this device first.');
+  for (let start: number | null = 0; start !== null;) {
+    const page: { pieces: { ord: number; heading: string | null; body: string }[]; next: number | null } = await api(`/knowledge/files/${fileId}/pieces?start=${start}`);
+    for (let i = 0; i < page.pieces.length; i += KN_PIECES_PER_CALL) {
+      const batch = page.pieces.slice(i, i + KN_PIECES_PER_CALL);
+      const vectors = await embedTexts(batch.map((p) => (p.heading ? `${p.heading}\n${p.body}` : p.body)), 'passage');
+      if (!vectors) throw new Error('The search model stopped. Try again.');
+      // Pieces are numbered without gaps, so each batch starts at its first piece's number.
+      await api(`/knowledge/files/${fileId}/numbers`, { method: 'PUT', body: { start: batch[0]!.ord, vectors } });
+      onBatch?.(batch.length);
+    }
+    start = page.next;
   }
 }

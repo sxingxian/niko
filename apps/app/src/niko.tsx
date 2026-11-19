@@ -10,6 +10,7 @@ import { enterFullscreen, exitFullscreen, fullscreenSupported } from './fullscre
 import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag, takeStepsTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
+import { chatWithTables, knowledgeAccount, knowledgeFor } from './knowledgeChat';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, ApiError, lockedSignal, setAppearance, type CoreMode } from '@niko/ui';
 
@@ -282,6 +283,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   // Only on the screens where Niko speaks (Home and the workspace), not on Settings or sign-in pages.
   const path = useLocation().pathname;
   const speaksHere = /^\/(inbox|calendar|notes)?$/.test(path.replace(/^\/app(?=\/|$)/, '') || '/');
+  useEffect(() => { knowledgeAccount(me?.id); }, [me?.id]);
   useEffect(() => { if (me && speaksHere && voiceOrder(me.engine).includes('kokoro') && aiAllowed(me.aiOff ?? [], 'v:kokoro')) kokoroWarm(); }, [me, speaksHere]);
 
   const lockedRef = useRef(false);
@@ -583,7 +585,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // The route on screen, so the AI can talk about it (and open its steps) instead of saying it can't see it.
       const shown = mapRef.current?.result?.route && mapRef.current.status === 'done' ? mapRef.current : null;
       const screen = shown ? { map: { from: shown.result!.from?.name === 'You' ? 'your location' : shown.result!.from?.name ?? shown.from ?? 'your location', to: shown.result!.to.name, mode: shown.result!.route!.mode, seconds: shown.result!.route!.seconds, meters: shown.result!.route!.meters, steps: shown.result!.route!.steps.slice(0, 40).map((s) => ({ text: s.text.slice(0, 200), meters: s.meters ?? 0 })) } } : undefined;
-      const r = await api<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}) } }).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
+      const knowledge = await knowledgeFor(meRef.current, text);
+      const body = { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}), ...(knowledge ? { knowledge } : {}) };
+      const r = await chatWithTables<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer }>(meRef.current, body).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
       // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
       const { text: noSteps, open: openSteps } = takeStepsTag(r.reply);

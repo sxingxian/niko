@@ -981,6 +981,12 @@ button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; 
 .kn-inset { display: flex; flex-direction: column; gap: 12px; padding: 16px 18px; border-radius: 18px; background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.12); }
 .kn-lead { font: 400 13px/1.45 system-ui, sans-serif; color: #e6eaf1; }
 .kn-lead.sm { font-size: 12px; }
+.kn-devwarn { display: flex; gap: 10px; align-items: flex-start; color: #ffd38a; font: 400 13px/1.45 system-ui, sans-serif; }
+.kn-devwarn .kn-ic { width: 18px; height: 18px; flex: none; margin-top: 1px; }
+.kn-move { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.1); }
+.kn-move-t, .kn-dl { display: flex; flex-direction: column; gap: 6px; min-width: 220px; }
+.kn-move-t { flex: 1; }
+.kn-place:disabled { cursor: default; opacity: .6; }
 .kn-use { display: flex; flex-direction: column; gap: 8px; }
 .kn-use-l { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
 .kn-use .fillbar { max-width: 520px; }
@@ -1036,6 +1042,8 @@ button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; 
 @media (max-width: 700px) {
   .kn-card { padding: 18px 16px; }
   .kn-places { grid-template-columns: minmax(0, 1fr); }
+  .kn-move { flex-direction: column; align-items: stretch; }
+  .kn-move-t, .kn-dl { min-width: 0; }
   .kn-place { min-height: 0; }
   .kn-mode .segs { width: 100%; } .kn-mode .segs-b { flex: 1; }
   .kn-drop { flex-direction: column; align-items: stretch; } .kn-drop .pri { width: 100%; }

@@ -7,8 +7,9 @@ import { users } from '@niko/db';
 import { aiAllowed, cleanKnowledgePrefs, knowledgeAccess, type KnowledgeAccess, type KnowledgePrefs } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
+import { hmacSha256Hex } from '../lib/crypto';
 import { offFor } from '../access';
-import { addPieces, addSheet, addSheetRows, deleteFile, finishFile, keepAsData, KnError, knowledgeDb, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
+import { addCloudflareNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeDb, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
 
 export const knowledge = new Hono<AppEnv>();
 type C = Context<AppEnv>;
@@ -146,6 +147,41 @@ knowledge.delete('/files/:id', async (c) => {
   const gone = await deleteFile(s.k, c.get('user').id, c.req.param('id'));
   if (gone) { await syncCount(c, s.k); await audit(c, 'knowledge.file-removed', {}, c.get('user').id); }
   return c.json({ ok: true });
+});
+
+// Moving a file to the person's device, and making its search numbers again when they change how it's searched.
+knowledge.get('/files/:id/pieces', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  try { return c.json(await filePieces(s.k, c.get('user').id, c.req.param('id'), c.req.query('start'))); }
+  catch (e) { return fail(c, e); }
+});
+knowledge.get('/files/:id/sheets/:sheet/rows', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  try { return c.json(await sheetRows(s.k, c.get('user').id, c.req.param('id'), c.req.param('sheet'), c.req.query('start'))); }
+  catch (e) { return fail(c, e); }
+});
+knowledge.put('/files/:id/numbers', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  const b = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  try { return c.json({ ok: true, ...(await setDeviceNumbers(s.k, c.get('user').id, c.req.param('id'), b)) }); }
+  catch (e) { return fail(c, e); }
+});
+knowledge.post('/files/:id/numbers/cloudflare', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  const u = c.get('user');
+  if (!useCloudflare(s.access, s.prefs)) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  if (await tooMany(c, 'kn-cf:' + u.id, 600, 60)) return c.json({ error: 'That’s a lot at once. Try again in a little while.' }, 429);
+  try { return c.json({ ok: true, ...(await addCloudflareNumbers(s.k, c.env, u.id, c.req.param('id'))) }); }
+  catch (e) { return fail(c, e); }
+});
+
+// The key this account's files on a device are locked with. It is made from the server's own secret and the account,
+// so files kept on a shared computer can only be read while that person is signed in. Never stored or logged.
+knowledge.get('/device-key', async (c) => {
+  const { access } = await who(c);
+  if (!access.device) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  c.header('Cache-Control', 'no-store');
+  return c.json({ key: await hmacSha256Hex(c.env.ENCRYPTION_KEY, `niko.knowledge.device.v1:${c.get('user').id}`) });
 });
 
 // Cloudflare turns a PDF, Word or spreadsheet file into text and keeps nothing; the browser then splits the text.
