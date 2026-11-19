@@ -10,7 +10,7 @@ import { audit, tooMany } from '../lib/session';
 import { seal } from '../lib/crypto';
 import { datasetsOf, datasetsOk, importDataset, removeDatasets } from '../datasets';
 import { KnError } from '../knowledge';
-import { cleanInput, DataProblem, dataCalls, liveFor, runAction, saveLive, saveWeather, sourcesFor, weatherFor, type SourceInput, type SourceRow } from '../datasources';
+import { answerSuggestion, cleanInput, DataProblem, dataCalls, liveFor, runAction, saveLive, saveWeather, sourcesFor, weatherFor, type SourceInput, type SourceRow } from '../datasources';
 import { credentials } from '../providers';
 import { geocode } from '../weather';
 
@@ -52,7 +52,7 @@ data.put('/included/:id', async (c) => {
   const key = typeof b.key === 'string' ? b.key.trim().slice(0, 500) : '';
   if (key && it.row.keyMode === 'own' && it.row.auth !== 'none') {
     const keyEnc = await seal(c.env.ENCRYPTION_KEY, key);
-    await db.insert(dataSourceKeys).values({ sourceId: it.row.id, userId: u.id, keyEnc }).onConflictDoUpdate({ target: [dataSourceKeys.sourceId, dataSourceKeys.userId], set: { keyEnc } });
+    await db.insert(dataSourceKeys).values({ sourceId: it.row.id, userId: u.id, keyEnc, byAdmin: false }).onConflictDoUpdate({ target: [dataSourceKeys.sourceId, dataSourceKeys.userId], set: { keyEnc, byAdmin: false } });
   }
   const on = b.on === true;
   if (on && it.row.keyMode === 'own' && it.row.auth !== 'none' && !key && !it.info.hasKey) return c.json({ error: `${it.row.name} needs your key.` }, 400);
@@ -60,7 +60,8 @@ data.put('/included/:id', async (c) => {
   // Datasets: fetched into Knowledge when turned on (in the background), removed when turned off.
   if (on) importAll(c, it.row, it.info.actions);
   else await removeDatasets(c.env, db, u.id, it.row.id);
-  if (!on && it.row.keyMode === 'own') await db.delete(dataSourceKeys).where(and(eq(dataSourceKeys.sourceId, it.row.id), eq(dataSourceKeys.userId, u.id)));
+  // Their own key goes when they turn it off; one added in their setup stays for next time.
+  if (!on && it.row.keyMode === 'own') await db.delete(dataSourceKeys).where(and(eq(dataSourceKeys.sourceId, it.row.id), eq(dataSourceKeys.userId, u.id), eq(dataSourceKeys.byAdmin, false)));
   await audit(c, on ? 'data.on' : 'data.off', { source: it.row.name }, u.id);
   return c.json({ ok: true });
 });
@@ -169,6 +170,16 @@ data.put('/weather', async (c) => {
 
 // ---------------------------------------------------------------- Engine · Live info
 data.get('/live', async (c) => c.json(await liveFor(c.get('db'), c.get('user'))));
+/** A place Niko suggested from their live questions: kept as one of their places (with the name they gave it), or
+ *  turned down so it isn't offered again. */
+data.post('/live/suggested', async (c) => {
+  const b = await c.req.json<{ key?: unknown; keep?: unknown; name?: unknown }>().catch(() => ({} as Record<string, unknown>));
+  const db = c.get('db'), u = c.get('user');
+  if (typeof b.key !== 'string' || b.key.length > 200) return c.json({ error: 'No such place.' }, 400);
+  const live = await answerSuggestion(db, u.id, b.key, b.keep === true, typeof b.name === 'string' ? b.name.slice(0, 40) : undefined);
+  if (!live) return c.json({ error: 'That suggestion isn’t there any more.' }, 404);
+  return c.json(await liveFor(db, u));
+});
 /** Saves the order for everywhere and each country (only live services they can use) and their places. */
 data.put('/live', async (c) => {
   const b = await c.req.json<{ everywhere?: unknown; countries?: unknown; places?: unknown }>().catch(() => ({} as Record<string, unknown>));

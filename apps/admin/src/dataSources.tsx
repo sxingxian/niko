@@ -155,6 +155,7 @@ function WhoCanUse({ st, reload, fail, setNote }: { st: St; reload: () => Promis
         <span className="k dsa-gh">Sources you added</span>
         {st.sources.length ? st.sources.map((s) => row(`src:${s.id}`, s.name, s.termsOk ? s.actions.filter((a) => a.on).map((a) => a.name).slice(0, 3).join(' · ') : 'Confirm its terms (Change) before anyone can use it', 'switch', !s.termsOk))
           : <p className="sub" style={{ fontSize: 13, padding: '14px 0', borderTop: '1px solid rgba(255,255,255,.1)' }}>No sources added yet. Add one on the Sources tab.</p>}
+        {person && <PersonKeys person={person} />}
         <span className="k dsa-gh">Their own sources</span>
         {row('own', 'Let them add their own', 'Private to them · https, public addresses, read-only actions', 'switch')}
         <span className="k dsa-gh">Datasets and limits</span>
@@ -163,6 +164,64 @@ function WhoCanUse({ st, reload, fail, setNote }: { st: St; reload: () => Promis
       </section>
     </div>
   );
+}
+
+/** Keys for one person, for sources where each person uses their own: added here, the source is ready for them
+ *  (they never see who added it); a key they added themselves is used instead and can't be changed here. */
+type PKey = { source: string; name: string; keyName: string; key: 'admin' | 'theirs' | null };
+function PersonKeys({ person }: { person: Person }) {
+  const [keys, setKeys] = useState<PKey[] | null>(null);
+  const [typed, setTyped] = useState<Record<string, string>>({});
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [msg, setMsg] = useState<Record<string, { ok: boolean; text: string }>>({});
+  const [busy, setBusy] = useState('');
+  const load = useCallback(() => api<{ keys: PKey[] }>(`/admin/data/users/${person.id}/keys`).then((r) => setKeys(r.keys)).catch(() => setKeys([])), [person.id]);
+  useEffect(() => { setKeys(null); setTyped({}); setOpen({}); setMsg({}); void load(); }, [load]);
+  if (!keys?.length) return null;
+  const who = person.name.split(' ')[0] || person.email;
+  const say = (id: string, ok: boolean, text: string) => setMsg((m) => ({ ...m, [id]: { ok, text } }));
+  const test = async (k: PKey) => {
+    setBusy(k.source);
+    try {
+      const r = await api<{ results: TestResult[] }>(`/admin/data/users/${person.id}/keys/${k.source}/test`, { method: 'POST', body: { key: typed[k.source] ?? '' } });
+      const bad = r.results.find((x) => !x.ok);
+      say(k.source, !bad, bad ? bad.problem ?? 'The test didn’t work.' : r.results.length ? 'The key works.' : 'Nothing to test yet.');
+    } catch (e) { say(k.source, false, e instanceof ApiError ? e.message : 'The test didn’t work.'); } finally { setBusy(''); }
+  };
+  const save = async (k: PKey) => {
+    setBusy(k.source);
+    try { await api(`/admin/data/users/${person.id}/keys/${k.source}`, { method: 'PUT', body: { key: typed[k.source] ?? '' } }); setTyped((t) => ({ ...t, [k.source]: '' })); setOpen((o) => ({ ...o, [k.source]: false })); say(k.source, true, 'Saved. It’s ready for them.'); await load(); }
+    catch (e) { say(k.source, false, e instanceof ApiError ? e.message : 'That didn’t save.'); } finally { setBusy(''); }
+  };
+  const remove = async (k: PKey) => {
+    setBusy(k.source);
+    try { await api(`/admin/data/users/${person.id}/keys/${k.source}`, { method: 'DELETE' }); say(k.source, true, 'Removed.'); await load(); }
+    catch (e) { say(k.source, false, e instanceof ApiError ? e.message : 'That didn’t work.'); } finally { setBusy(''); }
+  };
+  return <>
+    <span className="k dsa-gh">Keys for {who}</span>
+    {keys.map((k) => {
+      const editing = !k.key || open[k.source];
+      return (
+        <div key={k.source} className="dsa-key">
+          <div className="dsa-key-top">
+            <span className="ai-txt"><span>{k.name}</span><span className="sub">{k.key === 'admin' ? 'Key added by you' : k.key === 'theirs' ? `${who} added their own key, so theirs is used` : 'Each person’s own key · none yet'}</span></span>
+            <span className={'dsa-key-st' + (k.key ? ' is-ok' : '')}><i />{k.key ? 'Ready' : 'Needs a key'}</span>
+          </div>
+          {k.key !== 'theirs' && (editing ? <>
+            <label className="dsa-key-f"><span className="k">{who}’s {k.keyName}</span><input className="in" type="password" autoComplete="off" value={typed[k.source] ?? ''} maxLength={500} onChange={(e) => setTyped((t) => ({ ...t, [k.source]: e.target.value }))} /></label>
+            <span className="dsa-key-b">
+              {k.key && <button className="bt" disabled={!!busy} onClick={() => setOpen((o) => ({ ...o, [k.source]: false }))}>Cancel</button>}
+              <button className="bt" disabled={!!busy || !(typed[k.source] ?? '').trim()} onClick={() => void test(k)}>Test</button>
+              <button className="pri" disabled={!!busy || !(typed[k.source] ?? '').trim()} onClick={() => void save(k)}>Save key</button>
+            </span>
+          </> : <span className="dsa-key-b"><button className="bt" disabled={!!busy} onClick={() => setOpen((o) => ({ ...o, [k.source]: true }))}>Change</button><button className="bt" disabled={!!busy} onClick={() => void remove(k)}>Remove</button></span>)}
+          {msg[k.source] && <span role="status" className={'sub dsa-key-m' + (msg[k.source]!.ok ? ' is-ok' : ' is-bad')}>{msg[k.source]!.text}</span>}
+        </div>
+      );
+    })}
+    <p className="sub" style={{ fontSize: 12, margin: '8px 0 0' }}>Locked in Niko and never shown again, to you or to them. If they add their own key, theirs is used.</p>
+  </>;
 }
 
 /** Add a source (or change one): 1 · Address and sign-in, 2 · What Niko can ask, 3 · Terms, 4 · Who gets it. */

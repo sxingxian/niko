@@ -1,9 +1,9 @@
 // Admin · Data sources: the sources the admin adds (keys sealed, never shown again), testing them, and who may use
 // each one: a default for everyone, then changes per person, as on AI options. The admin sees counts of people's own
 // sources and calls, never what was asked. Mounted under /api/admin/data.
-import { eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
-import { appSettings, dataSources, users } from '@niko/db';
+import { appSettings, dataSourceKeys, dataSources, users } from '@niko/db';
 import { cleanActions, cleanDataAccess, cleanDataDefaults, sampleValues, type DataAction, type DataOffer } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { audit, requireAdmin } from '../lib/session';
@@ -115,6 +115,50 @@ adminData.put('/users/:id', async (c) => {
   await db.update(users).set({ dataAccess: own }).where(eq(users.id, target.id));
   await audit(c, 'data.user', { target: target.email, changes: Object.entries(own).map(([k, v]) => `${rows.find((r) => `src:${r.id}` === k)?.name ?? k} ${typeof v === 'boolean' ? (v ? 'on' : 'off') : v}`).join(', ') || 'follows the default' }, c.get('user').id);
   return c.json({ ok: true, access: own });
+});
+
+// ---------------------------------------------------------------- a person's keys, added in their setup
+/** Sources where each person uses their own key: whether this person has one, and whether the admin added it. */
+adminData.get('/users/:id/keys', async (c) => {
+  const db = c.get('db'), id = c.req.param('id');
+  const rows = (await db.select().from(dataSources).where(isNull(dataSources.ownerId))).filter((r) => r.keyMode === 'own' && r.auth !== 'none');
+  const keys = await db.select({ sourceId: dataSourceKeys.sourceId, byAdmin: dataSourceKeys.byAdmin }).from(dataSourceKeys).where(eq(dataSourceKeys.userId, id));
+  return c.json({ keys: rows.map((r) => { const k = keys.find((x) => x.sourceId === r.id); return { source: r.id, name: r.name, keyName: r.authName ?? 'key', key: k ? (k.byAdmin ? 'admin' : 'theirs') : null }; }) });
+});
+/** Adds or changes this person's key for a source, tested first. Their own key is never replaced. */
+adminData.put('/users/:id/keys/:source', async (c) => {
+  const db = c.get('db');
+  const target = (await db.select().from(users).where(eq(users.id, c.req.param('id'))).limit(1))[0];
+  const row = (await db.select().from(dataSources).where(and(eq(dataSources.id, c.req.param('source')), isNull(dataSources.ownerId))).limit(1))[0];
+  if (!target || !row || row.keyMode !== 'own' || row.auth === 'none') return c.json({ error: 'That source doesn’t take a key for each person.' }, 404);
+  const b = await c.req.json<{ key?: unknown }>().catch(() => ({} as { key?: unknown }));
+  const key = typeof b.key === 'string' ? b.key.trim() : '';
+  if (!key || key.length > 500 || /[\u0000-\u001f]/.test(key)) return c.json({ error: 'Enter the key.' }, 400);
+  const have = (await db.select().from(dataSourceKeys).where(and(eq(dataSourceKeys.sourceId, row.id), eq(dataSourceKeys.userId, target.id))).limit(1))[0];
+  if (have && !have.byAdmin) return c.json({ error: 'They’ve added their own key, so theirs is used.' }, 409);
+  const keyEnc = await seal(c.env.ENCRYPTION_KEY, key);
+  await db.insert(dataSourceKeys).values({ sourceId: row.id, userId: target.id, keyEnc, byAdmin: true }).onConflictDoUpdate({ target: [dataSourceKeys.sourceId, dataSourceKeys.userId], set: { keyEnc, byAdmin: true } });
+  await audit(c, 'data.user-key', { target: target.email, source: row.name, change: have ? 'changed' : 'added' }, c.get('user').id);
+  return c.json({ ok: true });
+});
+/** Tries a key typed for a person on the source's first action, without saving it. */
+adminData.post('/users/:id/keys/:source/test', async (c) => {
+  const db = c.get('db'), u = c.get('user');
+  const row = (await db.select().from(dataSources).where(and(eq(dataSources.id, c.req.param('source')), isNull(dataSources.ownerId))).limit(1))[0];
+  if (!row || row.keyMode !== 'own' || row.auth === 'none') return c.json({ error: 'That source doesn’t take a key for each person.' }, 404);
+  const b = await c.req.json<{ key?: unknown }>().catch(() => ({} as { key?: unknown }));
+  const key = typeof b.key === 'string' ? b.key.trim() : '';
+  if (!key || key.length > 500) return c.json({ error: 'Enter the key.' }, 400);
+  const acts = (cleanActions(row.actions) as DataAction[]).filter((a) => a.on !== false).slice(0, 1);
+  const trial = { ...row, keyMode: 'one', keyEnc: await seal(c.env.ENCRYPTION_KEY, key) } as SourceRow;
+  try { return c.json({ results: await testActions((a) => runAction(c.env, db, u.id, trial, a, sampleValues(a), 0, { test: true }), acts) }); }
+  catch (e) { return fail(c, e); }
+});
+adminData.delete('/users/:id/keys/:source', async (c) => {
+  const db = c.get('db'), id = c.req.param('id'), source = c.req.param('source');
+  const gone = await db.delete(dataSourceKeys).where(and(eq(dataSourceKeys.sourceId, source), eq(dataSourceKeys.userId, id), eq(dataSourceKeys.byAdmin, true))).returning({ s: dataSourceKeys.sourceId });
+  if (gone.length) await audit(c, 'data.user-key', { target: id, source, change: 'removed' }, c.get('user').id);
+  return c.json({ ok: true });
 });
 
 /** Open-Meteo's paid plan key: Niko then uses Open-Meteo's customer API (its terms ask a paid service for it). Empty removes it. */

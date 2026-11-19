@@ -11,7 +11,8 @@ import { NoteLine, SettingsPage } from './Settings';
 
 type Svc = { id: string; name: string; what: string; own: boolean; usedIn: string[] };
 type Place = { name: string; value: string };
-type St = { services: Svc[]; everywhere: string[]; countries: Record<string, string[]>; places: Place[]; canAdd: boolean };
+type Suggested = { key: string; name: string; value: string; count: number };
+type St = { services: Svc[]; everywhere: string[]; countries: Record<string, string[]>; places: Place[]; canAdd: boolean; suggested?: Suggested[] };
 type TestResult = { action: string; name: string; ok: boolean; ms?: number; problem?: string };
 
 export function LiveInfo() {
@@ -22,13 +23,19 @@ export function LiveInfo() {
   const [menu, setMenu] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [newCc, setNewCc] = useState(false);
-  const [edit, setEdit] = useState<{ i: number; p: Place } | null>(null);
+  const [edit, setEdit] = useState<{ i: number; p: Place; from?: Suggested } | null>(null);
   const load = useCallback(() => api<St>('/data/live').then((r) => { setSt(r); return r; }).catch((e) => { setNote({ ok: false, text: (e as Error).message }); return null; }), []);
   useEffect(() => { void load().then((r) => { if (r && !r.everywhere.length) { const ccs = Object.keys(r.countries); if (ccs.length) setTab(ccs[0]!); } }); }, [load]);
   if (!st) return <SettingsPage title="Engine · Live info" sub="Bus arrivals, train alerts, traffic and parking, from live services."><NoteLine note={note} /></SettingsPage>;
   const save = async (p: Partial<Pick<St, 'everywhere' | 'countries' | 'places'>>, text?: string) => {
     setNote(null);
     try { setSt(await api<St>('/data/live', { method: 'PUT', body: p })); if (text) setNote({ ok: true, text }); } catch (e) { setNote({ ok: false, text: (e as Error).message }); }
+  };
+  // A place Niko noticed in their live questions: kept only with their yes (or their own name for it).
+  const keepSuggested = async (x: Suggested, name?: string) => {
+    setNote(null);
+    try { setSt(await api<St>('/data/live/suggested', { body: { key: x.key, keep: true, ...(name ? { name } : {}) } })); setNote({ ok: true, text: `${name || x.name} saved.` }); }
+    catch (e) { setNote({ ok: false, text: (e as Error).message }); }
   };
   const list = tab === 'ww' ? st.everywhere : st.countries[tab] ?? [];
   const setList = (l: string[]) => (tab === 'ww' ? save({ everywhere: l }) : save({ countries: { ...st.countries, [tab]: l } }));
@@ -106,9 +113,18 @@ export function LiveInfo() {
               {st.places.map((p, i) => edit?.i === i ? null : (
                 <li key={i}><b>{p.name}</b><span className="live-pv">{p.value}</span><span className="live-pb"><button type="button" className="sec dsp-b" onClick={() => setEdit({ i, p })}>Edit</button><button type="button" className="sec dsp-b dsp-danger" onClick={() => void save({ places: st.places.filter((_, j) => j !== i) })}>Remove</button></span></li>
               ))}
+              {(st.suggested ?? []).filter((x) => edit?.from?.key !== x.key).map((x) => (
+                <li key={x.key} className="live-sug"><b>{x.name}</b><span className="live-pv">{x.value}<span className="live-from">Suggested from {x.count} times you asked</span></span><span className="live-pb"><button type="button" className="pri dsp-b" onClick={() => void keepSuggested(x)}>Yes, keep</button><button type="button" className="sec dsp-b" onClick={() => setEdit({ i: -1, p: { name: x.name, value: x.value }, from: x })}>Edit</button></span></li>
+              ))}
             </ul>
             {edit ? (
-              <form className="live-pform" onSubmit={(e) => { e.preventDefault(); const p = { name: edit.p.name.trim(), value: edit.p.value.trim() }; if (!p.name || !p.value) return; void save({ places: edit.i < 0 ? [...st.places, p] : st.places.map((x, j) => (j === edit.i ? p : x)) }, `${p.name} saved.`); setEdit(null); }}>
+              <form className="live-pform" onSubmit={(e) => {
+                e.preventDefault(); const p = { name: edit.p.name.trim(), value: edit.p.value.trim() }; if (!p.name || !p.value) return;
+                // A suggested place kept with their own name; with its value changed too, it's saved as their own place.
+                if (edit.from && p.value === edit.from.value) void keepSuggested(edit.from, p.name);
+                else void save({ places: edit.i < 0 ? [...st.places, p] : st.places.map((x, j) => (j === edit.i ? p : x)) }, `${p.name} saved.`);
+                setEdit(null);
+              }}>
                 <input className="in" aria-label="Place name" placeholder="Home, Office, Usual stop" maxLength={40} value={edit.p.name} onChange={(e) => setEdit({ ...edit, p: { ...edit.p, name: e.target.value } })} autoFocus />
                 <input className="in" aria-label="Where it is" placeholder="Example Rd stop · buses 174, 961" maxLength={160} value={edit.p.value} onChange={(e) => setEdit({ ...edit, p: { ...edit.p, value: e.target.value } })} />
                 <button type="button" className="sec dsp-b" onClick={() => setEdit(null)}>Cancel</button><button type="submit" className="pri dsp-b" disabled={!edit.p.name.trim() || !edit.p.value.trim()}>Save</button>
@@ -119,11 +135,12 @@ export function LiveInfo() {
         <aside className="kn-aside" aria-label="How live info works">
           <span className="k">How live info works</span>
           <p>Same two steps as Maps: <b>your services</b>, then <b>the order</b> for everywhere and each country. The country comes from where you are when Niko already knows it, or the one you tell it.</p>
-          <p>Live answers say how fresh they are (“updated 20 seconds ago”); tap Refresh to ask again.</p>
+          <p>Live answers say how fresh they are (“updated 20 seconds ago”) and refresh every minute while they’re on screen, for up to five minutes. Tap Refresh to ask again after that.</p>
           <p>For anything time-sensitive, live data always wins over your files; an old timetable in a file is shown with its date.</p>
           <span className="k">Private</span>
           <p>Only a stop code, line or location is sent to the service, never your name or files. Your key never leaves Niko’s server.</p>
           <p>Your places are used to understand your questions. They’re kept with your account and you can remove them at any time.</p>
+          <p>Places you haven’t confirmed are suggestions from what Niko learned; they’re used only after you say yes.</p>
           <p><Link to="/engine">Back to Engine</Link></p>
         </aside>
       </div>

@@ -482,3 +482,14 @@ body { background: #07090d; }
 .dsa-gh { color: #fff !important; padding: 16px 0 4px; }
 @media (max-width: 900px) { .dsa-tr { grid-template-columns: minmax(0, 1fr) auto; } .dsa-tr > :nth-child(2), .dsa-tr > :nth-child(3) { display: none; } .dsa-tr.head { display: none; } }
 .dsa-name { display: flex; align-items: center; gap: 8px; }
+/* Admin · Data sources · Who can use them: a person's keys. */
+.dsa-key { display: flex; flex-direction: column; gap: 10px; padding: 14px 0; border-top: 1px solid rgba(255,255,255,.1); }
+.dsa-key-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dsa-key-st { display: inline-flex; align-items: center; gap: 8px; font: 400 13px system-ui, sans-serif; color: #ffd38a; white-space: nowrap; }
+.dsa-key-st i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.dsa-key-st.is-ok { color: #a8f0c6; }
+.dsa-key-f { display: flex; flex-direction: column; gap: 6px; }
+.dsa-key-f .in { height: 44px; border-radius: 14px; }
+.dsa-key-b { display: flex; gap: 8px; justify-content: flex-end; }
+.dsa-key-m.is-ok { color: #7fe3a8; }
+.dsa-key-m.is-bad { color: #ffb3b3; }

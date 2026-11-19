@@ -33,7 +33,7 @@ import { knowledge, syncNotes } from './knowledge';
 import { data } from './data';
 import { refreshUsed } from '../datasets';
 import { ownEmbedder } from '../ownEmbed';
-import { DataProblem, liveFor, openMeteoKey, runAction, sourcesFor, usableFor, weatherFor } from '../datasources';
+import { DataProblem, liveFor, noteLivePlace, openMeteoKey, runAction, sourcesFor, usableFor, weatherFor } from '../datasources';
 import { accountKnowledge, deviceKnowledgeFor, embed, knowledgeFor, lookupSheet, type KnContext } from '../knowledge';
 import { JUDGE_RULE, learnedBlock, LEARNED_RULE, notesFor, PEOPLE_RULE, QUIET_RULE, saveNote, SAVE_RULE, SITUATION_RULE, situationBlock, taughtFor } from '../learned';
 import { backgroundFor } from '../backgrounds';
@@ -1019,6 +1019,8 @@ app.post('/chat', async (c) => {
         try {
           const r = await runAction(c.env, db, u.id, src.row, act, a.values, ds.calls);
           if (dataUsed.length < 3) dataUsed.push({ source: r.source, action: act.name, at: r.at, attribution: r.attribution, live: act.live });
+          // With learning on, a place asked about in live questions is counted, so Live info can offer to keep it.
+          if (act.live && src.row.useAs === 'live' && knAccess.learning && knPrefs.learn) { try { c.executionCtx.waitUntil(noteLivePlace(db, u.id, src.row, act, a.values).catch(() => undefined)); } catch { /* not on Workers (tests) */ } }
           return `<DATA RESULTS from ${src.name} · ${act.name} · fetched ${Math.max(0, Math.round((Date.now() - r.at) / 1000))} seconds ago>\n${r.text}\n</DATA RESULTS>`;
         } catch (e) { return `${src.name} · ${act.name}: ${e instanceof DataProblem ? e.message : 'it couldn’t be reached just now.'}`; }
       }));

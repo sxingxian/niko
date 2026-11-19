@@ -374,7 +374,31 @@ export function placesBlock(places: LivePlace[]): string {
 export const LIVE_RULE = 'Live services answer time-sensitive questions (arrivals, train alerts, traffic, parking): ask them in the order given in LIVE ORDER with their data tags, using YOUR PLACES for “my bus”, “home” or “the office”. Live data always wins over files for times; an old timetable in a file is mentioned with its date. Say how fresh live data is. If no live service can answer, give the timetable from map routes and say the times aren’t live.';
 /** A person's own choices: the admin sources they turned on, actions they switched off ("sourceId:actionId"), and
  *  their weather and live settings. */
-export interface DataPrefs { on: string[]; actionsOff: string[]; weather: WeatherPrefs; live: LivePrefs }
+/** A place Niko noticed in live questions (a stop code asked about again and again). Kept by the server, never from
+ *  the request; offered on Live info once seen LIVE_SUGGEST_AT times, kept as a place only after a yes, and forgotten
+ *  after LIVE_SEEN_DAYS without use. Only noticed while learning is on for the person. */
+export interface LiveSeen { key: string; name: string; value: string; count: number; first: number; last: number }
+export const LIVE_SUGGEST_AT = 3;
+export const LIVE_SEEN_DAYS = 60;
+const DAY = 86_400_000;
+export function cleanLiveSeen(v: unknown): LiveSeen[] {
+  return (Array.isArray(v) ? v : []).map((x) => x as Record<string, unknown>).filter((x) => x && typeof x.key === 'string' && x.key.length <= 200)
+    .map((x) => ({ key: String(x.key), name: s(x.name, 40), value: s(x.value, 160), count: Math.max(0, Math.min(10_000, Math.floor(Number(x.count) || 0))), first: Number(x.first) || 0, last: Number(x.last) || 0 }))
+    .filter((x) => x.name && x.value).slice(0, 30);
+}
+/** Counts one more time a place came up in a live question; forgets ones not seen for LIVE_SEEN_DAYS. */
+export function noteSeen(list: LiveSeen[], item: { key: string; name: string; value: string }, now: number): LiveSeen[] {
+  const fresh = list.filter((x) => now - x.last < LIVE_SEEN_DAYS * DAY);
+  const have = fresh.find((x) => x.key === item.key);
+  const next = have ? fresh.map((x) => (x.key === item.key ? { ...x, count: x.count + 1, last: now } : x)) : [{ ...item, name: item.name.slice(0, 40), value: item.value.slice(0, 160), count: 1, first: now, last: now }, ...fresh];
+  return next.sort((a, b) => b.last - a.last).slice(0, 30);
+}
+/** Places to offer: seen often enough, recently, not already one of their places, and not turned down. */
+export function liveSuggestions(p: Pick<DataPrefs, 'live' | 'liveSeen' | 'liveNo'>, now: number): LiveSeen[] {
+  const have = new Set(p.live.places.map((x) => x.value.toLowerCase()));
+  return p.liveSeen.filter((x) => x.count >= LIVE_SUGGEST_AT && now - x.last < LIVE_SEEN_DAYS * DAY && !have.has(x.value.toLowerCase()) && !p.liveNo.includes(x.key)).slice(0, 5);
+}
+export interface DataPrefs { on: string[]; actionsOff: string[]; weather: WeatherPrefs; live: LivePrefs; liveSeen: LiveSeen[]; liveNo: string[] }
 const WX_ID = /^([0-9a-f-]{36}|open-meteo)$/;
 export function cleanWeatherPrefs(v: unknown): WeatherPrefs {
   const o = (v ?? {}) as Record<string, unknown>;
@@ -384,7 +408,8 @@ export function cleanWeatherPrefs(v: unknown): WeatherPrefs {
 export function cleanDataPrefs(v: unknown): DataPrefs {
   const o = (v ?? {}) as Record<string, unknown>;
   const ids = (x: unknown, re: RegExp) => (Array.isArray(x) ? [...new Set(x.filter((y): y is string => typeof y === 'string' && re.test(y)))].slice(0, 200) : []);
-  return { on: ids(o.on, /^[0-9a-f-]{36}$/), actionsOff: ids(o.actionsOff, /^[0-9a-f-]{36}:[a-z0-9-]{1,40}$/), weather: cleanWeatherPrefs(o.weather), live: cleanLivePrefs(o.live) };
+  return { on: ids(o.on, /^[0-9a-f-]{36}$/), actionsOff: ids(o.actionsOff, /^[0-9a-f-]{36}:[a-z0-9-]{1,40}$/), weather: cleanWeatherPrefs(o.weather), live: cleanLivePrefs(o.live),
+    liveSeen: cleanLiveSeen(o.liveSeen), liveNo: (Array.isArray(o.liveNo) ? o.liveNo.filter((x): x is string => typeof x === 'string' && x.length <= 200) : []).slice(-50) };
 }
 /** The weather order a person sees: their saved order first (only sources they can use), then any new ones, with
  *  Open-Meteo first or last as the plan says until they choose. */
