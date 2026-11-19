@@ -8,7 +8,7 @@ import { cleanActions, cleanDataPrefs, DATA_LIMITS, sampleValues, type DataActio
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
 import { seal } from '../lib/crypto';
-import { cleanInput, DataProblem, dataCalls, runAction, saveWeather, sourcesFor, weatherFor, type SourceInput, type SourceRow } from '../datasources';
+import { cleanInput, DataProblem, dataCalls, liveFor, runAction, saveLive, saveWeather, sourcesFor, weatherFor, type SourceInput, type SourceRow } from '../datasources';
 import { credentials } from '../providers';
 import { geocode } from '../weather';
 
@@ -155,4 +155,18 @@ data.put('/weather', async (c) => {
   const order = pick(b.order) ?? now.list.map((x) => x.id);
   await saveWeather(db, u.id, { order: [...order, ...ids.filter((x) => !order.includes(x))], off: pick(b.off) ?? now.list.filter((x) => !x.on).map((x) => x.id), home, units: b.units === 'F' ? 'F' : b.units === 'C' ? 'C' : now.units, location: typeof b.location === 'boolean' ? b.location : now.location });
   return c.json(await weatherFor(c.env, db, u));
+});
+
+// ---------------------------------------------------------------- Engine · Live info
+data.get('/live', async (c) => c.json(await liveFor(c.get('db'), c.get('user'))));
+/** Saves the order for everywhere and each country (only live services they can use) and their places. */
+data.put('/live', async (c) => {
+  const b = await c.req.json<{ everywhere?: unknown; countries?: unknown; places?: unknown }>().catch(() => ({} as Record<string, unknown>));
+  const db = c.get('db'), u = c.get('user');
+  const now = await liveFor(db, u);
+  const ids = now.services.map((x) => x.id);
+  const keep = (l: unknown) => (Array.isArray(l) ? l.filter((x): x is string => typeof x === 'string' && ids.includes(x)) : []);
+  const countries = b.countries && typeof b.countries === 'object' ? Object.fromEntries(Object.entries(b.countries as Record<string, unknown>).map(([cc, l]) => [cc.toUpperCase(), keep(l)])) : now.countries;
+  await saveLive(db, u.id, { everywhere: b.everywhere !== undefined ? keep(b.everywhere) : now.everywhere, countries, places: b.places !== undefined ? b.places as never : now.places });
+  return c.json(await liveFor(db, u));
 });

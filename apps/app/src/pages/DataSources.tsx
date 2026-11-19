@@ -3,7 +3,7 @@
 // Keys are typed here and sent once; they never come back.
 import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { actionLine, type DataSourceInfo } from '@niko/shared';
+import { actionLine, type DataSourceInfo, type DataUse } from '@niko/shared';
 import { ActionsStep, AddressStep, addressProblem, api, draftOf, emptyDraft, Switch, TestLines, type SourceDraft, type TestResult } from '@niko/ui';
 import { useNiko } from '../niko';
 import { NoteLine, SettingsPage } from './Settings';
@@ -167,9 +167,9 @@ function KeySheet({ s, onClose, onKey }: { s: Src; onClose: () => void; onKey: (
 }
 
 /** Add a data source (or change one of their own): 1 · Address and sign-in, 2 · What Niko can ask, 3 · Test and save. */
-function AddOwn({ edit, onClose, onSaved }: { edit?: Src; onClose: () => void; onSaved: (text: string) => Promise<void> }) {
+export function AddOwn({ edit, use, onClose, onSaved }: { edit?: Src; use?: DataUse; onClose: () => void; onSaved: (text: string) => Promise<void> }) {
   const sheet = useSheet(onClose);
-  const [d, setD] = useState<SourceDraft>(() => (edit ? draftOf(edit) : emptyDraft()));
+  const [d, setD] = useState<SourceDraft>(() => (edit ? draftOf(edit) : { ...emptyDraft(), ...(use ? { use } : {}) }));
   const [stepN, setStep] = useState(1);
   const [err, setErr] = useState('');
   const [tests, setTests] = useState<TestResult[] | null>(null);

@@ -339,9 +339,35 @@ export function dataAllowed(defaults: DataDefaults, own: DataAccess, sources: { 
  *  Unset (never saved) means: Open-Meteo where the plan's order puts it, the home place and units from an older
  *  Open-Meteo connection, location on. */
 export interface WeatherPrefs { order: string[]; off: string[]; home: string; units: 'C' | 'F'; location: boolean; saved: boolean }
+/** Engine · Live info: which live services Niko tries first, everywhere and per country (map timetables always come
+ *  last and aren't live), and the person's places (home, office, usual stop) so "when's my bus?" needs no details. */
+export interface LivePlace { name: string; value: string }
+export interface LivePrefs { everywhere: string[]; countries: Record<string, string[]>; places: LivePlace[] }
+export const LIVE_LIMITS = { countries: 20, perList: 10, places: 20 } as const;
+export function cleanLivePrefs(v: unknown): LivePrefs {
+  const o = (v ?? {}) as Record<string, unknown>;
+  const ids = (x: unknown) => (Array.isArray(x) ? [...new Set(x.filter((y): y is string => typeof y === 'string' && /^[0-9a-f-]{36}$/.test(y)))].slice(0, LIVE_LIMITS.perList) : []);
+  const countries: Record<string, string[]> = {};
+  for (const [cc, list] of Object.entries((o.countries ?? {}) as Record<string, unknown>).slice(0, LIVE_LIMITS.countries)) if (/^[A-Z]{2}$/.test(cc)) countries[cc] = ids(list);
+  const places = (Array.isArray(o.places) ? o.places : []).map((p) => ({ name: s((p as LivePlace)?.name, 40), value: s((p as LivePlace)?.value, 160) })).filter((p) => p.name && p.value).slice(0, LIVE_LIMITS.places);
+  return { everywhere: ids(o.everywhere), countries, places };
+}
+/** The live services to try for a country: its own list, else the Everywhere list; with no Everywhere list and just
+ *  one country list, that one (most people set up only where they live). Only services they can use. */
+export function liveOrder(p: LivePrefs, country: string | null, available: string[]): { list: string[]; from: string | null } {
+  const ok = (l: string[]) => l.filter((id) => available.includes(id));
+  if (country && p.countries[country]?.length) return { list: ok(p.countries[country]!), from: country };
+  if (p.everywhere.length) return { list: ok(p.everywhere), from: null };
+  const ccs = Object.keys(p.countries).filter((cc) => p.countries[cc]!.length);
+  return ccs.length === 1 ? { list: ok(p.countries[ccs[0]!]!), from: ccs[0]! } : { list: [], from: null };
+}
+export function placesBlock(places: LivePlace[]): string {
+  return places.length ? `<YOUR PLACES>\n${places.map((p) => `- ${p.name}: ${p.value}`).join('\n')}\n</YOUR PLACES>` : '';
+}
+export const LIVE_RULE = 'Live services answer time-sensitive questions (arrivals, train alerts, traffic, parking): ask them in the order given in LIVE ORDER with their data tags, using YOUR PLACES for “my bus”, “home” or “the office”. Live data always wins over files for times; an old timetable in a file is mentioned with its date. Say how fresh live data is. If no live service can answer, give the timetable from map routes and say the times aren’t live.';
 /** A person's own choices: the admin sources they turned on, actions they switched off ("sourceId:actionId"), and
- *  their weather settings. */
-export interface DataPrefs { on: string[]; actionsOff: string[]; weather: WeatherPrefs }
+ *  their weather and live settings. */
+export interface DataPrefs { on: string[]; actionsOff: string[]; weather: WeatherPrefs; live: LivePrefs }
 const WX_ID = /^([0-9a-f-]{36}|open-meteo)$/;
 export function cleanWeatherPrefs(v: unknown): WeatherPrefs {
   const o = (v ?? {}) as Record<string, unknown>;
@@ -351,7 +377,7 @@ export function cleanWeatherPrefs(v: unknown): WeatherPrefs {
 export function cleanDataPrefs(v: unknown): DataPrefs {
   const o = (v ?? {}) as Record<string, unknown>;
   const ids = (x: unknown, re: RegExp) => (Array.isArray(x) ? [...new Set(x.filter((y): y is string => typeof y === 'string' && re.test(y)))].slice(0, 200) : []);
-  return { on: ids(o.on, /^[0-9a-f-]{36}$/), actionsOff: ids(o.actionsOff, /^[0-9a-f-]{36}:[a-z0-9-]{1,40}$/), weather: cleanWeatherPrefs(o.weather) };
+  return { on: ids(o.on, /^[0-9a-f-]{36}$/), actionsOff: ids(o.actionsOff, /^[0-9a-f-]{36}:[a-z0-9-]{1,40}$/), weather: cleanWeatherPrefs(o.weather), live: cleanLivePrefs(o.live) };
 }
 /** The weather order a person sees: their saved order first (only sources they can use), then any new ones, with
  *  Open-Meteo first or last as the plan says until they choose. */

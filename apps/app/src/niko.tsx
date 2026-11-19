@@ -100,7 +100,7 @@ interface NikoState {
   /** The answer that came from a "That was me" (and whether it was added to the voiceprint). */
   voiceNote: { for: string; learned: boolean } | null;
   /** Data sources an answer came from (source, what was asked, when), for the answer it came with. */
-  dataUsed: { for: string; items: DataUsed[] } | null;
+  dataUsed: { for: string; items: DataUsed[]; question: string } | null;
   /** On for this account, but this device has no voiceprint yet (Niko answers anyone here until it's set up). */
   voiceBanner: boolean;
   /** For the top bar: "Only you", or "Not set up here"; null when the setting is off. */
@@ -247,7 +247,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [weather, setWeather] = useState<{ for: string; card: WeatherCard } | null>(null);
   const [knowledge, setKnowledge] = useState<{ for: string; k: KnowledgeAnswer } | null>(null);
   const [voiceChip, setVoiceChip] = useState(false);
-  const [dataUsed, setDataUsed] = useState<{ for: string; items: DataUsed[] } | null>(null);
+  const [dataUsed, setDataUsed] = useState<{ for: string; items: DataUsed[]; question: string } | null>(null);
   const [voiceNote, setVoiceNote] = useState<{ for: string; learned: boolean } | null>(null);
   const [bannerLater, setBannerLater] = useState(() => { try { return sessionStorage.getItem('niko.voice.later') === '1'; } catch { return false; } });
   const [nextStep, setNextStep] = useState<FollowUp | null>(null);
@@ -755,7 +755,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       const knowledge = await knowledgeFor(meRef.current, text, { pin: opts.pin });
       // Roughly where the user is, for a situation, only when they shared it for a map in the last few minutes.
       const mh = mapHere.current, near = mh && Date.now() - mh.at < 5 * 60_000 ? { lat: Math.round(mh.lat * 100) / 100, lon: Math.round(mh.lng * 100) / 100 } : undefined;
-      const body = { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}), ...(knowledge ? { knowledge } : {}), ...(opts.pin ? { pin: opts.pin } : {}), ...(quietRef.current ? { quiet: true } : {}), ...(near && meRef.current?.knowledge?.situations ? { near } : {}) };
+      const body = { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}), ...(knowledge ? { knowledge } : {}), ...(opts.pin ? { pin: opts.pin } : {}), ...(quietRef.current ? { quiet: true } : {}), ...(near && meRef.current?.knowledge?.situations ? { near } : {}), ...(meRef.current?.live ? { ...(/^[A-Z]{2}$/.test(mapCountryRef.current) ? { country: mapCountryRef.current } : {}), ...(near ? { here: near } : {}) } : {}) };
       const r = await chatWithTables<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer; learned?: { id: string; kind: string; said: string; means: string }[]; learn?: unknown; choices?: string[]; judge?: boolean; data?: DataUsed[] }>(meRef.current, body).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
       const kept = await keepDeviceNotes(meRef.current, r.learn);
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
@@ -797,7 +797,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         : learnedNow.length ? { for: answer, question: text, kind: 'learned', items: learnedNow, device: device && kept.length > 0 }
         : r.choices?.length ? { for: answer, question: text, kind: 'choices', options: r.choices }
         : r.judge ? { for: answer, question: text, kind: 'judge' } : null);
-      setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setVoiceNote(vmNext.current ? { for: answer, learned: vmNext.current.learned } : null); vmNext.current = null; setDataUsed(r.data?.length ? { for: answer, items: r.data } : null); setReply(answer); say(answer, 0);
+      setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setVoiceNote(vmNext.current ? { for: answer, learned: vmNext.current.learned } : null); vmNext.current = null; setDataUsed(r.data?.length ? { for: answer, items: r.data, question: text } : null); setReply(answer); say(answer, 0);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) goSelf('/' + item.view); }
       else if (asked) goSelf(asked);
       else if (page && handler.current?.(page, true)) { /* the list on screen turned its page, quietly: Niko is speaking */ }
