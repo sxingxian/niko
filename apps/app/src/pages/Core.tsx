@@ -6,7 +6,7 @@ import { aiAllowed, stripTags, PAGE_SIZES, SEND_COUNTDOWN_SECONDS, voiceName, vo
 /** The first voice this account may use (the admin may have turned some off); the device voice if none. */
 const firstVoice = (m: Me | null | undefined) => { const off = m?.aiOff ?? []; return off.includes('sec:voices') ? 'device' : voiceOrder(m?.engine).find((v) => v.startsWith('vkey:') || aiAllowed(off, voiceOption(v))) ?? 'device'; };
 import { Backdrop, api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
-import { useNiko, type DataUsed, type FollowUp, type KnowledgeAnswer } from '../niko';
+import { useNiko, type DataUsed, type NearStop, type FollowUp, type KnowledgeAnswer } from '../niko';
 import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
 import { isStacked } from '../flow';
 import { PictureCard } from './Picture';
@@ -205,7 +205,7 @@ const timeOf = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: 'nume
 /** A live card asks again every minute while it's on screen and the page is in view, five times at most (each is an
  *  AI round and a call to the service), then waits for Refresh. */
 const LIVE_EVERY_MS = 60_000, LIVE_TIMES = 5;
-function DataCard({ items, onRefresh, onAuto, tabbable }: { items: DataUsed[]; onRefresh: () => void; onAuto: () => Promise<void>; tabbable: boolean }) {
+function DataCard({ items, near = [], onRefresh, onAuto, tabbable }: { items: DataUsed[]; near?: NearStop[]; onRefresh: () => void; onAuto: () => Promise<void>; tabbable: boolean }) {
   const latest = Math.max(...items.map((d) => d.at)), live = items.some((d) => d.live);
   const [now, setNow] = useState(() => Date.now());
   const times = useRef(0);
@@ -222,6 +222,12 @@ function DataCard({ items, onRefresh, onAuto, tabbable }: { items: DataUsed[]; o
   const ago = secs < 60 ? `${Math.max(5, Math.round(secs / 5) * 5)} seconds ago` : secs < 3600 ? `${Math.round(secs / 60)} min ago` : `at ${timeOf(latest)}`;
   return (
     <section className="g kn-src" aria-label="Data sources">
+      {near.length > 0 && <div className="near">
+        <span className="k">Near you</span>
+        <ul className="near-list">{near.map((s, i) => (
+          <li key={i}><span className={'near-pill ' + s.kind}>{s.kind === 'rail' ? 'MRT' : 'Bus'}</span><span className="near-t"><b>{s.name}</b><span>{[s.code ? (s.kind === 'rail' ? s.code : `Stop ${s.code}`) : '', `${s.meters} m`, `${Math.max(1, Math.ceil((s.meters * 1.3) / 80))} min walk`].filter(Boolean).join(' · ')}</span></span></li>
+        ))}</ul>
+      </div>}
       <span className="k">{live ? `Updated ${ago}` : `${items.length === 1 ? 'Source' : 'Sources'} · ${timeOf(latest)}`}</span>
       <ol className="kn-src-list">{items.map((d, i) => (
         <li key={i}><span className="kn-src-n app">{i + 1}</span><span className="kn-src-t"><b>{d.source} · {d.action}</b><span>{[d.live ? 'Live' : `As of ${timeOf(d.at)}`, d.attribution].filter(Boolean).join(' · ')}</span></span></li>
@@ -230,6 +236,18 @@ function DataCard({ items, onRefresh, onAuto, tabbable }: { items: DataUsed[]; o
       <span className="kn-src-note">{live ? 'Refreshes every minute while it’s on screen. Live data always wins over files for times.' : 'Niko only asks a source what its actions allow.'}</span>
     </section>
   );
+}
+
+/** The mic: talk; while someone is talking, send it now; while typing, shown paused (a tap still talks). */
+function MicButton({ size, live, label }: { size?: number; live?: boolean; label: string }) {
+  const n = useNiko();
+  if (n.talking) return <button className="micbtn send" onClick={n.toggleMic} aria-label="Send now"><Icon name="arrow" size={size} /></button>;
+  return <button className={'micbtn' + (live ? ' live' : '') + (n.typingPaused ? ' paused' : '')} onClick={n.toggleMic} aria-label={n.typingPaused ? `${label} (paused while you type)` : label}><Icon name="mic" size={size} /></button>;
+}
+/** How long Niko keeps listening for a follow-up after an answer: a bar that runs down. */
+function FollowBar({ until }: { until: number }) {
+  const left = Math.max(0, until - Date.now());
+  return <span className="follow-bar" aria-hidden="true"><i key={until} style={{ animationDuration: `${left}ms` }} /></span>;
 }
 
 export function Home() {
@@ -262,6 +280,8 @@ export function Home() {
   }, [n.reply, n.weather, n.knowledge, wide]);
   // Quiet mode: questions are typed, so the box opens.
   useEffect(() => { if (n.quiet) setTyping(true); }, [n.quiet]);
+  // While the type box is open Niko doesn't listen for a follow-up, so key clicks can't be taken for speech.
+  useEffect(() => { n.typing(typing); }, [typing]); // eslint-disable-line react-hooks/exhaustive-deps
   const submit = (e: FormEvent) => { e.preventDefault(); const t = text; setText(''); setTyping(false); void n.ask(t); };
   const cards = shown ? (shown.chat || shown.kn || followFor(n.followUp, shown.reply) ? 2 : 1) : 0;
   const card = !!pic || !!mapv;
@@ -287,6 +307,7 @@ export function Home() {
           <span className="k accent" role="status">{n.label}</span>
           {locked && n.lockAsk ? <LockEntry /> : <>
             <p>{n.line}</p>
+            {!locked && n.followUntil > 0 && <FollowBar until={n.followUntil} />}
             {!locked && n.voiceProblem && <Link to="/voice" className="voice-note">Your first voice could not speak, so the next one in your list was used. {n.voiceProblem}</Link>}
             {!locked && <ResumeRow />}
             {!locked && <HabitRow />}
@@ -365,7 +386,7 @@ export function Home() {
           </div>
           {n.dataUsed?.for === shown.reply && !shown.kn && !followFor(n.followUp, shown.reply) && (
             <div className="card-build" style={{ ['--d' as string]: `${CARD_GAP}s` }}>
-              <DataCard items={n.dataUsed.items} tabbable={open} onRefresh={() => void n.ask(n.dataUsed!.question)} onAuto={n.refreshLive} />
+              <DataCard items={n.dataUsed.items} near={n.dataUsed.near} tabbable={open} onRefresh={() => void n.ask(n.dataUsed!.question)} onAuto={n.refreshLive} />
               <Outline />
             </div>
           )}
@@ -395,13 +416,13 @@ export function Home() {
       {typing && !locked && (
         <form className="g typebar" onSubmit={submit}>
           <label className="sr" htmlFor="ask">Message Niko</label>
-          <input id="ask" autoFocus value={text} onChange={(e) => setText(e.target.value)} placeholder="Ask, or tell me what to do" />
+          <input id="ask" autoFocus value={text} onChange={(e) => { setText(e.target.value); n.typing(true, true); }} placeholder="Ask, or tell me what to do" />
           <button className="ib on" style={{ width: 44, height: 44 }} aria-label="Send"><Icon name="arrow" size={20} /></button>
         </form>
       )}
       {!locked && <div className="controls">
         <button className="ib g" onClick={() => setTyping(!typing)} aria-label="Type instead" aria-pressed={typing}><Icon name="keys" /></button>
-        <button className="micbtn" onClick={n.toggleMic} aria-label="Talk"><Icon name="mic" size={28} /></button>
+        <MicButton size={28} label="Talk" />
         <button className="ib g" onClick={n.stop} aria-label="Stop"><Icon name="stop" /></button>
       </div>}
     </div>
@@ -739,7 +760,7 @@ export function Workspace() {
         <div className="status"><span className="k accent" role="status">{n.label}</span><span>{n.line}</span></div>
         <ResumeRow />
         <div className="ws-mic">
-          <button className={'micbtn' + (n.mode === 'listening' ? ' live' : '')} onClick={n.toggleMic} aria-label="Talk to Niko"><Icon name="mic" /></button>
+          <MicButton live={n.mode === 'listening'} label="Talk to Niko" />
           {n.mode !== 'idle' && <button className="ib g" onClick={n.stop} aria-label="Stop"><Icon name="stop" /></button>}
         </div>
       </div>

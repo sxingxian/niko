@@ -27,15 +27,19 @@ export function captureSupported(): boolean {
  * - it ends after a longer quiet, and the moment before speech is kept, so the first word isn't cut off.
  */
 export interface Vad { push(rms: number, ms: number): 'wait' | 'start' | 'talk' | 'end' | 'noise' }
-export const VAD = { MIN_START: 0.006, MAX_START: 0.06, FLOOR_MIN: 0.0015, FLOOR_MAX: 0.025, START_X: 3, KEEP_X: 1.8, QUIET_MS: 1300, PRE_MS: 800, ROOM_MS: 1500, WARM_MS: 250 } as const;
+export const VAD = { MIN_START: 0.006, MAX_START: 0.06, FLOOR_MIN: 0.0015, FLOOR_MAX: 0.025, START_X: 3, KEEP_X: 1.8, QUIET_MS: 1100, PRE_MS: 800, ROOM_MS: 1500, WARM_MS: 250, SMOOTH: 5, OWN_VOICE: 0.2 } as const;
 /** strict: for listening nobody asked for (after an answer): a clearly louder voice, for longer, so a video or
- * someone talking across the room isn't taken for a request. */
+ * someone talking across the room isn't taken for a request.
+ * Two things keep sounds that aren't the person talking from starting or holding a recording open:
+ * - the level is the middle of the last ~100 ms, so clicks, taps and keystrokes (each a few tens of ms) never count;
+ * - once talking, the person's own voice sets the bar too: sound well below how loud they spoke (a TV, people nearby,
+ *   music) doesn't keep it going, so it ends about a second after they stop. */
 export function createVad(opts: { strict?: boolean } = {}): Vad {
   const MIN = opts.strict ? 0.014 : VAD.MIN_START, X = opts.strict ? 4 : VAD.START_X, NEED = opts.strict ? 300 : 150;
   let floor: number = VAD.FLOOR_MAX, talking = false, loudMs = 0, lastLoud = 0, peak = 0, t = 0;
-  const recent: number[] = [];
+  const recent: number[] = [], last: number[] = [];
   const startBar = () => Math.min(VAD.MAX_START, Math.max(MIN, floor * X));
-  const keepBar = () => Math.max(MIN * 0.6, Math.min(startBar(), floor * VAD.KEEP_X));
+  const keepBar = () => Math.max(MIN * 0.6, Math.min(startBar(), floor * VAD.KEEP_X), peak * VAD.OWN_VOICE);
   return {
     push(rms, ms) {
       t += ms;
@@ -47,22 +51,25 @@ export function createVad(opts: { strict?: boolean } = {}): Vad {
       recent.push(rms);
       if (recent.length > Math.max(3, Math.round(VAD.ROOM_MS / ms))) recent.shift();
       floor = Math.min(VAD.FLOOR_MAX, Math.max(VAD.FLOOR_MIN, Math.min(...recent)));
+      // The level: the middle of the last few slices, so a click or keystroke on its own is never loud.
+      last.push(rms);
+      if (last.length > VAD.SMOOTH) last.shift();
+      const level = [...last].sort((a, b) => a - b)[Math.floor(last.length / 2)]!;
       if (!talking) {
         // About 150 ms of voice (300 ms when nobody asked), or 60 ms of clearly loud voice, so a tap or click doesn't count.
         // (Short dips between syllables count it down, not back to nothing.)
-        loudMs = rms > startBar() ? loudMs + ms : Math.max(0, loudMs - 2 * ms);
-        if (loudMs >= NEED || (loudMs >= 60 && rms > startBar() * 2.5 && !opts.strict)) { talking = true; lastLoud = t; peak = rms; return 'start'; }
+        loudMs = level > startBar() ? loudMs + ms : Math.max(0, loudMs - 2 * ms);
+        if (loudMs >= NEED || (loudMs >= 60 && level > startBar() * 2.5 && !opts.strict)) { talking = true; lastLoud = t; peak = level; return 'start'; }
         return 'wait';
       }
-      peak = Math.max(peak, rms);
-      if (rms > keepBar()) lastLoud = t;
+      peak = Math.max(peak, level);
+      if (level > keepBar()) lastLoud = t;
       if (t - lastLoud <= VAD.QUIET_MS) return 'talk';
       // Never clearly above the room: a fan or traffic, not someone talking. Nothing is sent.
       return peak > floor * VAD.START_X ? 'end' : 'noise';
     },
   };
 }
-
 export function captureUtterance(opts: { waitMs: number; maxMs?: number; strict?: boolean; onSpeech?: () => void; onLevel?: (v: number) => void }): Capture {
   const maxMs = opts.maxMs ?? 15_000;
   let stopNow: (keep: boolean) => void = () => undefined;

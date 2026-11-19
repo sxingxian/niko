@@ -286,18 +286,53 @@ function baiduOk(d: any) {
 
 // ---------------------------------------------------------------- routing
 const LL = (p: MapPlace) => `${p.lng},${p.lat}`;
+const RAIL_VEHICLES = new Set(['SUBWAY', 'METRO_RAIL', 'HEAVY_RAIL', 'COMMUTER_TRAIN', 'RAIL', 'TRAM', 'LIGHT_RAIL', 'MONORAIL', 'HIGH_SPEED_TRAIN', 'LONG_DISTANCE_TRAIN']);
+const ONEMAP_RAIL = new Set(['SUBWAY', 'RAIL', 'TRAM']);
+const inSingapore = (p: { lat: number; lng: number }) => p.lat > 1.15 && p.lat < 1.48 && p.lng > 103.6 && p.lng < 104.1;
+/** Singapore's lines, by the codes OneMap gives. */
+const SG_LINES: Record<string, string> = { EW: 'East–West Line', CG: 'East–West Line (Changi Airport)', NS: 'North–South Line', NE: 'North East Line', CC: 'Circle Line', CE: 'Circle Line', DT: 'Downtown Line', TE: 'Thomson–East Coast Line', BP: 'Bukit Panjang LRT', SK: 'Sengkang LRT', SE: 'Sengkang LRT', SW: 'Sengkang LRT', PG: 'Punggol LRT', PE: 'Punggol LRT', PW: 'Punggol LRT' };
+/** Of a few public transport routes, the quickest, unless one using the MRT/metro is at most about 10 minutes (or a
+ *  fifth) slower: trains keep to time better than buses in traffic. */
+export function pickTransit<T extends { seconds: number; rail: boolean }>(options: T[]): T | undefined {
+  if (!options.length) return undefined;
+  const fastest = options.reduce((a, b) => (b.seconds < a.seconds ? b : a));
+  if (fastest.rail) return fastest;
+  const slack = Math.max(600, fastest.seconds * 0.2);
+  return options.filter((o) => o.rail && o.seconds <= fastest.seconds + slack).sort((a, b) => a.seconds - b.seconds)[0] ?? fastest;
+}
+/** "OPP TG PAGAR STN" → "Opp Tg Pagar Stn", "TANJONG PAGAR MRT STATION" → "Tanjong Pagar MRT Station"; codes such as
+ *  EW15 stay in capitals. */
+export const placeName = (v: unknown) => str(v, 80).toLowerCase().replace(/\b([a-z])([a-z']*)/g, (_m, a: string, b: string) => a.toUpperCase() + b)
+  .replace(/\b(Mrt|Lrt)\b/g, (w) => w.toUpperCase()).replace(/\b([A-Za-z]{1,2}\d{1,3})\b/g, (w) => w.toUpperCase());
+/** A ride, said the same way for every service: "Take bus 75 from A to B, 4 stops", "Take the MRT East–West Line from A to B, 1 stop". */
+export function rideText(kind: 'bus' | 'rail' | 'other', line: string, from: string, to: string, stops: number, sg = false): string {
+  const what = kind === 'bus' ? `bus ${line}`.trim() : kind === 'rail' ? `the ${sg ? 'MRT' : 'train'}${line ? ` ${(sg && SG_LINES[line.toUpperCase()]) || line}` : ''}` : line || 'the line';
+  const n = Number.isFinite(stops) && stops > 0 ? `, ${stops} ${stops === 1 ? 'stop' : 'stops'}` : '';
+  return `Take ${what}${from ? ` from ${from}` : ''} to ${to || 'your stop'}${n}`.replace(/\s+/g, ' ');
+}
 export async function routeWith(k: MapKey, from: MapPlace, to: MapPlace, mode: MapMode): Promise<MapRoute> {
   switch (k.provider) {
     case 'google': {
-      const body = { origin: { location: { latLng: { latitude: from.lat, longitude: from.lng } } }, destination: { location: { latLng: { latitude: to.lat, longitude: to.lng } } }, travelMode: { drive: 'DRIVE', transit: 'TRANSIT', walk: 'WALK', cycle: 'BICYCLE' }[mode], languageCode: 'en' };
-      const d = await getJson('https://routes.googleapis.com/directions/v2:computeRoutes', { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': k.apiKey, 'x-goog-fieldmask': 'routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.steps.navigationInstruction,routes.legs.steps.distanceMeters,routes.legs.steps.transitDetails.transitLine.nameShort,routes.legs.steps.transitDetails.transitLine.name,routes.legs.steps.transitDetails.stopDetails.arrivalStop.name,routes.legs.steps.travelMode' }, body: JSON.stringify(body) });
-      const r = d?.routes?.[0];
-      if (!r?.polyline?.encodedPolyline) throw new NotFound();
-      const steps: MapStep[] = (r.legs ?? []).flatMap((l: any) => l.steps ?? []).map((s: any) => {
-        const t = s.transitDetails;
-        return { text: t ? `Take ${str(t.transitLine?.nameShort || t.transitLine?.name, 40) || 'the line'} to ${str(t.stopDetails?.arrivalStop?.name, 80) || 'your stop'}` : str(s.navigationInstruction?.instructions), meters: num(s.distanceMeters) };
+      // Public transport: a few routes are asked for, every kind of vehicle allowed, so one with the MRT/metro can be chosen.
+      const transit = mode === 'transit';
+      const body = { origin: { location: { latLng: { latitude: from.lat, longitude: from.lng } } }, destination: { location: { latLng: { latitude: to.lat, longitude: to.lng } } }, travelMode: { drive: 'DRIVE', transit: 'TRANSIT', walk: 'WALK', cycle: 'BICYCLE' }[mode], languageCode: 'en',
+        ...(transit ? { computeAlternativeRoutes: true, transitPreferences: { allowedTravelModes: ['BUS', 'SUBWAY', 'TRAIN', 'LIGHT_RAIL', 'RAIL'] } } : {}) };
+      const T = 'routes.legs.steps.transitDetails';
+      const d = await getJson('https://routes.googleapis.com/directions/v2:computeRoutes', { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': k.apiKey, 'x-goog-fieldmask': `routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.steps.navigationInstruction,routes.legs.steps.distanceMeters,${T}.transitLine.nameShort,${T}.transitLine.name,${T}.transitLine.vehicle.type,${T}.stopDetails.arrivalStop.name,${T}.stopDetails.departureStop.name,${T}.stopCount,routes.legs.steps.travelMode` }, body: JSON.stringify(body) });
+      const options = ((d?.routes ?? []) as any[]).filter((r) => r?.polyline?.encodedPolyline).map((r) => {
+        const raw: any[] = (r.legs ?? []).flatMap((l: any) => l.steps ?? []);
+        const rail = raw.some((s) => RAIL_VEHICLES.has(str(s.transitDetails?.transitLine?.vehicle?.type)));
+        return { r, raw, rail, seconds: parseInt(String(r.duration ?? '0'), 10) || 0 };
       });
-      return route(mode, decodePolyline(r.polyline.encodedPolyline), parseInt(String(r.duration ?? '0'), 10), r.distanceMeters, merge(steps));
+      const pick = transit ? pickTransit(options) : options[0];
+      if (!pick) throw new NotFound();
+      const steps: MapStep[] = pick.raw.map((s) => {
+        const t = s.transitDetails;
+        if (!t) return { text: str(s.navigationInstruction?.instructions), meters: num(s.distanceMeters) };
+        const type = str(t.transitLine?.vehicle?.type), line = str(t.transitLine?.nameShort || t.transitLine?.name, 40);
+        return { text: rideText(RAIL_VEHICLES.has(type) ? 'rail' : type === 'BUS' ? 'bus' : 'other', line, str(t.stopDetails?.departureStop?.name, 80), str(t.stopDetails?.arrivalStop?.name, 80), num(t.stopCount), inSingapore(from)), meters: num(s.distanceMeters) };
+      });
+      return route(mode, decodePolyline(pick.r.polyline.encodedPolyline), pick.seconds, pick.r.distanceMeters, merge(steps));
     }
     case 'mapbox': case 'self-hosted': {
       const profile = k.provider === 'mapbox' ? `mapbox/${{ drive: 'driving', walk: 'walking', cycle: 'cycling', transit: 'driving' }[mode]}` : { drive: 'driving', walk: 'foot', cycle: 'cycling', transit: 'driving' }[mode];
@@ -314,13 +349,20 @@ export async function routeWith(k: MapKey, from: MapPlace, to: MapPlace, mode: M
       if (mode === 'transit') {
         const now = new Date(Date.now() + 8 * HOUR), p2 = (n: number) => String(n).padStart(2, '0');
         const date = `${p2(now.getUTCMonth() + 1)}-${p2(now.getUTCDate())}-${now.getUTCFullYear()}`, time = `${p2(now.getUTCHours())}:${p2(now.getUTCMinutes())}:00`;
-        const d = await getJson(`https://www.onemap.gov.sg/api/public/routingsvc/route?start=${start}&end=${end}&routeType=pt&date=${date}&time=${enc(time)}&mode=TRANSIT&maxWalkDistance=1000&numItineraries=1`, { headers: { authorization: token } });
-        const it = d?.plan?.itineraries?.[0];
-        if (!it) throw new NotFound();
-        const legs: any[] = it.legs ?? [];
+        // A few itineraries, so one with the MRT/LRT can be chosen over a long bus ride when it's about as quick.
+        const d = await getJson(`https://www.onemap.gov.sg/api/public/routingsvc/route?start=${start}&end=${end}&routeType=pt&date=${date}&time=${enc(time)}&mode=TRANSIT&maxWalkDistance=1000&numItineraries=3`, { headers: { authorization: token } });
+        const options = ((d?.plan?.itineraries ?? []) as any[]).map((it) => ({ it, legs: (it.legs ?? []) as any[], seconds: num(it.duration), rail: (it.legs ?? []).some((l: any) => ONEMAP_RAIL.has(str(l.mode))) }));
+        const pick = pickTransit(options);
+        if (!pick) throw new NotFound();
+        const legs = pick.legs;
         const coords = legs.flatMap((l) => (l.legGeometry?.points ? decodePolyline(l.legGeometry.points) : []));
-        const steps = legs.map((l) => ({ text: l.mode === 'WALK' ? `Walk to ${str(l.to?.name, 80) || 'the next stop'}` : `Take ${l.mode === 'BUS' ? 'bus' : l.mode === 'SUBWAY' ? 'the MRT' : str(l.mode).toLowerCase()} ${str(l.route, 20)} to ${str(l.to?.name, 80)}`.replace(/\s+/g, ' '), meters: num(l.distance) }));
-        return route(mode, coords, it.duration, legs.reduce((a, l) => a + num(l.distance), 0), steps);
+        const steps = legs.map((l, i) => {
+          const to = placeName(l.to?.name), fromName = placeName(l.from?.name);
+          if (l.mode === 'WALK') return { text: i === legs.length - 1 ? 'Walk to your destination' : `Walk to ${to || 'the next stop'}${l.to?.stopCode ? ` (stop ${str(l.to.stopCode, 10)})` : ''}`, meters: num(l.distance) };
+          const stops = Array.isArray(l.intermediateStops) ? l.intermediateStops.length + 1 : num(l.to?.stopSequence) - num(l.from?.stopSequence);
+          return { text: rideText(ONEMAP_RAIL.has(str(l.mode)) ? 'rail' : l.mode === 'BUS' ? 'bus' : 'other', str(l.route, 20), fromName, to, stops, true), meters: num(l.distance) };
+        });
+        return route(mode, coords, pick.seconds, legs.reduce((a, l) => a + num(l.distance), 0), steps);
       }
       const d = await getJson(`https://www.onemap.gov.sg/api/public/routingsvc/route?start=${start}&end=${end}&routeType=${{ drive: 'drive', walk: 'walk', cycle: 'cycle' }[mode]}`, { headers: { authorization: token } });
       if (!d?.route_geometry) throw new NotFound();

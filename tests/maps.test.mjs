@@ -3,7 +3,7 @@
 // hold (Google routes in Korea, non-Chinese services in China), failures rest and hand over, and China's coordinates
 // line up with the map.
 import assert from 'node:assert/strict';
-import { countryOf, decodeFlexible, decodePolyline, findRoute, findWith, mapKeyProblem, routeWith } from '../apps/api/src/maps.ts';
+import { countryOf, decodeFlexible, decodePolyline, findRoute, findWith, mapKeyProblem, pickTransit, placeName, rideText, routeWith } from '../apps/api/src/maps.ts';
 import { mapsOn } from '../packages/shared/src/index.ts';
 import { greatCircle, greatCircleMeters, flightSeconds, countryNamed, isCountryName } from '../packages/shared/src/maps.ts';
 import { fullscreenCommand } from '../apps/app/src/speech.ts';
@@ -72,6 +72,44 @@ await ok('Google: Places and Routes with the key in a header, never in the addre
   const r = await routeWith(k, { name: 'You', ...SG }, p, 'transit');
   assert.equal(r.seconds, 1500); assert.equal(r.meters, 21000); assert.equal(r.coords.length, 2);
   assert.equal(JSON.parse(calls[1].init.body).travelMode, 'TRANSIT'); assert.equal(r.steps[1].text, 'Take EW to Changi Airport');
+});
+await ok('public transport: the MRT is chosen over a bus ride when it’s about as quick, and stations and lines are named', async () => {
+  // Choosing: the quickest, unless a route with the MRT is at most about 10 minutes (or a fifth) slower.
+  assert.equal(pickTransit([{ seconds: 1800, rail: false, n: 'bus' }, { seconds: 2100, rail: true, n: 'mrt' }]).n, 'mrt');
+  assert.equal(pickTransit([{ seconds: 1800, rail: false, n: 'bus' }, { seconds: 3000, rail: true, n: 'mrt' }]).n, 'bus', 'not when it’s much slower');
+  assert.equal(pickTransit([{ seconds: 1500, rail: true, n: 'mrt' }, { seconds: 1400, rail: false, n: 'bus' }]).n, 'mrt');
+  assert.equal(pickTransit([]), undefined);
+  assert.equal(placeName('TANJONG PAGAR MRT STATION'), 'Tanjong Pagar MRT Station'); assert.equal(placeName('OPP TG PAGAR STN ew15'), 'Opp Tg Pagar Stn EW15');
+  assert.equal(rideText('rail', 'EW', 'Tanjong Pagar', 'Raffles Place', 1, true), 'Take the MRT East–West Line from Tanjong Pagar to Raffles Place, 1 stop');
+  assert.equal(rideText('bus', '75', 'Opp Blk 123', 'Tanjong Pagar Stn', 4), 'Take bus 75 from Opp Blk 123 to Tanjong Pagar Stn, 4 stops');
+  // OneMap: three itineraries asked for; the bus-only one is quickest, the bus + MRT one 5 minutes slower is chosen.
+  calls = [];
+  const leg = (mode, extra) => ({ mode, distance: 1000, legGeometry: { points: '_p~iF~ps|U_ulLnnqC' }, ...extra });
+  reply = (url) => url.includes('getToken') ? Response.json({ access_token: 'TOKEN-2', expiry_timestamp: String(Math.floor(Date.now() / 1000) + 3600) })
+    : url.includes('routeType=pt') ? Response.json({ plan: { itineraries: [
+      { duration: 1800, legs: [leg('WALK', { to: { name: 'OPP BLK 123' } }), leg('BUS', { route: '75', from: { name: 'OPP BLK 123' }, to: { name: 'RAFFLES PL STN EXIT B' }, intermediateStops: [1, 2, 3, 4, 5, 6, 7, 8] }), leg('WALK', { to: { name: 'Destination' } })] },
+      { duration: 2100, legs: [leg('WALK', { to: { name: 'OPP BLK 123', stopCode: '52189' } }), leg('BUS', { route: '75', from: { name: 'OPP BLK 123' }, to: { name: 'TANJONG PAGAR STN' }, intermediateStops: [1, 2, 3] }), leg('SUBWAY', { route: 'EW', from: { name: 'TANJONG PAGAR MRT STATION' }, to: { name: 'RAFFLES PLACE MRT STATION' }, intermediateStops: [] }), leg('WALK', { to: { name: 'Destination' } })] },
+    ] } })
+    : new Response('no', { status: 500 });
+  const r = await routeWith(key('o2', 'onemap', { email: 'me@example.com', password: 'PASSWORD-2', apiKey: '' }), { name: 'You', ...SG }, { name: 'Raffles Place', lat: 1.284, lng: 103.851 }, 'transit');
+  assert.ok(calls.some((c) => c.url.includes('numItineraries=3')));
+  assert.equal(r.seconds, 2100);
+  assert.deepEqual(r.steps.map((x) => x.text), ['Walk to Opp Blk 123 (stop 52189)', 'Take bus 75 from Opp Blk 123 to Tanjong Pagar Stn, 4 stops', 'Take the MRT East–West Line from Tanjong Pagar MRT Station to Raffles Place MRT Station, 1 stop', 'Walk to your destination']);
+  // Google: alternatives asked for with every kind of vehicle; the one with the subway chosen.
+  calls = [];
+  const gstep = (type, line, dep, arr, stops) => ({ distanceMeters: 1000, transitDetails: { transitLine: { nameShort: line, vehicle: { type } }, stopDetails: { departureStop: { name: dep }, arrivalStop: { name: arr } }, stopCount: stops } });
+  reply = () => Response.json({ routes: [
+    { duration: '1700s', distanceMeters: 9000, polyline: { encodedPolyline: '_p~iF~ps|U_ulLnnqC' }, legs: [{ steps: [gstep('BUS', '75', 'A', 'B', 12)] }] },
+    { duration: '1900s', distanceMeters: 8000, polyline: { encodedPolyline: '_p~iF~ps|U_ulLnnqC' }, legs: [{ steps: [gstep('BUS', '75', 'A', 'Tanjong Pagar Stn', 4), gstep('SUBWAY', 'EW', 'Tanjong Pagar', 'Raffles Place', 1)] }] },
+  ] });
+  const g = await routeWith(key('g2', 'google'), { name: 'You', ...SG }, { name: 'Raffles Place', lat: 1.284, lng: 103.851 }, 'transit');
+  const body = JSON.parse(calls[0].init.body);
+  assert.equal(body.computeAlternativeRoutes, true); assert.ok(body.transitPreferences.allowedTravelModes.includes('SUBWAY'));
+  assert.ok(calls[0].init.headers['x-goog-fieldmask'].includes('vehicle.type'));
+  assert.equal(g.seconds, 1900); assert.equal(g.steps[1].text, 'Take the MRT East–West Line from Tanjong Pagar to Raffles Place, 1 stop', 'in Singapore, said the Singapore way');
+  // Driving is asked for as before: no alternatives.
+  calls = []; await routeWith(key('g2', 'google'), { name: 'You', ...SG }, { name: 'Raffles Place', lat: 1.284, lng: 103.851 }, 'drive');
+  assert.equal(JSON.parse(calls[0].init.body).computeAlternativeRoutes, undefined);
 });
 await ok('Singapore by GPS: OneMap first (token renewed by Niko), and the answer carries no key', async () => {
   calls = []; store.engineWrites = [];
