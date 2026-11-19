@@ -3,6 +3,9 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { startAuthentication } from '@simplewebauthn/browser';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { speakable, stripTags, aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type MapAskMode, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
+
+/** Where an answer came from in the person's files (from /chat). */
+export type KnowledgeAnswer = { lead: boolean; only: boolean; sources: { n: number; file: string; heading: string | null; collection: string }[] };
 import { enterFullscreen, exitFullscreen, fullscreenSupported } from './fullscreen';
 import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag, takeStepsTag } from './speech';
 import { scrollScreen } from './scroll';
@@ -66,6 +69,8 @@ interface NikoState {
   reply: string | null;
   /** The weather card for the answer it came with (shown instead of that answer's text). */
   weather: { for: string; card: WeatherCard } | null;
+  /** The files an answer came from (Knowledge), for the answer it came with. */
+  knowledge: { for: string; k: KnowledgeAnswer } | null;
   brief: Brief | null;
   micOn: boolean;
   voiceSupported: boolean;
@@ -195,6 +200,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [line, setLine] = useState('');
   const [reply, setReply] = useState<string | null>(null);
   const [weather, setWeather] = useState<{ for: string; card: WeatherCard } | null>(null);
+  const [knowledge, setKnowledge] = useState<{ for: string; k: KnowledgeAnswer } | null>(null);
   const [brief, setBrief] = useState<Brief | null>(null);
   const [micOn, setMicOn] = useState(false);
   const navigate = useNavigate();
@@ -577,7 +583,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // The route on screen, so the AI can talk about it (and open its steps) instead of saying it can't see it.
       const shown = mapRef.current?.result?.route && mapRef.current.status === 'done' ? mapRef.current : null;
       const screen = shown ? { map: { from: shown.result!.from?.name === 'You' ? 'your location' : shown.result!.from?.name ?? shown.from ?? 'your location', to: shown.result!.to.name, mode: shown.result!.route!.mode, seconds: shown.result!.route!.seconds, meters: shown.result!.route!.meters, steps: shown.result!.route!.steps.slice(0, 40).map((s) => ({ text: s.text.slice(0, 200), meters: s.meters ?? 0 })) } } : undefined;
-      const r = await api<{ reply: string; brief: Brief; weather?: WeatherCard }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}) } }).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
+      const r = await api<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer }>('/chat', { body: { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}) } }).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
       // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
       const { text: noSteps, open: openSteps } = takeStepsTag(r.reply);
@@ -611,7 +617,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         paintPicture(image.prompt, image.shape, false, text);
         return;
       }
-      setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setReply(answer); say(answer, 0);
+      setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setReply(answer); say(answer, 0);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) goSelf('/' + item.view); }
       else if (asked) goSelf(asked);
       else if (page && handler.current?.(page, true)) { /* the list on screen turned its page, quietly: Niko is speaking */ }
@@ -874,7 +880,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     if (was === path || !/^\/(inbox|calendar|notes)$/.test(p) || !meRef.current) return;
     const mine = Date.now() - selfNav.current < 2000; // Niko opened it and may be saying so: that line finishes
     askId.current++; inFlight.current = 0; failStreak.current = 0;
-    last.current = null; setResumable(null); setReply(null); setWeather(null);
+    last.current = null; setResumable(null); setReply(null); setWeather(null); setKnowledge(null);
     mapCtl.current?.abort(); mapRef.current = null; setMap(null); setPictureId(null);
     if (!mine) {
       stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; hearing.current++; active.current = false; unmuteMic();
@@ -899,7 +905,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     if (picCtl.current) { const c = picCtl.current; picCtl.current = null; c.abort(); }
     mapCtl.current?.abort(); mapRef.current = null; setMap(null);
     if (locationWait.current) { const w = locationWait.current; locationWait.current = null; w(false); }
-    setPictureId(null); setReply(null); setWeather(null); setResumable(null); setPendingOpen(null); setBrief(null); last.current = null;
+    setPictureId(null); setReply(null); setWeather(null); setKnowledge(null); setResumable(null); setPendingOpen(null); setBrief(null); last.current = null;
     setFullscreenAsk(false); setLockAsk(null); afterUnlock.current = null;
     if (here.current !== '/') navigate('/');
     idle();
@@ -1008,7 +1014,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, [me?.id, me?.lock?.on, me?.lock?.mins]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const value = useMemo<NikoState>(() => ({
-    me, refreshMe, mode, label, line, reply, weather, brief, micOn, voiceSupported: !!SR || (hearsFor(me).length > 0 && captureSupported()), toggleMic, stop, ask,
+    me, refreshMe, mode, label, line, reply, weather, knowledge, brief, micOn, voiceSupported: !!SR || (hearsFor(me).length > 0 && captureSupported()), toggleMic, stop, ask,
     dismissReply: () => setReply(null),
     setCommandHandler: (fn) => { handler.current = fn; },
     setGlanceHandler: (fn) => { glanceHandler.current = fn; },
@@ -1043,7 +1049,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     unlock: unlockFn,
     unlockWithPasskey: unlockWithPasskeyFn,
     lockNow: lockNowFn,
-  }), [me, refreshMe, mode, label, line, reply, weather, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk, locked, lockAsk]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [me, refreshMe, mode, label, line, reply, weather, knowledge, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk, locked, lockAsk]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

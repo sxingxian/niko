@@ -1047,3 +1047,13 @@ button.pri.danger { background: #ff8a8a; border-color: #ff8a8a; color: #05070d; 
   .kn-col { grid-template-columns: minmax(0, 1fr) 130px; } .kn-col .srow-hint { grid-column: 1; grid-row: 2; }
   .kn-col select { grid-row: 1 / 3; grid-column: 2; }
 }
+
+/* Home: where an answer from your files came from */
+.kn-src { display: flex; flex-direction: column; gap: 12px; }
+.kn-src-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.kn-src-list li { display: flex; gap: 12px; align-items: flex-start; }
+.kn-src-n { flex: none; min-width: 28px; height: 28px; padding: 0 6px; border-radius: 8px; border: 1px solid rgba(127,227,255,.6); color: #bff2ff; display: grid; place-items: center; font: 500 12px 'JetBrains Mono', monospace; }
+.kn-src-t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kn-src-t b { font-weight: 500; font-size: 15px; overflow-wrap: anywhere; }
+.kn-src-t span { font: 400 13px system-ui, sans-serif; color: var(--muted); }
+.kn-src .sec { align-self: flex-start; }

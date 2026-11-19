@@ -5,7 +5,7 @@ import { aiAllowed, stripTags, PAGE_SIZES, SEND_COUNTDOWN_SECONDS, voiceName, vo
 /** The first voice this account may use (the admin may have turned some off); the device voice if none. */
 const firstVoice = (m: Me | null | undefined) => { const off = m?.aiOff ?? []; return off.includes('sec:voices') ? 'device' : voiceOrder(m?.engine).find((v) => v.startsWith('vkey:') || aiAllowed(off, voiceOption(v))) ?? 'device'; };
 import { Backdrop, api, currentHue, Icon, ParticleCore, sphereOf, spots } from '@niko/ui';
-import { useNiko } from '../niko';
+import { useNiko, type KnowledgeAnswer } from '../niko';
 import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from '../speech';
 import { isStacked } from '../flow';
 import { PictureCard } from './Picture';
@@ -133,13 +133,15 @@ export function Home() {
   const mapv = n.map;
   const open = !!n.reply || !!pic || !!mapv;
   // Keep the last answer on screen while its cards close.
-  const [shown, setShown] = useState<{ reply: string; chat: Brief['chats'][number] | null; id: number; wx: WxCard | null } | null>(null);
+  const [shown, setShown] = useState<{ reply: string; chat: Brief['chats'][number] | null; id: number; wx: WxCard | null; kn: KnowledgeAnswer | null } | null>(null);
   const [closing, setClosing] = useState(false);
   const [caption, setCaption] = useState<'' | 'aside' | 'back'>('');
   useEffect(() => {
     if (n.reply) {
       setClosing(false);
-      setShown((s) => ({ reply: n.reply!, chat: n.brief?.chats[0] ?? null, id: (s?.id ?? 0) + (s?.reply === n.reply ? 0 : 1), wx: n.weather?.for === n.reply ? n.weather.card : null }));
+      const kn = n.knowledge?.for === n.reply ? n.knowledge.k : null;
+      // An answer from the person's files shows where it came from instead of the chat waiting for a reply.
+      setShown((s) => ({ reply: n.reply!, chat: kn ? null : n.brief?.chats[0] ?? null, id: (s?.id ?? 0) + (s?.reply === n.reply ? 0 : 1), wx: n.weather?.for === n.reply ? n.weather.card : null, kn }));
       return;
     }
     if (!shown) return;
@@ -147,9 +149,9 @@ export function Home() {
     const t = window.setTimeout(() => { setClosing(false); setShown(null); }, 900);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [n.reply, n.weather, wide]);
+  }, [n.reply, n.weather, n.knowledge, wide]);
   const submit = (e: FormEvent) => { e.preventDefault(); const t = text; setText(''); setTyping(false); void n.ask(t); };
-  const cards = shown ? (shown.chat ? 2 : 1) : 0;
+  const cards = shown ? (shown.chat || shown.kn ? 2 : 1) : 0;
   const card = !!pic || !!mapv;
   // The caption always sits under the core: aside exactly when the core moves aside (an answer, a picture or a map is
   // open on a wide screen), back when it returns. Before, a new question asked over a map or picture sent the caption
@@ -221,7 +223,7 @@ export function Home() {
             {shown.wx ? <WeatherCard card={shown.wx} onClose={n.dismissReply} tabbable={open} /> : (
             <section className="g">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span className="k">Niko</span>
+                <span className="k">{shown.kn?.only ? 'Niko · from your files' : shown.kn?.lead ? 'Niko · your files lead' : 'Niko'}</span>
                 <button className="ib" style={{ width: 44, height: 44, margin: '-8px -10px -8px 0' }} onClick={n.dismissReply} aria-label="Hide the answer" tabIndex={open ? 0 : -1}><Icon name="x" /></button>
               </div>
               <p className="reply"><Words text={shown.reply} start={wide ? 1.0 : 0.35} /></p>
@@ -229,6 +231,20 @@ export function Home() {
             )}
             <Outline />
           </div>
+          {shown.kn && (
+            <div className="card-build" style={{ ['--d' as string]: `${CARD_GAP}s` }}>
+              <section className="g kn-src" aria-label="Sources">
+                <span className="k">{shown.kn.sources.length === 1 ? 'Source' : 'Sources'} · your files</span>
+                <ol className="kn-src-list">
+                  {shown.kn.sources.map((s) => (
+                    <li key={s.n}><span className="kn-src-n">{s.n}</span><span className="kn-src-t"><b>{s.file}{s.heading ? ` › ${s.heading}` : ''}</b><span>{s.collection}</span></span></li>
+                  ))}
+                </ol>
+                <Link className="sec" to="/knowledge" tabIndex={open ? 0 : -1}>Open Knowledge</Link>
+              </section>
+              <Outline />
+            </div>
+          )}
           {shown.chat && (
             <div className="card-build" style={{ ['--d' as string]: `${CARD_GAP}s` }}>
               <section className="g" aria-label="Waiting for a reply">
@@ -482,7 +498,7 @@ export function Workspace() {
     setRewriting(true);
     if (spoken) n.setStatus('Rewriting', 'Changing the draft…', 'thinking');
     try {
-      const r = await api<{ reply: string }>('/chat', { body: { message, tz: new Date().getTimezoneOffset(), purpose: 'draft' } });
+      const r = await api<{ reply: string }>('/chat', { body: { message, tz: new Date().getTimezoneOffset(), purpose: 'draft', provider: sel.provider } });
       // Only the reply itself: no "Here's the new draft:" lead-in, no wrapping quotes, no draft markers.
       const t = stripTags(typeof r.reply === 'string' ? r.reply : '').trim()
         .replace(/^(sure[,!.]?\s*)?(here('|’)s|here is)\s+(the|a|your)\s+[^:\n]{0,40}:\s*/i, '')
@@ -560,7 +576,7 @@ export function Workspace() {
     if (kept !== undefined) { setDraft((d) => d || kept); return; }
     const about = sel.kind === 'mail' ? `the email from ${sel.title} with subject "${sel.subject}"` : `the last message from ${sel.title}: "${lastIn}"`;
     setDrafting(true);
-    api<{ reply: string }>('/chat', { body: { message: `Write only the text of a short, friendly reply to ${about}. No preamble.`, tz: new Date().getTimezoneOffset(), purpose: 'draft' } })
+    api<{ reply: string }>('/chat', { body: { message: `Write only the text of a short, friendly reply to ${about}. No preamble.`, tz: new Date().getTimezoneOffset(), purpose: 'draft', provider: sel.provider } })
       .then((r) => { const t = stripTags(typeof r.reply === 'string' ? r.reply : ''); if (t) { if (draftCache.size > 100) draftCache.delete(draftCache.keys().next().value!); draftCache.set(key, t); } setDraft((d) => d || t); }).catch(() => undefined).finally(() => setDrafting(false));
   }, [sel, thread, view, n.me?.permissions.draft, send.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
