@@ -23,9 +23,11 @@ export const KN_DEVICE_HITS_MAX = 10;
 export const KN_DEVICE_TABLES_MAX = 6;
 export const KN_DEVICE_TEXT_CHARS = 2000;
 export const KN_TABLE_RESULT_CHARS = 4000;
-export interface KnDeviceHit { file: string; heading: string | null; text: string; collection: string; similarity: number }
+export interface KnDeviceHit { file: string; heading: string | null; text: string; collection: string; similarity: number; fileId?: string; piece?: string; taught?: boolean }
+/** A note learned and kept on the device, sent with a question it may help with. */
+export interface KnDeviceNote { kind: string; said: string; means: string; level: 'sure' | 'fairly' | 'unsure'; how: string }
 export interface KnDeviceTable { sheet: string; file: string; name: string; rows: number; columns: KnColumn[] }
-export interface KnDeviceKnowledge { hits: KnDeviceHit[]; tables: KnDeviceTable[]; numbers: boolean }
+export interface KnDeviceKnowledge { hits: KnDeviceHit[]; tables: KnDeviceTable[]; numbers: boolean; learned: KnDeviceNote[] }
 
 const str = (v: unknown, max: number) => (typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, max) : '');
 const SHEET_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -33,12 +35,14 @@ const SHEET_ID = /^[A-Za-z0-9_-]{1,64}$/;
  *  still only ever shown to the AI as untrusted content from the person's files. */
 export function cleanDeviceKnowledge(raw: unknown): KnDeviceKnowledge | null {
   if (!raw || typeof raw !== 'object') return null;
-  const o = raw as { hits?: unknown; tables?: unknown; numbers?: unknown };
+  const o = raw as { hits?: unknown; tables?: unknown; numbers?: unknown; learned?: unknown };
   const hits: KnDeviceHit[] = (Array.isArray(o.hits) ? o.hits : []).slice(0, KN_DEVICE_HITS_MAX).flatMap((h) => {
     const x = (h && typeof h === 'object' ? h : {}) as Record<string, unknown>;
     const text = str(x.text, KN_DEVICE_TEXT_CHARS), file = str(x.file, 200);
     const sim = typeof x.similarity === 'number' && Number.isFinite(x.similarity) ? Math.max(0, Math.min(1, x.similarity)) : 0;
-    return text && file ? [{ file, heading: str(x.heading, 200) || null, text, collection: str(x.collection, 80) || 'General', similarity: sim }] : [];
+    const fileId = typeof x.fileId === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(x.fileId) ? x.fileId : undefined;
+    const piece = typeof x.piece === 'string' && /^[A-Za-z0-9:-]{1,100}$/.test(x.piece) ? x.piece : undefined;
+    return text && file ? [{ file, heading: str(x.heading, 200) || null, text, collection: str(x.collection, 80) || 'General', similarity: sim, ...(fileId && piece ? { fileId, piece } : {}), ...(x.taught === true ? { taught: true } : {}) }] : [];
   });
   const tables: KnDeviceTable[] = (Array.isArray(o.tables) ? o.tables : []).slice(0, KN_DEVICE_TABLES_MAX).flatMap((t) => {
     const x = (t && typeof t === 'object' ? t : {}) as Record<string, unknown>;
@@ -52,8 +56,13 @@ export function cleanDeviceKnowledge(raw: unknown): KnDeviceKnowledge | null {
     const file = str(x.file, 200), name = str(x.name, 120) || 'Sheet';
     return sheet && file && columns.length ? [{ sheet, file, name, rows, columns }] : [];
   });
-  if (!hits.length && !tables.length) return { hits: [], tables: [], numbers: o.numbers === true };
-  return { hits, tables, numbers: o.numbers === true };
+  const learned: KnDeviceNote[] = (Array.isArray(o.learned) ? o.learned : []).slice(0, 8).flatMap((n) => {
+    const x = (n && typeof n === 'object' ? n : {}) as Record<string, unknown>;
+    const said = str(x.said, 300), means = str(x.means, 300);
+    const kind = ['person', 'correction', 'remembered'].includes(x.kind as string) ? (x.kind as string) : '';
+    return said && means && kind ? [{ kind, said, means, level: x.level === 'fairly' || x.level === 'unsure' ? x.level : 'sure', how: str(x.how, 60) || 'You told Niko' }] : [];
+  });
+  return { hits, tables, numbers: o.numbers === true, learned };
 }
 /** Results of look-ups the browser ran for the AI: plain text, at most three, each kept short. */
 export function cleanTableResults(raw: unknown): string[] {

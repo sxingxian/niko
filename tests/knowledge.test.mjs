@@ -221,8 +221,8 @@ await ok('Cloudflare reading: only PDF, Word and spreadsheets; size limit; pictu
   readReply = null;
 });
 await ok('each person’s choices and what their account allows', () => {
-  assert.deepEqual(cleanKnowledgePrefs({}), { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false, files: 0 });
-  assert.deepEqual(cleanKnowledgePrefs({ mode: 'only', modes: { Team: 'off', Bad: 'maybe', '': 'off' }, place: 'device', read: 'x', telegram: false, drafts: true }), { mode: 'only', modes: { Team: 'off' }, place: 'device', read: 'cloudflare', search: 'cloudflare', telegram: false, drafts: true, files: 0 });
+  assert.deepEqual(cleanKnowledgePrefs({}), { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false, files: 0, learn: true, notes: 0 });
+  assert.deepEqual(cleanKnowledgePrefs({ mode: 'only', modes: { Team: 'off', Bad: 'maybe', '': 'off' }, place: 'device', read: 'x', telegram: false, drafts: true }), { mode: 'only', modes: { Team: 'off' }, place: 'device', read: 'cloudflare', search: 'cloudflare', telegram: false, drafts: true, files: 0, learn: true, notes: 0 });
   const off = new Set(['kn:cf-search']);
   assert.deepEqual(knowledgeAccess((key) => !off.has(key)), { files: true, niko: true, device: true, cloudflareRead: true, cloudflareSearch: false, learning: true });
   assert.deepEqual(knowledgeAccess((key) => key !== 'kn:files'), { files: false, niko: false, device: false, cloudflareRead: false, cloudflareSearch: false, learning: true });

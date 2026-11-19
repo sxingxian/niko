@@ -193,10 +193,10 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
 }
 
 // ---------------------------------------------------------------- Knowledge (as the Admin-Knowledge mockup)
-type KnAdminUser = { id: string; name: string; email: string; role: string; status: string; knowledgeLimits: Partial<KnowledgeLimits>; used: { files: number; bytes: number } };
+type KnAdminUser = { id: string; name: string; email: string; role: string; status: string; knowledgeLimits: Partial<KnowledgeLimits>; used: { files: number; bytes: number; notes?: number } };
 type KnAdmin = { ready: boolean; usage: { bytes: number; files: number; people: number } | null; split: 'browser' | 'server'; defaults: KnowledgeLimits; users: KnAdminUser[] };
 /** The Knowledge switches built so far, in their groups (the others in AI_OPTION_GROUPS arrive with their stages). */
-const KN_GROUPS: [string, string[]][] = [['Files', ['kn:files']], ['Where they keep files', ['kn:place:niko', 'kn:place:device']], ['Cloudflare', ['kn:cf-read', 'kn:cf-search']]];
+const KN_GROUPS: [string, string[]][] = [['Files', ['kn:files']], ['Where they keep files', ['kn:place:niko', 'kn:place:device']], ['Cloudflare', ['kn:cf-read', 'kn:cf-search']], ['Learning', ['kn:learning']]];
 const KN_SHOWN = KN_GROUPS.flatMap(([, keys]) => keys);
 const KN_LIMIT_ROWS: [keyof KnowledgeLimits, string, string, number[], (n: number) => string][] = [
   ['files', 'Files', 'How many files each person can keep', KN_FILE_STEPS, (n) => `${n.toLocaleString()} files`],
@@ -298,7 +298,7 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
           </div>
         </div>
         {person && <div className="kn-useline">
-          <span className="kn-useline-l"><span>{first} uses {knSize(person.used.bytes)} of {limOf('mbTotal')} MB · {person.used.files.toLocaleString()} of {limOf('files').toLocaleString()} files</span><Meter value={total ? person.used.bytes / total : 0} label={`Space ${first} uses`} /></span>
+          <span className="kn-useline-l"><span>{first} uses {knSize(person.used.bytes)} of {limOf('mbTotal')} MB · {person.used.files.toLocaleString()} of {limOf('files').toLocaleString()} files{person.used.notes ? ` · ${person.used.notes.toLocaleString()} learned ${person.used.notes === 1 ? 'note' : 'notes'}` : ''}</span><Meter value={total ? person.used.bytes / total : 0} label={`Space ${first} uses`} /></span>
           <span className="sub">Kept in Niko’s Knowledge database. You see sizes and counts only.</span>
         </div>}
         {KN_GROUPS.map(([title, keys]) => <div key={title} className="kn-group">

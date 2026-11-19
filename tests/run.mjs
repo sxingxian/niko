@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const here = fileURLToPath(new URL('.', import.meta.url));
 let failed = false;
-for (const name of ['mail', 'ical', 'voice', 'brains', 'weather', 'voices', 'lists', 'hears', 'images', 'maps', 'speechtext', 'provided', 'listen', 'rest', 'lock', 'access', 'glance', 'billing', 'designs', 'backgrounds', 'payments', 'knowledgedb', 'knowledge', 'knowledgesplit', 'knowledgeanswer', 'knowledgedevice']) {
+for (const name of ['mail', 'ical', 'voice', 'brains', 'weather', 'voices', 'lists', 'hears', 'images', 'maps', 'speechtext', 'provided', 'listen', 'rest', 'lock', 'access', 'glance', 'billing', 'designs', 'backgrounds', 'payments', 'knowledgedb', 'knowledge', 'knowledgesplit', 'knowledgeanswer', 'knowledgedevice', 'learned']) {
   const out = `${here}.out-${name}.mjs`;
   await build({
     entryPoints: [`${here}${name}.test.mjs`], bundle: true, platform: 'node', format: 'esm', outfile: out, logLevel: 'error',
@@ -18,6 +18,6 @@ for (const name of ['mail', 'ical', 'voice', 'brains', 'weather', 'voices', 'lis
     external: ['hoodiecrow-imap', 'smtp-server', 'pg', 'pg-native'],
     banner: { js: "import{createRequire}from'module';const require=createRequire(import.meta.url);" },
   });
-  try { execFileSync(process.execPath, [out], { stdio: 'inherit', timeout: name === 'payments' || name.startsWith('knowledge') ? 180_000 : 60_000 }); } catch { failed = true; }
+  try { execFileSync(process.execPath, [out], { stdio: 'inherit', timeout: name === 'payments' || name.startsWith('knowledge') || name === 'learned' ? 180_000 : 60_000 }); } catch { failed = true; }
 }
 process.exit(failed ? 1 : 0);

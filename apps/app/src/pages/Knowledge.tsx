@@ -7,7 +7,9 @@ import {
   knKindOf, knModeOf, knNeedsCloudflare, knPlaceOf, knSearchOf, KN_COL_TYPE_NAMES, KN_COL_TYPES, KN_DEVICE_MODEL_MB,
   type KnColType, type KnColumn, type KnMode, type KnowledgeAccess, type KnowledgeLimits, type KnowledgePrefs,
 } from '@niko/shared';
+import { useSearchParams } from 'react-router-dom';
 import { useNiko } from '../niko';
+import { LearnedAside, LearnedTab, TaughtSection } from './KnowledgeLearned';
 import { addFile, addNumbersInNiko } from '../knowledge';
 import {
   addFileHere, addNumbersHere, deviceFiles, keepHereAsData, missingNumbersHere, moveToDevice, moveToNiko, removeHere, sheetsHere, updateSheetHere,
@@ -72,6 +74,7 @@ export function Knowledge() {
   const [missing, setMissing] = useState(0);
   const [reread, setReread] = useState<{ done: number; total: number } | null>(null);
   const picker = useRef<HTMLInputElement>(null);
+  const [params, setParams] = useSearchParams();
   const account = me?.id ?? '';
 
   const placeOf = (s: State | null): Place => (s ? knPlaceOf(s.prefs, s.access) : 'niko');
@@ -126,6 +129,13 @@ export function Knowledge() {
   const search = knSearchOf(prefs, access, place);
   const readCf = place === 'niko' && access.cloudflareRead && prefs.read === 'cloudflare';
   const busy = !!moving || !!reread;
+  const tab: 'files' | 'learned' = access.learning && (params.get('tab') === 'learned' || !access.files) ? 'learned' : 'files';
+  const tabs = access.learning && access.files ? (
+    <div className="kn-pagetabs" role="tablist" aria-label="Knowledge">
+      <button type="button" role="tab" className="ptab" aria-selected={tab === 'files'} onClick={() => setParams({}, { replace: true })}>Files</button>
+      <button type="button" role="tab" className="ptab" aria-selected={tab === 'learned'} onClick={() => setParams({ tab: 'learned' }, { replace: true })}>What Niko learned</button>
+    </div>
+  ) : null;
 
   const savePrefs = async (change: Partial<KnowledgePrefs>) => {
     setNote(null);
@@ -170,11 +180,10 @@ export function Knowledge() {
   const move = async (to: Place) => {
     setNote(null);
     try {
-      if (files.length) {
-        setMoving({ done: 0, total: files.length, name: '' });
-        const step = (done: number, total: number, name: string) => setMoving({ done, total, name });
-        if (to === 'device') await moveToDevice(account, files, step); else await moveToNiko(account, step);
-      }
+      // Files and what Niko learned both move (with no files, only the notes do).
+      setMoving({ done: 0, total: Math.max(1, files.length), name: '' });
+      const step = (done: number, total: number, name: string) => setMoving({ done, total, name });
+      if (to === 'device') await moveToDevice(account, files, step); else await moveToNiko(account, step);
       await savePrefs({ place: to });
       setPicked(null);
       setNote({ ok: true, text: files.length ? `Your files are now kept ${to === 'device' ? 'on this device' : 'in Niko'}.` : `New files will be kept ${to === 'device' ? 'on this device' : 'in Niko'}.` });
@@ -250,9 +259,18 @@ export function Knowledge() {
       <NoteLine note={note} />
       {!st.available ? (
         <div className="kn-page"><div className="kn-main"><section className="g kn-card"><b className="kn-h">Knowledge</b><p className="srow-hint">Knowledge isn’t available right now. Try again later.</p></section></div></div>
+      ) : tab === 'learned' ? (
+      <div className="kn-page">
+        <div className="kn-main">
+          {tabs}
+          <LearnedTab account={account} place={place} learn={prefs.learn} onLearn={(v) => void savePrefs({ learn: v })} />
+        </div>
+        <LearnedAside />
+      </div>
       ) : (
       <div className="kn-page">
         <div className="kn-main">
+          {tabs}
           <section className="g kn-card" aria-label="Where your Knowledge is kept">
             <div className="kn-head"><b className="kn-h">Where it’s kept</b><span className="srow-hint">{!places.length ? 'Not included in your plan' : files.length ? `Now: ${PLACE_NAME[place]} · ${n(files.length, 'file', 'files')}` : 'Nothing kept yet'}</span></div>
             {places.length > 0 && <>
@@ -297,7 +315,7 @@ export function Knowledge() {
             <section className={'g kn-card kn-empty' + (drag ? ' drag' : '')} aria-label="No files yet" {...dropProps}>
               <IconFile />
               <b className="kn-h">No files yet</b>
-              <span className="srow-hint big">Right now Niko answers from what it knows and finds online, and from your connected apps. Add files and it answers from them too, when they fit.</span>
+              <span className="srow-hint lg">Right now Niko answers from what it knows and finds online, and from your connected apps. Add files and it answers from them too, when they fit.</span>
               <span className="srow-hint">{types}</span>
               {choose}
             </section>
@@ -363,6 +381,8 @@ export function Knowledge() {
               </div>
             </section>
           )}
+
+          {access.learning && canKeep && !empty && <TaughtSection account={account} place={place} />}
 
           <section className="g kn-card" aria-label="Search and use">
             {(access.cloudflareRead || place === 'device') && <SettingRow title="Read files with" hint={readCf ? 'Cloudflare turns PDF, Word and spreadsheet files into text and keeps nothing. Pictures inside them aren’t read.' : place === 'device' ? 'Everything is read here. PDF and Word are not available.' : 'Only files this browser can read itself: JSON, XML, MD, TXT, CSV, TSV and HTML.'}>
@@ -439,7 +459,7 @@ function CheckColumns({ file, ops, onClose }: { file: KnFile; ops: Ops; onClose:
     <Sheet onClose={onClose} labelledBy="kn-check-h">
       <div className="kn-dlg">
         <b id="kn-check-h" className="kn-dlg-h">Check columns · {file.name}</b>
-        <span className="srow-hint big">Niko found {sheet?.header === false ? 'no header row, and ' : 'a header row and '}these columns{sheets && sheets.length > 1 ? ` in ${sheet?.name} (${i + 1} of ${sheets.length})` : ''}. Fix any type that’s wrong, so counts and totals come out right.</span>
+        <span className="srow-hint lg">Niko found {sheet?.header === false ? 'no header row, and ' : 'a header row and '}these columns{sheets && sheets.length > 1 ? ` in ${sheet?.name} (${i + 1} of ${sheets.length})` : ''}. Fix any type that’s wrong, so counts and totals come out right.</span>
         {err && <p className="err" role="alert">{err}</p>}
         {!sheet ? <p className="srow-hint">{err ? '' : 'Loading…'}</p> : <>
           <div className="kn-cols">

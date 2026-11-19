@@ -54,7 +54,7 @@ export function SettingsLayout() {
         <div className="set-brand"><span className="wordmark">NIKO</span><span className="k pill">Settings</span></div>
         <nav ref={navRef} aria-label="Settings sections" className="set-nav">
           {/* Knowledge shows only for accounts that have it, with no word about why for those that don't. */}
-          {SETTINGS.filter(([to]) => to !== '/knowledge' || knowledgeAccess((k) => aiAllowed(me?.aiOff ?? [], k)).files).map(([to, name]) => <NavLink key={to} to={to} className="nv">{name}</NavLink>)}
+          {SETTINGS.filter(([to]) => to !== '/knowledge' || (({ files, learning }) => files || learning)(knowledgeAccess((k) => aiAllowed(me?.aiOff ?? [], k)))).map(([to, name]) => <NavLink key={to} to={to} className="nv">{name}</NavLink>)}
         </nav>
         <div className="set-foot">
           <span>Signed in as {me?.name || me?.email}</span>
