@@ -5,7 +5,7 @@ import { and, eq } from 'drizzle-orm';
 import { connections, providerApps, users, type Db } from '@niko/db';
 import { PROVIDERS, type AppId, type EventItem, type MailItem, type NoteItem } from '@niko/shared';
 import { notionDeleted, notionTitle } from './details';
-import { isKnowledgeNotion } from './knNotes';
+import { withoutKnowledge } from './knNotes';
 import { icalList, pool } from './calendarlink';
 import { accountLimitsFor } from './limits';
 import { imapList, imapReply, isImapProvider } from './mailbox';
@@ -207,12 +207,33 @@ export async function listEvents(env: Env, db: Db, userId: string, provider: str
 /** The Notion user who connected Niko, so that page changes they made themselves can be told apart. Kept per instance. */
 const notionOwners = new Map<string, string>();
 async function notionOwner(userId: string, token: string): Promise<string> {
-  if (notionOwners.has(userId)) return notionOwners.get(userId)!;
+  return (await notionMe(userId, token)).owner;
+}
+const notionWho = new Map<string, { owner: string; bot: string }>();
+/** Who connected Notion (the owner) and Niko's own Notion connection (the bot that creates Knowledge pages). */
+async function notionMe(userId: string, token: string): Promise<{ owner: string; bot: string }> {
+  const have = notionWho.get(userId);
+  if (have?.bot) return have;
   const me = await api('https://api.notion.com/v1/users/me', token, { headers: { 'notion-version': '2022-06-28' } }).catch(() => null);
-  const id = String(me?.bot?.owner?.user?.id ?? '');
-  if (notionOwners.size > 500) notionOwners.delete(notionOwners.keys().next().value!);
-  notionOwners.set(userId, id);
-  return id;
+  const r = { owner: String(me?.bot?.owner?.user?.id ?? ''), bot: me?.type === 'bot' ? String(me?.id ?? '') : '' };
+  if (notionWho.size > 500) notionWho.delete(notionWho.keys().next().value!);
+  notionWho.set(userId, r);
+  return r;
+}
+/** Niko's own Notion connection, for leaving out what Knowledge made (see knNotes.ts). Empty if Notion couldn't say. */
+export const notionBot = async (userId: string, token: string) => (await notionMe(userId, token)).bot;
+const notionMadeBy = new Map<string, string>();
+/** Who created a Notion page or database, remembered (it never changes). Null if it can't be read. */
+export async function notionCreator(token: string, id: string, kind: 'page' | 'database'): Promise<string | null> {
+  const key = `${kind}:${id}`;
+  if (notionMadeBy.has(key)) return notionMadeBy.get(key)!;
+  if (!/^[0-9a-f]{32}$/.test(id)) return null;
+  const o = await api(`https://api.notion.com/v1/${kind === 'page' ? 'pages' : 'databases'}/${id}`, token, { headers: { 'notion-version': '2022-06-28' } }).catch(() => null);
+  if (!o) return null;
+  const by = String(o?.created_by?.id ?? '');
+  if (notionMadeBy.size > 5000) notionMadeBy.delete(notionMadeBy.keys().next().value!);
+  notionMadeBy.set(key, by);
+  return by;
 }
 
 /** The Notion pages Niko made for this person's Knowledge (none when Knowledge isn't set up). */
@@ -220,7 +241,8 @@ async function knowledgeNotes(env: Env, userId: string): Promise<Set<string>> {
   const { accountKnowledge } = await import('./knowledge');
   const { knowledgeNotionIds } = await import('./knNotes');
   const k = accountKnowledge(env, userId);
-  return k ? knowledgeNotionIds(k, userId).catch(() => new Set<string>()) : new Set<string>();
+  // If Niko's records can't be read, what Notion says Niko created is still left out (see withoutKnowledge).
+  return k ? knowledgeNotionIds(k, userId).catch((e) => { console.warn(`knowledge notes: ${String((e as Error)?.message ?? e).slice(0, 200)}`); return new Set<string>(); }) : new Set<string>();
 }
 export async function listNotes(env: Env, db: Db, userId: string, provider: string): Promise<NoteItem[]> {
   const s = await credentials(env, db, userId, provider);
@@ -231,10 +253,11 @@ export async function listNotes(env: Env, db: Db, userId: string, provider: stri
       method: 'POST', headers: { 'content-type': 'application/json', 'notion-version': '2022-06-28' },
       body: JSON.stringify({ page_size: 70, sort: { direction: 'descending', timestamp: 'last_edited_time' }, filter: { property: 'object', value: 'page' } }),
     });
-    const owner = await notionOwner(userId, s.accessToken);
+    const { owner, bot } = await notionMe(userId, s.accessToken);
     // Pages Niko made for Knowledge belong to Knowledge, not to their notes.
-    const hide = await knowledgeNotes(env, userId);
-    return (j.results ?? []).filter((p: any) => !notionDeleted(p) && !isKnowledgeNotion(p, hide)).slice(0, LIST_MAX)
+    const live = (j.results ?? []).filter((p: any) => !notionDeleted(p));
+    const kept = await withoutKnowledge(live, await knowledgeNotes(env, userId), bot, (id, kind) => notionCreator(s.accessToken, id, kind));
+    return kept.slice(0, LIST_MAX)
       .map((p: any) => ({ id: String(p.id), provider, title: notionTitle(p), source: 'Notion', edited: Date.parse(p.last_edited_time) || undefined, ...(owner && p.last_edited_by?.id === owner ? { byMe: true } : {}) }));
   }
   if (provider === 'onenote') {

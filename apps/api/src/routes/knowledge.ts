@@ -14,7 +14,7 @@ import { offFor } from '../access';
 import { ownEmbedder, ownSearchSources } from '../ownEmbed';
 import { notionPage, notionPages, PlaceError, placeConnections, remoteFor } from '../knPlaces';
 import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile, relocate, roots, rootsMade, setRoot } from '../knPlacesStore';
-import { credentials } from '../providers';
+import { credentials, notionBot } from '../providers';
 import { isKnowledgeNotion, knowledgeNotionIds } from '../knNotes';
 import { cleanStorage, loadStorage, saveStorage, shownStorage, testStorage } from '../knStorage';
 import { cleanObsidian, loadObsidian, saveObsidian, shownObsidian, testObsidian } from '../knObsidian';
@@ -345,7 +345,8 @@ knowledge.get('/places/notion/pages', async (c) => {
   if (!cred?.accessToken) return c.json({ error: 'Connect Notion first.', connect: 'notion' }, 409);
   // Niko's own copies aren't offered as the page to keep Knowledge on.
   const ids = await knowledgeNotionIds(s.k, c.get('user').id).catch(() => new Set<string>());
-  try { return c.json({ pages: await notionPages(cred.accessToken, (p) => isKnowledgeNotion(p, ids)) }); } catch (e) { return placeFail(c, e); }
+  const bot = await notionBot(c.get('user').id, cred.accessToken);
+  try { return c.json({ pages: await notionPages(cred.accessToken, (p) => isKnowledgeNotion(p, ids, bot)) }); } catch (e) { return placeFail(c, e); }
 });
 // Where in Notion: a page Niko makes (with the name they choose), or one of their own pages. Either way, files and what
 // Niko learned are copied to the new page; copies on the old one stay there.
