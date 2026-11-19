@@ -1,12 +1,13 @@
 import { and, desc, eq, gt, ilike, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { appSettings, auditLog, backgroundOwned, designOwned, invites, recoveryCodes, sessions, signups, users, type Db } from '@niko/db';
-import { accessState, accountLimits, cleanProvided, providedIds, USAGE_KINDS, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, defaultOn, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
+import { accessState, accountLimits, cleanProvided, providedIds, USAGE_KINDS, addMonths, aiHasBrain, aiOff, cleanAccountLimits, cleanAiAccess, cleanGlanceLimits, cleanKnowledgeLimits, cleanKnowledgeSettings, defaultOn, knowledgeLimits, cleanMonths, cleanPayments, cleanPlanPrices, glanceLimits, offersLine, plansDiffer, plansOffered, INVITE_DAYS, isEmail, lengthLabel, MAX_CENTS, MAX_MONTHS, MIN_CENTS, money, showCode, UNPAID_SIGNUP_DAYS, unlockPlan } from '@niko/shared';
 import { connectInfo, connectStripe, dateLabel, forgetPayments, forgetStripeMode, inviteCodeHash, keysOf, makeInviteCode, paymentSettings, PAYMENTS_KEY, payNow, plansLine, secretsFor, STRIPE_MODE_KEY, stripeMode } from '../billing';
 import { isMode, keysFor, modeStatus, stripe, StripeError, stripeReady } from '../stripe';
 import { forgetGlanceDefaults, GLANCE_DEFAULT_KEY, glanceDefaults } from '../glance';
 import { accountDefaults, ACCOUNT_LIMITS_KEY, forgetAccountDefaults } from '../limits';
 import { AI_DEFAULT_KEY, aiDefaults, forgetAiDefaults } from '../access';
+import { KN_SETTINGS_KEY, knowledgeDb, knowledgeSettings } from '../knowledge';
 import type { AppEnv } from '../env';
 import { hashRecoveryCode, makeRecoveryCodes, newTotpSecret, randomToken, seal, sha256, totpStep, totpUri, unseal } from '../lib/crypto';
 import { verifyPassword } from '../lib/password';
@@ -530,6 +531,37 @@ admin.put('/glance/users/:id', requireAdmin, async (c) => {
   const own = Object.fromEntries(Object.entries(cleanGlanceLimits(b.limits)).filter(([k, v]) => v !== (defaults as unknown as Record<string, unknown>)[k]));
   await db.update(users).set({ glanceLimits: own }).where(eq(users.id, target.id));
   await audit(c, 'glance.user', { target: target.email, changes: Object.entries(own).map(([k, v]) => `${k} ${v}`).join(', ') || 'follows the default' }, c.get('user').id);
+  return c.json({ ok: true, limits: own });
+});
+
+// ---------------------------------------------------------------- Knowledge: where files are read, and how much each person keeps
+// Who may use Knowledge (files, places, Cloudflare, learning) is set with the AI options (group "knowledge").
+admin.get('/knowledge', requireAdmin, async (c) => {
+  const db = c.get('db');
+  const list = await db.select({ id: users.id, name: users.name, email: users.email, role: users.role, status: users.status, knowledgeLimits: users.knowledgeLimits }).from(users).orderBy(users.createdAt);
+  const settings = await knowledgeSettings(db);
+  return c.json({ ready: !!knowledgeDb(c.env), split: settings.split, defaults: knowledgeLimits(settings.limits, {}),
+    users: list.map((u) => ({ ...u, knowledgeLimits: cleanKnowledgeLimits(u.knowledgeLimits) })) });
+});
+admin.put('/knowledge/settings', requireAdmin, async (c) => {
+  const b = await c.req.json<{ split?: unknown; limits?: unknown }>().catch(() => ({} as { split?: unknown; limits?: unknown }));
+  const db = c.get('db');
+  const before = await knowledgeSettings(db);
+  const next = cleanKnowledgeSettings({ split: b.split ?? before.split, limits: b.limits === undefined ? before.limits : knowledgeLimits(cleanKnowledgeLimits(b.limits), {}) });
+  await db.insert(appSettings).values({ key: KN_SETTINGS_KEY, value: next }).onConflictDoUpdate({ target: appSettings.key, set: { value: next } });
+  await audit(c, 'knowledge.settings', { split: next.split, files: next.limits.files, mbPerFile: next.limits.mbPerFile, mbTotal: next.limits.mbTotal }, c.get('user').id);
+  return c.json({ ok: true, split: next.split, defaults: knowledgeLimits(next.limits, {}) });
+});
+admin.put('/knowledge/users/:id', requireAdmin, async (c) => {
+  const b = await c.req.json<{ limits?: unknown }>().catch(() => ({} as { limits?: unknown }));
+  const db = c.get('db');
+  const target = (await db.select().from(users).where(eq(users.id, c.req.param('id'))).limit(1))[0];
+  if (!target) return c.json({ error: 'No such user.' }, 404);
+  const defaults = knowledgeLimits((await knowledgeSettings(db)).limits, {});
+  // A change that matches the default is not a change: only real differences are kept.
+  const own = Object.fromEntries(Object.entries(cleanKnowledgeLimits(b.limits)).filter(([k, v]) => v !== (defaults as unknown as Record<string, unknown>)[k]));
+  await db.update(users).set({ knowledgeLimits: own }).where(eq(users.id, target.id));
+  await audit(c, 'knowledge.user', { target: target.email, changes: Object.entries(own).map(([k, v]) => `${k} ${v}`).join(', ') || 'follows the default' }, c.get('user').id);
   return c.json({ ok: true, limits: own });
 });
 

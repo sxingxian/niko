@@ -5,6 +5,7 @@ export * from './designs';
 export * from './backgrounds';
 export * from './maps';
 export * from './speechtext';
+export * from './knowledge';
 import { MAP_PROVIDERS, mapPreset, type MapProvider, type MapSource } from './maps';
 
 export type ProviderGroup = 'mail' | 'calendar' | 'notes' | 'automation' | 'messaging' | 'weather' | 'ai';

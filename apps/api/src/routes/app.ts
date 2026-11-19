@@ -29,6 +29,7 @@ import { usage } from './usage';
 import { designs } from './designs';
 import { designFor } from '../designs';
 import { backgrounds } from './backgrounds';
+import { knowledge } from './knowledge';
 import { backgroundFor } from '../backgrounds';
 import {
   appFor, authorizeUrl, credentials, exchangeCode, getConnection, listEvents, listMail, listNotes, loadAppKeys, oauthConfig, publicHttpsUrl, relayFile, sendText,
@@ -53,6 +54,7 @@ app.use('*', async (c, next) => {
 app.route('/usage', usage);
 app.route('/designs', designs);
 app.route('/backgrounds', backgrounds);
+app.route('/knowledge', knowledge);
 
 const clampNum = (v: unknown, lo: number, hi: number, d: number) => (typeof v === 'number' && isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : d);
 
