@@ -26,7 +26,7 @@ import { useVoiceHere } from './pages/VoiceMatch';
 import { chatWithTables, keepDeviceNotes, knowledgeAccount, knowledgeFor, syncLearnedCopySoon } from './knowledgeChat';
 import { declineHabitHere, forgetNoteHere, habitsHere, keepHabitHere, noticeHere, teachHere } from './knowledgeDevice';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
-import { api, ApiError, lockedSignal, setAppearance, type CoreMode } from '@niko/ui';
+import { api, ApiError, appUrl, leaveAccount, lockedSignal, setAppearance, type CoreMode } from '@niko/ui';
 
 export type { Brief } from '@niko/shared';
 
@@ -56,11 +56,12 @@ export interface MapView {
 }
 /** Which country's map services: from the location ('auto'), the Worldwide list ('ww'), or one the person said. */
 export type MapCountry = 'auto' | 'ww' | string;
-const MODE_KEY = 'niko.mapMode';
-const lastMode = (): MapMode => { try { const m = localStorage.getItem(MODE_KEY) as MapMode | null; return m && MAP_MODES.includes(m) ? m : 'drive'; } catch { return 'drive'; } };
+/** The last way of travelling each account used, kept on this device under that account. */
+const MODE_KEY = (account: string | undefined) => `niko.mapMode.${account ?? 'none'}`;
+const lastMode = (account?: string): MapMode => { try { const m = localStorage.getItem(MODE_KEY(account)) as MapMode | null; return m && MAP_MODES.includes(m) ? m : 'drive'; } catch { return 'drive'; } };
 /** A short, stable key for a place name (a habit counts each trip once a day without keeping the name). */
 const hashKey = (t: string) => { let h = 5381; for (const ch of t) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0; return h.toString(36); };
-const keepMode = (m: MapMode) => { try { localStorage.setItem(MODE_KEY, m); } catch { /* private mode */ } };
+const keepMode = (m: MapMode, account?: string) => { try { localStorage.setItem(MODE_KEY(account), m); localStorage.removeItem('niko.mapMode'); } catch { /* private mode */ } };
 /** This device's location for a route's start (to about 10 m), if the browser has it or the user allows it now. */
 function whereExactly(): Promise<{ lat: number; lng: number } | undefined> {
   if (!('geolocation' in navigator)) return Promise.resolve(undefined);
@@ -260,7 +261,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const quietRef = useRef(quiet); quietRef.current = quiet;
   // A suggested habit waits (for this visit) until it's answered, and shows on Home's line when Niko is free.
   const [habitAsk, setHabitAskState] = useState<HabitAsk | null>(() => { try { return JSON.parse(sessionStorage.getItem('niko.habitAsk') ?? 'null'); } catch { return null; } });
-  const setHabitAsk = (h: HabitAsk | null) => { setHabitAskState(h); try { if (h) sessionStorage.setItem('niko.habitAsk', JSON.stringify(h)); else sessionStorage.removeItem('niko.habitAsk'); } catch { /* private mode */ } };
+  // A suggestion kept for this tab belongs to the account it was made for.
+  useEffect(() => { if (me && habitAsk && (habitAsk as HabitAsk & { account?: string }).account && (habitAsk as HabitAsk & { account?: string }).account !== me.id) setHabitAsk(null); }, [me?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const setHabitAsk = (h: HabitAsk | null) => { setHabitAskState(h); try { if (h) sessionStorage.setItem('niko.habitAsk', JSON.stringify({ ...h, account: meRef.current?.id })); else sessionStorage.removeItem('niko.habitAsk'); } catch { /* private mode */ } };
   const habitRef = useRef(habitAsk); habitRef.current = habitAsk;
   // Habits said yes to: from the account (Knowledge in Niko) or this device (Knowledge kept here).
   const [localHabits, setLocalHabits] = useState<string[]>([]);
@@ -349,11 +352,28 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   };
   const SR: any = typeof window !== 'undefined' ? (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition : null;
 
+  // The account this page has shown. If the server answers for another account, or none, everything held in memory
+  // belongs to the one before: the page starts again from scratch rather than show it to someone else.
+  const seenAccount = useRef<string | null>(null);
   const refreshMe = useCallback(async () => {
-    try { const m = await api<Me>('/me'); setMe(m); meRef.current = m; setAppearance(m.appearance); }
-    catch { setMe(null); meRef.current = null; setAppearance(null); }
+    let m: Me | null;
+    try { m = await api<Me>('/me'); }
+    catch (e) {
+      // Only a refusal means signed out; a network blip keeps the page as it is.
+      if (!(e instanceof ApiError) || (e.status !== 401 && e.status !== 403)) { if (!meRef.current) { setMe(null); setAppearance(null); } return; }
+      m = null;
+    }
+    if (seenAccount.current && m?.id !== seenAccount.current) { leaveAccount(appUrl(m ? '/' : '/sign-in')); return; }
+    if (m) seenAccount.current = m.id;
+    setMe(m); meRef.current = m; setAppearance(m ? m.appearance : null);
   }, []);
   useEffect(() => { void refreshMe(); }, [refreshMe]);
+  useEffect(() => {
+    // Signed out: to sign-in. Another account signed in (in another tab): this page again, for that account.
+    const out = (e: Event) => { if ((e as CustomEvent<{ changed?: boolean }>).detail?.changed) leaveAccount(location.pathname + location.search); else if (seenAccount.current) leaveAccount(appUrl('/sign-in')); };
+    window.addEventListener('niko:signed-out', out);
+    return () => window.removeEventListener('niko:signed-out', out);
+  }, []);
   // The on-device voice's engine starts in the background, so it is ready by the time Niko speaks.
   // Only on the screens where Niko speaks (Home and the workspace), not on Settings or sign-in pages.
   const path = useLocation().pathname;
@@ -910,12 +930,12 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   };
   const showMapFn = (to: string, from?: string, how: MapAskMode | 'any' = 'any') => {
     picCtl.current?.abort(); setPictureId(null); setReply(null);
-    const v: MapView = { id: ++mapSeq.current, to, from, mode: how === 'any' ? lastMode() : how, auto: how === 'any', status: 'loading', times: {}, located: false };
+    const v: MapView = { id: ++mapSeq.current, to, from, mode: how === 'any' ? lastMode(meRef.current?.id) : how, auto: how === 'any', status: 'loading', times: {}, located: false };
     mapRef.current = v; setMap(v);
     loadMap(v);
   };
   const setMapModeFn = (mode: MapMode | 'fly', byHabit = false) => {
-    if (mode !== 'fly' && !byHabit) keepMode(mode);
+    if (mode !== 'fly' && !byHabit) keepMode(mode, meRef.current?.id);
     const cur = mapRef.current;
     if (!cur) return;
     // Switching a short trip to walking, by hand: one sighting of the walking habit (once per place per day).

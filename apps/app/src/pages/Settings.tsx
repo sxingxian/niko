@@ -12,7 +12,7 @@ import { AI_OPTION_GROUPS, aiAllowed, brainOption, hearOption, imageOption, know
 import { IMAGE_PROVIDERS, imageOrder, imagePresetOf, MAX_IMAGE_KEYS, type ImageKeyInfo, type ImageProvider, type ImageSource } from '@niko/shared';
 import { HEAR_PROVIDERS, hearOrder, hearPresetOf, MAX_HEAR_KEYS, type HearKeyInfo, type HearProvider, type HearSource } from '@niko/shared';
 import { checkAppKey, COLOURS, GROUPS, KOKORO_VOICES, MAX_VOICE_KEYS, PAGE_SIZES, VOICE_NAMES, VOICE_PROVIDERS, VOICE_SOURCES, voiceName, voiceOrder, voicePresetOf, WORKERS_VOICES, type VoiceKeyInfo, type VoiceProvider, type VoiceSource, type AppDef, type Appearance as Look, type EnginePrefs, type Permissions, type ProviderDef, type ProviderField } from '@niko/shared';
-import { api, BackgroundPreview, DesignPreview, Field, Icon, PasswordField, setAppearance, Switch } from '@niko/ui';
+import { api, appUrl, BackgroundPreview, DesignPreview, Field, Icon, leaveAccount, PasswordField, setAppearance, Switch } from '@niko/ui';
 import { useNiko } from '../niko';
 import { MapSettings, type MapLists } from './MapSettings';
 import { ScreenLock } from './ScreenLock';
@@ -39,7 +39,8 @@ export function SettingsLayout() {
   const { me, refreshMe } = useNiko();
   const nav = useNavigate();
   const { pathname } = useLocation();
-  const signOut = async () => { await api('/auth/sign-out', { method: 'POST' }); await voiceForgetAll(); await refreshMe(); nav('/sign-in', { replace: true }); };
+  // Signing out loads the page again, so nothing this account had on screen or in memory stays for the next person.
+  const signOut = async () => { await api('/auth/sign-out', { method: 'POST' }).catch(() => undefined); await voiceForgetAll().catch(() => undefined); leaveAccount(appUrl('/sign-in')); };
   // Each settings page opens at its top (the browser would otherwise keep the scroll of the page before), and on a
   // phone the section tabs slide so the open one is in view.
   const navRef = useRef<HTMLElement>(null);

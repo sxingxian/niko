@@ -1,7 +1,7 @@
 // Niko admin portal: sign-in with a second factor, then users and registration.
 import { StrictMode, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, ApiError, Meter, BackgroundPreview, DesignPreview, Field, PasswordField, Switch } from '@niko/ui';
+import { leaveAccount, api, ApiError, Meter, BackgroundPreview, DesignPreview, Field, PasswordField, Switch } from '@niko/ui';
 import { BACKGROUNDS, backgroundInfo, DESIGNS, designInfo, type BackgroundInfo, type DesignInfo } from '@niko/shared';
 import { AI_OPTION_GROUPS, AI_PRESETS, aiAllowed, defaultOn, KN_DB_FREE_BYTES, KN_FILE_STEPS, KN_MB_FILE_STEPS, KN_MB_TOTAL_STEPS, type KnowledgeLimits, BUILTIN_TOKEN, hearPresetOf, imagePresetOf, presetOf, providedIds, voicePresetOf, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
 import '@niko/ui/src/styles.css';
@@ -2136,7 +2136,14 @@ function Admin() {
     api<{ name: string; email: string }>('/admin/me').then((m) => { setMe(m); setStage('in'); }).catch((e) => setStage(e instanceof ApiError && e.data?.mfa ? 'verify' : 'password'));
   }, []);
   if (stage === 'loading') return null;
-  return stage === 'in' ? <Users initialMe={me} onSignedOut={() => { setMe(null); setStage('password'); }} /> : <SignIn stage={stage} setStage={setStage} />;
+  // Signing out (or the session ending) loads the portal again from the start, so nothing one admin had open stays
+  // in memory for whoever signs in next.
+  return stage === 'in' ? <Users initialMe={me} onSignedOut={() => leaveAccount(location.pathname)} /> : <SignIn stage={stage} setStage={setStage} />;
 }
 
+// A page brought back from the browser's memory (Back after signing out) may belong to an account that left: load it
+// again so it shows only what the account signed in now may see.
+window.addEventListener('pageshow', (e) => { if (e.persisted) window.location.reload(); });
+// Another account answered (signed in in another tab): start again from scratch.
+window.addEventListener('niko:signed-out', () => leaveAccount(location.pathname));
 createRoot(document.getElementById('root')!).render(<StrictMode><Admin /></StrictMode>);

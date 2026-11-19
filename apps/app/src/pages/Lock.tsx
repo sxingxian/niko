@@ -1,7 +1,7 @@
 // The code entry on the locked Home: the caption under the core turns into six small dots. The code is typed (the
 // keyboard on a computer, the phone's own number pad), never said, and goes only to the server, which checks it.
 import { useEffect, useRef, useState } from 'react';
-import { api } from '@niko/ui';
+import { api, appUrl, leaveAccount } from '@niko/ui';
 import { useNiko } from '../niko';
 import { voiceForgetAll } from '../voiceMatch';
 
@@ -47,8 +47,8 @@ export function LockEntry() {
   };
   const signOut = async () => {
     await api('/auth/sign-out', { body: {} }).catch(() => undefined);
-    await voiceForgetAll();
-    location.assign(location.pathname.startsWith('/app') ? '/app/sign-in' : '/sign-in');
+    await voiceForgetAll().catch(() => undefined);
+    leaveAccount(appUrl('/sign-in'));
   };
 
   return (
