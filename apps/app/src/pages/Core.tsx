@@ -59,6 +59,18 @@ function ResumeRow() {
   );
 }
 
+/** Yes or no to a habit Niko suggests once (shown under the line on Home). */
+function HabitRow() {
+  const n = useNiko();
+  if (!n.habitAsk || n.mode === 'thinking' || n.mode === 'speaking') return null;
+  return (
+    <div className="resume" role="group" aria-label="A suggestion">
+      <button className="pri" onClick={() => n.answerHabit(true)}>Yes, keep</button>
+      <button className="sec" onClick={() => n.answerHabit(false)}>No</button>
+    </div>
+  );
+}
+
 function useWide() {
   const q = '(min-width: 901px)';
   const [on, setOn] = useState(() => typeof window !== 'undefined' && window.matchMedia(q).matches);
@@ -126,7 +138,7 @@ const CARD_GAP = 0.6; // seconds between the answer card and the approval card b
 const followFor = (f: FollowUp | null, reply: string) => (f && f.for === reply ? f : null);
 /** The card under an answer from the person's files or about what Niko learned: where it came from, "Is this the
  *  one?" for something only similar, a taught match or a note just learned (with Undo), or choices to tap. */
-function KnowledgeCard({ reply, kn, tabbable }: { reply: string; kn: KnowledgeAnswer | null; tabbable: boolean }) {
+function KnowledgeCard({ reply, kn, tabbable, onCorrect }: { reply: string; kn: KnowledgeAnswer | null; tabbable: boolean; onCorrect: () => void }) {
   const n = useNiko();
   const f = followFor(n.followUp, reply);
   const t = tabbable ? 0 : -1;
@@ -155,6 +167,14 @@ function KnowledgeCard({ reply, kn, tabbable }: { reply: string; kn: KnowledgeAn
       <ol className="kn-src-list">{row('×', label(f.target), 'Not offered for this question again')}</ol>
       <div className="kn-src-b"><button type="button" className="sec" tabIndex={t} onClick={n.undoFollowUp}>Undo</button><button type="button" className="pri" tabIndex={t} onClick={n.dismissFollowUp}>Done</button></div>
       <span className="kn-src-note">You can change it in Settings · Knowledge.</span>
+    </section>
+  );
+  if (f?.kind === 'judge') return (
+    <section className="g kn-src" aria-label="Was this right?">
+      <span className="k">{kn?.sources.length ? 'Sources · was this right?' : 'Was this right?'}</span>
+      {!!kn?.sources.length && <ol className="kn-src-list">{kn.sources.map((s) => row(String(s.n), label(s), s.collection))}</ol>}
+      <div className="kn-src-b"><button type="button" className="sec" tabIndex={t} onClick={onCorrect}>No, correct it</button><button type="button" className="pri" tabIndex={t} onClick={() => void n.ask('That’s right.')}>That’s right</button></div>
+      <span className="kn-src-note">Your answer teaches Niko how you handle this.</span>
     </section>
   );
   if (!kn) return null;
@@ -207,6 +227,8 @@ export function Home() {
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [n.reply, n.weather, n.knowledge, wide]);
+  // Quiet mode: questions are typed, so the box opens.
+  useEffect(() => { if (n.quiet) setTyping(true); }, [n.quiet]);
   const submit = (e: FormEvent) => { e.preventDefault(); const t = text; setText(''); setTyping(false); void n.ask(t); };
   const cards = shown ? (shown.chat || shown.kn || followFor(n.followUp, shown.reply) ? 2 : 1) : 0;
   const card = !!pic || !!mapv;
@@ -234,6 +256,7 @@ export function Home() {
             <p>{n.line}</p>
             {!locked && n.voiceProblem && <Link to="/voice" className="voice-note">Your first voice could not speak, so the next one in your list was used. {n.voiceProblem}</Link>}
             {!locked && <ResumeRow />}
+            {!locked && <HabitRow />}
           </>}
         </div>
       </div>
@@ -244,6 +267,7 @@ export function Home() {
         </div>
         <div className="right">
         {locked ? <span className="lock-pill"><Icon name="lock" size={14} />Locked</span> : <>
+        {n.quiet && <button className="g chip quiet-chip" style={{ boxShadow: 'none' }} onClick={() => n.setQuiet(false)} aria-label="Leave quiet mode"><span className="k" style={{ marginRight: 8 }}>Quiet</span><span className="long">{n.quiet.why === 'meeting' ? `${n.quiet.title ?? 'Meeting'} now` : 'On screen only'}</span><Icon name="x" size={14} /></button>}
         {fs.offer && <button className="ib g" style={{ width: 44, height: 44 }} onClick={() => void toggleFullscreen()} aria-label={fs.on ? 'Leave full screen' : 'Full screen'} aria-pressed={fs.on} title={fs.on ? 'Leave full screen' : 'Full screen'}><Icon name={fs.on ? 'collapse' : 'expand'} /></button>}
         <Link className="g chip" style={{ boxShadow: 'none' }} to="/engine"><span className="long"><span className="k" style={{ marginRight: 10 }}>Engine</span>{n.me?.engine.brain === 'custom-ai' ? 'Your AI' : n.me?.engine.brain === 'self-hosted-ai' ? 'Your model' : 'Workers AI'} · {voiceName(firstVoice(n.me))}</span><span className="short">Engine</span></Link>
         </>}
@@ -280,7 +304,7 @@ export function Home() {
             {shown.wx ? <WeatherCard card={shown.wx} onClose={n.dismissReply} tabbable={open} /> : (
             <section className="g">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span className="k">{shown.kn?.only || (n.knowledge?.for === shown.reply && n.knowledge.k.taught) ? 'Niko · from your files' : shown.kn?.lead ? 'Niko · your files lead' : 'Niko'}</span>
+                <span className="k">{n.quiet ? `Niko · quiet${n.quiet.why === 'meeting' ? ` · ${n.quiet.title ?? 'meeting'} now` : ''}` : shown.kn?.only || (n.knowledge?.for === shown.reply && n.knowledge.k.taught) ? 'Niko · from your files' : shown.kn?.lead ? 'Niko · your files lead' : 'Niko'}</span>
                 <button className="ib" style={{ width: 44, height: 44, margin: '-8px -10px -8px 0' }} onClick={n.dismissReply} aria-label="Hide the answer" tabIndex={open ? 0 : -1}><Icon name="x" /></button>
               </div>
               <p className="reply"><Words text={shown.reply} start={wide ? 1.0 : 0.35} /></p>
@@ -290,7 +314,7 @@ export function Home() {
           </div>
           {(shown.kn || followFor(n.followUp, shown.reply)) && (
             <div className="card-build" style={{ ['--d' as string]: `${CARD_GAP}s` }}>
-              <KnowledgeCard reply={shown.reply} kn={n.knowledge?.for === shown.reply ? n.knowledge.k : shown.kn} tabbable={open} />
+              <KnowledgeCard reply={shown.reply} kn={n.knowledge?.for === shown.reply ? n.knowledge.k : shown.kn} tabbable={open} onCorrect={() => { setText('No, '); setTyping(true); }} />
               <Outline />
             </div>
           )}

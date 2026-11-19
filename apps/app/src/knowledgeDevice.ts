@@ -5,8 +5,8 @@
 // data deletes it all.
 import { api } from '@niko/ui';
 import {
-  KN_LEARNED_MAX, KN_MEANS_CHARS, KN_PIECES_PER_CALL, KN_SAID_CHARS, KN_SHEET_ROWS_PER_CALL, KN_TAUGHT_MAX, KN_TAUGHT_WORDS, knHowName, looksSecret, lookupRows, wordsAlike,
-  type KnColType, type KnColumn, type KnDeviceKnowledge, type KnHow, type KnLearnedItem, type KnLearnedKind, type KnowledgeLimits, type KnTableAsk, type KnTarget,
+  KN_LEARNED_MAX, KN_MEANS_CHARS, KN_PIECES_PER_CALL, KN_SAID_CHARS, KN_SHEET_ROWS_PER_CALL, KN_TAUGHT_MAX, KN_TAUGHT_WORDS, habitSure, KN_HABIT_AFTER, KN_HABIT_FADE_DAYS, KN_HABITS, knHowName, knLevel, looksSecret, lookupRows, situationOf, wordsAlike,
+  type KnColType, type KnColumn, type KnDeviceKnowledge, type KnHabit, type KnHow, type KnLearnedItem, type KnLearnedKind, type KnowledgeLimits, type KnTableAsk, type KnTarget,
 } from '@niko/shared';
 import { prepare, sha256Hex, type Piece } from './knowledge';
 import { embedReady, embedTexts } from './embed';
@@ -228,7 +228,7 @@ export async function updateSheetHere(account: string, fileId: string, sheetId: 
 export async function searchHere(account: string, text: string, opts: { pin?: KnTarget | null; files?: boolean } = {}): Promise<KnDeviceKnowledge | null> {
   const notes = await notesHere(account).catch(() => [] as KnLearnedItem[]);
   const L = opts.files === false ? null : await load(account);
-  const useful = notes.filter((n) => n.kind !== 'file-match' && (text.toLowerCase().includes(n.said.toLowerCase()) || wordsAlike(`${n.said} ${n.means}`, text) >= 0.2)).slice(0, 8);
+  const useful = notes.filter((n) => n.kind !== 'file-match' && !(n.kind === 'habit' && n.suggested) && (text.toLowerCase().includes(n.said.toLowerCase()) || wordsAlike(`${n.said} ${n.means}`, text) >= 0.2)).slice(0, 8);
   if (useful.length) void touchNotes(account, useful.map((n) => n.id));
   const learned = useful.map((n) => ({ kind: n.kind, said: n.said, means: n.means, level: n.level, how: n.how }));
   if (!L?.files.length) return learned.length ? { hits: [], tables: [], numbers: false, learned } : null;
@@ -241,7 +241,15 @@ export async function searchHere(account: string, text: string, opts: { pin?: Kn
     const p = L.pieces.get(key); const f = p && byId.get(p.fileId);
     return p && f ? { file: f.name, fileId: f.id, piece: key, heading: p.heading, text: p.body, collection: f.collection, similarity } : null;
   };
-  let hits = L.index.search(text, qv, 10).map((h) => toHit(h.id, h.similarity)).filter((h): h is NonNullable<typeof h> => !!h)
+  // A situational question gathers more pieces, each with the rest of its section ("unless" and "except" come along).
+  const situation = situationOf(text).situation;
+  const section = (h: NonNullable<ReturnType<typeof toHit>>) => {
+    if (!situation || !h.heading) return h;
+    const parts = [...L.pieces.entries()].filter(([, p]) => p.fileId === h.fileId && p.heading === h.heading)
+      .sort((a, b) => Number(a[0].split(':')[1]) - Number(b[0].split(':')[1])).map(([, p]) => p.body);
+    return { ...h, text: parts.join('\n\n').slice(0, 2000) };
+  };
+  let hits = L.index.search(text, qv, situation ? 16 : 10).map((h) => toHit(h.id, h.similarity)).filter((h): h is NonNullable<typeof h> => !!h).map(section)
     .filter((h) => !no.some((t) => t.fileId === h.fileId && (t.piece === h.piece || (!!t.heading && t.heading === h.heading))));
   const pinned = yes ? toHit(yes.piece, 1) : null;
   if (pinned) hits = [{ ...pinned, taught: true } as typeof pinned & { taught: boolean }, ...hits.filter((h) => h.piece !== pinned.piece)];
@@ -252,14 +260,57 @@ export async function searchHere(account: string, text: string, opts: { pin?: Kn
 }
 
 // ---------------------------------------------------------------- what Niko learned, kept here
-interface StoredNote { kind: KnLearnedKind; said: string; means: string; how: KnHow; target: KnTarget | null; uses: number; createdAt: string; lastUsed: string | null }
+interface StoredNote { kind: KnLearnedKind; said: string; means: string; how: KnHow; target: KnTarget | null; uses: number; createdAt: string; lastUsed: string | null; updatedAt?: string; confirmed?: boolean; habit?: { habit: KnHabit; keys: string[]; offered?: boolean; declined?: boolean } }
 const noteAad = (id: string) => `learned:${id}`;
 async function storedNotes(account: string): Promise<(StoredNote & { id: string })[]> {
   return Promise.all((await all(account, 'learned')).map(async (r) => ({ id: r.id, ...(await unlock<StoredNote>(account, noteAad(r.id), r)) })));
 }
-const asItem = (n: StoredNote & { id: string }): KnLearnedItem => ({ id: n.id, kind: n.kind, said: n.said, means: n.means, how: knHowName(n.how), level: 'sure', uses: n.uses, confirmed: true, target: n.target, createdAt: n.createdAt, lastUsed: n.lastUsed });
+const DAY = 86400_000;
+const asItem = (n: StoredNote & { id: string }): KnLearnedItem => {
+  const h = n.kind === 'habit' ? n.habit : undefined, open = !!h && !n.confirmed;
+  const unit = h ? KN_HABITS[h.habit].unit : null;
+  return {
+    id: n.id, kind: n.kind, said: n.said, means: n.means,
+    how: open ? `Noticed on ${n.uses} ${n.uses === 1 ? unit![0] : unit![1]} · not confirmed` : knHowName(n.how),
+    level: open ? knLevel(habitSure(n.uses)) : 'sure', uses: n.uses, confirmed: !open, target: n.target, createdAt: n.createdAt, lastUsed: n.lastUsed,
+    ...(h ? { habit: h.habit, suggested: open, ...(open ? { fadesIn: Math.max(0, KN_HABIT_FADE_DAYS - Math.floor((Date.now() - Date.parse(n.updatedAt ?? n.createdAt)) / DAY)) } : {}) } : {}),
+  };
+};
+/** Notes kept here, as What Niko learned shows them. Habits nobody confirmed fade after 60 days; ones not yet seen
+ *  enough, or that the person said no to, aren't shown. */
 export async function notesHere(account: string): Promise<KnLearnedItem[]> {
-  return (await storedNotes(account)).sort((a, b) => (b.lastUsed ?? b.createdAt).localeCompare(a.lastUsed ?? a.createdAt)).map(asItem);
+  const all = await storedNotes(account);
+  const faded = all.filter((n) => n.kind === 'habit' && !n.confirmed && Date.now() - Date.parse(n.updatedAt ?? n.createdAt) > KN_HABIT_FADE_DAYS * DAY);
+  if (faded.length) await dropNotes(account, faded.map((n) => n.id));
+  return all.filter((n) => !faded.includes(n) && !(n.kind === 'habit' && !n.confirmed && ((n.habit?.keys.length ?? 0) < KN_HABIT_AFTER || n.habit?.declined)))
+    .sort((a, b) => (b.lastUsed ?? b.updatedAt ?? b.createdAt).localeCompare(a.lastUsed ?? a.updatedAt ?? a.createdAt)).map(asItem);
+}
+/** One sighting of a habit, kept here (the same rules as in Niko). */
+export async function noticeHere(account: string, habit: KnHabit, key: string): Promise<{ suggest: boolean; id: string | null }> {
+  const all = await storedNotes(account);
+  const cur = all.find((n) => n.kind === 'habit' && n.habit?.habit === habit);
+  if (cur?.confirmed || cur?.habit?.declined) return { suggest: false, id: cur.id };
+  const st = cur?.habit ?? { habit, keys: [] as string[] };
+  if (st.keys.includes(key)) return { suggest: false, id: cur?.id ?? null };
+  st.keys = [...st.keys, key].slice(-20);
+  const suggest = st.keys.length >= KN_HABIT_AFTER && !st.offered;
+  if (suggest) st.offered = true;
+  if (!cur && all.length >= KN_LEARNED_MAX) return { suggest: false, id: null };
+  const id = cur?.id ?? crypto.randomUUID(), now = new Date().toISOString();
+  await putNote(account, id, { kind: 'habit', said: KN_HABITS[habit].said, means: KN_HABITS[habit].means, how: 'noticed', target: null, uses: st.keys.length, createdAt: cur?.createdAt ?? now, lastUsed: null, updatedAt: now, confirmed: false, habit: st });
+  return { suggest, id };
+}
+export async function keepHabitHere(account: string, id: string): Promise<void> {
+  const n = (await storedNotes(account)).find((x) => x.id === id && x.kind === 'habit');
+  if (n) await putNote(account, id, { ...n, confirmed: true, how: 'suggested', updatedAt: new Date().toISOString() });
+}
+export async function declineHabitHere(account: string, id: string): Promise<void> {
+  const n = (await storedNotes(account)).find((x) => x.id === id && x.kind === 'habit');
+  if (n?.habit && !n.confirmed) await putNote(account, id, { ...n, habit: { ...n.habit, declined: true }, updatedAt: new Date().toISOString() });
+}
+/** The habits said yes to, kept here. */
+export async function habitsHere(account: string): Promise<KnHabit[]> {
+  return (await storedNotes(account)).filter((n) => n.kind === 'habit' && n.confirmed && n.habit).map((n) => n.habit!.habit);
 }
 async function putNote(account: string, id: string, n: StoredNote) { await put(account, 'learned', [{ id, ...(await lock(account, noteAad(id), n)) }]); }
 async function dropNotes(account: string, ids: string[]) {
@@ -273,12 +324,12 @@ async function touchNotes(account: string, ids: string[]) {
   for (const n of (await storedNotes(account)).filter((x) => ids.includes(x.id))) await putNote(account, n.id, { ...n, uses: n.uses + 1, lastUsed: now });
 }
 /** Keeps a note here, with the same rules as in Niko: a name or correction replaces any note about the same words. */
-export async function keepNoteHere(account: string, n: { kind: 'person' | 'correction' | 'remembered' | 'file-match'; said: string; means: string; how: KnHow; target?: KnTarget | null }): Promise<KnLearnedItem> {
-  const said = n.said.trim().slice(0, n.kind === 'file-match' ? 200 : n.kind === 'remembered' ? KN_MEANS_CHARS : KN_SAID_CHARS), means = n.means.trim().slice(0, KN_MEANS_CHARS);
+export async function keepNoteHere(account: string, n: { kind: 'person' | 'correction' | 'remembered' | 'file-match' | 'playbook'; said: string; means: string; how: KnHow; target?: KnTarget | null }): Promise<KnLearnedItem> {
+  const said = n.said.trim().slice(0, n.kind === 'file-match' || n.kind === 'playbook' ? 200 : n.kind === 'remembered' ? KN_MEANS_CHARS : KN_SAID_CHARS), means = n.means.trim().slice(0, KN_MEANS_CHARS);
   if (!said || !means) throw new Error('There’s nothing to keep.');
   if (looksSecret(`${said} ${means}`)) throw new Error('Niko never keeps passwords, codes, or card and account numbers.');
   const have = await storedNotes(account);
-  const same = have.filter((x) => (n.kind === 'person' || n.kind === 'correction') ? (x.kind === 'person' || x.kind === 'correction') && x.said.toLowerCase() === said.toLowerCase()
+  const same = have.filter((x) => n.kind === 'playbook' ? x.kind === 'playbook' && x.said.toLowerCase() === said.toLowerCase() : (n.kind === 'person' || n.kind === 'correction') ? (x.kind === 'person' || x.kind === 'correction') && x.said.toLowerCase() === said.toLowerCase()
     : n.kind === 'remembered' ? x.kind === 'remembered' && x.means.toLowerCase() === means.toLowerCase()
     : x.kind === 'file-match' && x.said.toLowerCase() === said.toLowerCase() && x.target?.fileId === n.target?.fileId && x.target?.piece === n.target?.piece);
   await dropNotes(account, same.map((x) => x.id));
@@ -293,6 +344,7 @@ export async function editNoteHere(account: string, id: string, b: { said: strin
   const n = (await storedNotes(account)).find((x) => x.id === id);
   if (!n) throw new Error('No such note.');
   if (n.kind === 'file-match') throw new Error('A taught match can’t be changed. Remove it instead.');
+  if (n.kind === 'habit') throw new Error('A habit can’t be changed. Say yes to keep it, or forget it.');
   const said = b.said.trim().slice(0, n.kind === 'remembered' ? KN_MEANS_CHARS : KN_SAID_CHARS), means = n.kind === 'remembered' ? said : b.means.trim().slice(0, KN_MEANS_CHARS);
   if (!said || !means) throw new Error('A note can’t be empty.');
   if (looksSecret(`${said} ${means}`)) throw new Error('Niko never keeps passwords, codes, or card and account numbers.');
@@ -368,7 +420,7 @@ export async function moveToDevice(account: string, files: ServerFile[], onStep?
   // What Niko learned moves too (taught matches point at the old copies, so they're left behind and removed).
   const learned = await api<{ items: KnLearnedItem[] }>('/knowledge/learned').catch(() => null);
   for (const n of learned?.items ?? []) {
-    if (n.kind === 'person' || n.kind === 'correction' || n.kind === 'remembered') await keepNoteHere(account, { kind: n.kind, said: n.said, means: n.means, how: n.kind === 'remembered' ? 'remember' : n.kind === 'correction' ? 'corrected' : 'told' }).catch(() => undefined);
+    if (n.kind === 'person' || n.kind === 'correction' || n.kind === 'remembered' || n.kind === 'playbook') await keepNoteHere(account, { kind: n.kind, said: n.said, means: n.means, how: n.kind === 'remembered' ? 'remember' : n.kind === 'correction' ? 'corrected' : n.kind === 'playbook' ? 'confirmed' : 'told' }).catch(() => undefined);
   }
   if (learned?.items.length) await api('/knowledge/learned', { method: 'DELETE' }).catch(() => undefined);
 }
@@ -400,7 +452,7 @@ export async function moveToNiko(account: string, onStep?: (done: number, total:
   }
   // What Niko learned here moves into Niko too (taught matches point at the old copies and are dropped).
   for (const n of await storedNotes(account).catch(() => [])) {
-    if (n.kind === 'person' || n.kind === 'correction' || n.kind === 'remembered') await api('/knowledge/learned', { method: 'POST', body: { kind: n.kind, said: n.said, means: n.means, how: n.how } }).catch(() => undefined);
+    if (n.kind === 'person' || n.kind === 'correction' || n.kind === 'remembered' || n.kind === 'playbook') await api('/knowledge/learned', { method: 'POST', body: { kind: n.kind, said: n.said, means: n.means, how: n.how } }).catch(() => undefined);
   }
   await forgetAllHere(account).catch(() => undefined);
   changed();

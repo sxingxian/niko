@@ -186,16 +186,16 @@ export async function listEvents(env: Env, db: Db, userId: string, provider: str
       u.searchParams.set('timeMin', dayStart.toISOString()); u.searchParams.set('timeMax', dayEnd.toISOString());
       u.searchParams.set('singleEvents', 'true'); u.searchParams.set('orderBy', 'startTime'); u.searchParams.set('maxResults', String(LIST_MAX));
       const j = await api(u.toString(), s.accessToken);
-      return (j.items ?? []).filter((e: any) => e.status !== 'cancelled').map((e: any) => ({ id: googleEventId(cal.id, String(e.id)), provider, title: e.summary ?? (cal.id === 'primary' ? '(no title)' : 'Busy'), source: cal.name, start: Date.parse(e.start?.dateTime ?? e.start?.date), time: '', allDay: !e.start?.dateTime } as EventItem));
+      return (j.items ?? []).filter((e: any) => e.status !== 'cancelled').map((e: any) => ({ id: googleEventId(cal.id, String(e.id)), provider, title: e.summary ?? (cal.id === 'primary' ? '(no title)' : 'Busy'), source: cal.name, start: Date.parse(e.start?.dateTime ?? e.start?.date), end: Date.parse(e.end?.dateTime ?? e.end?.date) || undefined, time: '', allDay: !e.start?.dateTime } as EventItem));
     });
     const failed = lists.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
     if (cals.length && failed.length === cals.length) throw failed[0]!.reason;
     return lists.flatMap((r) => (r.status === 'fulfilled' ? r.value : [])).sort((a, b) => a.start - b.start).slice(0, 100);
   }
   if (provider === 'outlook-calendar') {
-    const u = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${dayStart.toISOString()}&endDateTime=${dayEnd.toISOString()}&$top=${LIST_MAX}&$select=id,subject,start,isCancelled&$orderby=start/dateTime`;
+    const u = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${dayStart.toISOString()}&endDateTime=${dayEnd.toISOString()}&$top=${LIST_MAX}&$select=id,subject,start,end,isCancelled&$orderby=start/dateTime`;
     const j = await api(u, s.accessToken, { headers: { prefer: 'outlook.timezone="UTC"' } });
-    return (j.value ?? []).filter((e: any) => !e.isCancelled).map((e: any) => ({ id: String(e.id), provider, title: e.subject ?? '(no title)', source: 'Outlook', start: Date.parse(e.start?.dateTime + 'Z'), time: '' }));
+    return (j.value ?? []).filter((e: any) => !e.isCancelled).map((e: any) => ({ id: String(e.id), provider, title: e.subject ?? '(no title)', source: 'Outlook', start: Date.parse(e.start?.dateTime + 'Z'), end: Date.parse(e.end?.dateTime + 'Z') || undefined, time: '' }));
   }
   return [];
 }

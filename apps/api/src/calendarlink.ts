@@ -250,7 +250,7 @@ export async function icalList(s: Record<string, string>, from: Date, to: Date, 
   // One address failing (reset, unpublished, a slow server) must not hide the events of the others.
   const lists = await pool(links, 6, async (cal) => {
     const occ = occurrences(parse(await fetchIcs(cal.url, quoted(cal))), from.getTime(), to.getTime(), tzOffsetMin);
-    return occ.map((o) => ({ id: idOf(cal.id, o), provider: 'ical', title: String(o.ev.summary || '(no title)'), source: cal.name, start: o.start, time: '', allDay: o.allDay } as EventItem));
+    return occ.map((o) => ({ id: idOf(cal.id, o), provider: 'ical', title: String(o.ev.summary || '(no title)'), source: cal.name, start: o.start, end: o.end, time: '', allDay: o.allDay } as EventItem));
   });
   const failed = lists.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
   for (const f of failed) console.warn(`ical: ${String(f.reason?.message ?? f.reason).slice(0, 200)}`);

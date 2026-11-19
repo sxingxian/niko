@@ -452,7 +452,9 @@ export interface Me {
   /** The background to draw: the one chosen, or Glow if this account can no longer use it. */
   background?: string;
   /** Where this person keeps Knowledge and how it is searched, when their plan includes Knowledge files. */
-  knowledge?: { place: 'niko' | 'device'; search: 'cloudflare' | 'device' };
+  knowledge?: { place: 'niko' | 'device'; search: 'cloudflare' | 'device';
+    /** Learning is in the plan and not paused; situations may use the calendar and time; habits said yes to. */
+    learn?: boolean; situations?: boolean; habits?: string[] };
 }
 
 /** Whether a message is about the weather. Only then is the device's location asked for and sent. */
@@ -496,7 +498,7 @@ export function passwordProblem(v: unknown, email = ''): string | null {
 
 // ---------------------------------------------------------------- the brief, and what opens from it
 export interface MailItem { id: string; from: string; subject: string; source: string; provider: string }
-export interface EventItem { id: string; provider: string; time: string; title: string; source: string; start: number; allDay?: boolean }
+export interface EventItem { id: string; provider: string; time: string; title: string; source: string; start: number; end?: number; allDay?: boolean }
 export interface NoteItem { id: string; provider: string; title: string; source: string; edited?: number; /** Last changed by the person themselves (where the service says so). */ byMe?: boolean }
 export interface ChatItem { provider: string; chatId: string; title: string; last: string; source: string; lastAt?: number }
 /** The parts of the briefing, so each screen asks only for its own: Inbox = mail + chats, Calendar = events, Notes = notes. */

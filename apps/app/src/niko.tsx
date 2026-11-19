@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { startAuthentication } from '@simplewebauthn/browser';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { type KnTarget, speakable, stripTags, aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type MapAskMode, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
+import { type KnHabit, type KnTarget, KN_HABITS, meetingNow, speakable, stripTags, aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, voiceOrder, minutesText, MAP_MODES, type MapAskMode, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
 
 /** Where an answer came from in the person's files (from /chat). `ask`: the closest piece is only similar, so Home asks
  *  "Is this the one?". `taught`: the piece that leads is one the person taught. */
@@ -12,13 +12,16 @@ export type FollowUp = { for: string; question: string } & (
   | { kind: 'choices'; options: string[] }
   | { kind: 'learned'; items: { id: string; kind: string; said: string; means: string }[]; device: boolean }
   | { kind: 'noted'; target: KnTarget; id: string; device: boolean }
-  | { kind: 'taught'; id: string; device: boolean });
+  | { kind: 'taught'; id: string; device: boolean }
+  | { kind: 'judge' });
+/** A habit Niko noticed and is suggesting once (say yes or no, or tap). */
+export type HabitAsk = { id: string; habit: string; ask: string; device: boolean };
 import { enterFullscreen, exitFullscreen, fullscreenSupported } from './fullscreen';
 import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag, takeStepsTag } from './speech';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
 import { chatWithTables, keepDeviceNotes, knowledgeAccount, knowledgeFor } from './knowledgeChat';
-import { forgetNoteHere, teachHere } from './knowledgeDevice';
+import { declineHabitHere, forgetNoteHere, habitsHere, keepHabitHere, noticeHere, teachHere } from './knowledgeDevice';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, ApiError, lockedSignal, setAppearance, type CoreMode } from '@niko/ui';
 
@@ -36,6 +39,8 @@ const MAX_PICTURES = 8;
 /** The map on Home. The location used for it stays in this page's memory for a few minutes and is never stored. */
 export interface MapView {
   id: number; to: string; from?: string; mode: MapAskMode;
+  /** The way of travelling wasn't asked for, so a habit may change it (walking for short trips). */
+  auto?: boolean;
   /** explain: Niko says why it asks for the location, before the browser asks. */
   status: 'explain' | 'loading' | 'done' | 'failed';
   result?: MapResult; error?: string;
@@ -50,6 +55,8 @@ export interface MapView {
 export type MapCountry = 'auto' | 'ww' | string;
 const MODE_KEY = 'niko.mapMode';
 const lastMode = (): MapMode => { try { const m = localStorage.getItem(MODE_KEY) as MapMode | null; return m && MAP_MODES.includes(m) ? m : 'drive'; } catch { return 'drive'; } };
+/** A short, stable key for a place name (a habit counts each trip once a day without keeping the name). */
+const hashKey = (t: string) => { let h = 5381; for (const ch of t) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0; return h.toString(36); };
 const keepMode = (m: MapMode) => { try { localStorage.setItem(MODE_KEY, m); } catch { /* private mode */ } };
 /** This device's location for a route's start (to about 10 m), if the browser has it or the user allows it now. */
 function whereExactly(): Promise<{ lat: number; lng: number } | undefined> {
@@ -86,6 +93,11 @@ interface NikoState {
   /** Undoes what was just learned or taught. */
   undoFollowUp: () => void;
   dismissFollowUp: () => void;
+  /** Quiet mode: answers on screen only and the mic off (asked for, or a meeting on the calendar now). */
+  quiet: { why: 'asked' | 'meeting'; title?: string } | null;
+  setQuiet: (on: boolean) => void;
+  habitAsk: HabitAsk | null;
+  answerHabit: (yes: boolean) => void;
   brief: Brief | null;
   micOn: boolean;
   voiceSupported: boolean;
@@ -219,6 +231,17 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [nextStep, setNextStep] = useState<FollowUp | null>(null);
   const knowledgeRef = useRef(knowledge); knowledgeRef.current = knowledge;
   const followRef = useRef(nextStep); followRef.current = nextStep;
+  const [quiet, setQuietState] = useState<{ why: 'asked' | 'meeting'; title?: string } | null>(null);
+  const quietRef = useRef(quiet); quietRef.current = quiet;
+  // A suggested habit waits (for this visit) until it's answered, and shows on Home's line when Niko is free.
+  const [habitAsk, setHabitAskState] = useState<HabitAsk | null>(() => { try { return JSON.parse(sessionStorage.getItem('niko.habitAsk') ?? 'null'); } catch { return null; } });
+  const setHabitAsk = (h: HabitAsk | null) => { setHabitAskState(h); try { if (h) sessionStorage.setItem('niko.habitAsk', JSON.stringify(h)); else sessionStorage.removeItem('niko.habitAsk'); } catch { /* private mode */ } };
+  const habitRef = useRef(habitAsk); habitRef.current = habitAsk;
+  // Habits said yes to: from the account (Knowledge in Niko) or this device (Knowledge kept here).
+  const [localHabits, setLocalHabits] = useState<string[]>([]);
+  useEffect(() => { if (me?.knowledge?.place === 'device') void habitsHere(me.id).then(setLocalHabits).catch(() => setLocalHabits([])); else setLocalHabits([]); }, [me?.id, me?.knowledge?.place]);
+  const habitsNow = (m = meRef.current) => (m?.knowledge?.place === 'device' ? localHabitsRef.current : m?.knowledge?.habits ?? []);
+  const localHabitsRef = useRef(localHabits); localHabitsRef.current = localHabits;
   const [brief, setBrief] = useState<Brief | null>(null);
   const [micOn, setMicOn] = useState(false);
   const navigate = useNavigate();
@@ -308,6 +331,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     setMode('idle');
     const wake = (meRef.current?.engine as EnginePrefs | undefined)?.wake;
     if (lockedRef.current) { setLabel('Locked'); setLine(SR && wake ? 'Say “Niko” or tap to unlock.' : 'Tap to unlock.'); return; }
+    if (habitRef.current && !quietRef.current) { setLabel('A suggestion'); setLine(habitRef.current.ask); return; }
+    if (quietRef.current) { setLabel(quietRef.current.why === 'meeting' ? `Quiet · ${quietRef.current.title ?? 'meeting'} now` : 'Quiet · on screen only'); setLine('Type, or tap a card. The mic is off.'); return; }
     setLabel('Standing by');
     setLine(SR && wake ? 'Say “Niko” to start, or tap the mic.' : 'Tap the mic or type to ask.');
   }, [SR]);
@@ -404,7 +429,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
    * what to say next ("Say “continue”…"); replacing it with "Go on" a moment later lost that, and looked like a glitch. */
   const listenForFollowUp = useCallback((keep = false) => {
     speaking.current = false;
-    if (!wantRec.current || lockedRef.current) return idle();
+    if (!wantRec.current || lockedRef.current || quietRef.current) return idle();
     if (apiHearing()) { endFollowUp(); return listenByApi(FOLLOW_UP_MS, keep, true); }
     if (!SR) return idle();
     active.current = true;
@@ -419,6 +444,13 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const say = useCallback((text: string, answerFrom = -1, after?: { label: string; line: string; listen?: boolean }) => {
     const engine = meRef.current?.engine as EnginePrefs | undefined;
     stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; hearing.current++;
+    // Quiet: nothing is said aloud and nothing is heard; the answer is on screen.
+    if (quietRef.current) {
+      progress.current = null; active.current = false; setMode('idle');
+      if (answerFrom >= 0 && last.current?.answer) { last.current.from = last.current.answer.length; setResumable(null); }
+      setLabel(after?.label ?? 'Quiet · on screen only'); setLine(after?.line ?? 'Type, or tap a card.');
+      return;
+    }
     const id = speechId.current;
     const live = () => id === speechId.current;
     // answerFrom ≥ 0: this is (the rest of) the last answer, starting at that character, so a stop can be picked up.
@@ -545,6 +577,12 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       if (l.from >= l.answer.length) { setMode('speaking'); setLabel('Heard'); setLine('That was the end of my answer. Say “repeat” to hear it again.'); window.setTimeout(() => (wantRec.current ? listenForFollowUp(true) : idle()), 1600); return; }
       return say(l.answer.slice(l.from), l.from);
     }
+    // Quiet mode by voice: "quiet" turns it on (the mic goes off, so it can only be turned off by typing or tapping).
+    if (/^(quiet|quiet mode|be quiet|go quiet|silent mode|meeting mode)$/.test(lower)) { setQuietFn(true); return; }
+    if (/^(you can talk( again)?|talk again|speak again|quiet off|stop quiet( mode)?|normal mode|leave quiet( mode)?)$/.test(lower)) { setQuietFn(false); return; }
+    // Yes or no to a habit Niko just suggested.
+    if (habitRef.current && /^(yes|yeah|yep|sure|ok(ay)?|yes please|keep it|make it the default)\b/.test(lower)) { answerHabitFn(true); return; }
+    if (habitRef.current && /^(no|nope|no thanks|don'?t)\b/.test(lower)) { answerHabitFn(false); return; }
     // "That's the one" / "Not this one" right after Niko showed something similar from the person's files.
     if (knowledgeRef.current?.k.ask) {
       if (/^(yes|yeah|yep)?\s*(that'?s|that is|it'?s|this is) (the one|it|right)\b|^yes,? (that|this) one\b/.test(lower)) { teachFn('yes'); return; }
@@ -608,8 +646,10 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       const shown = mapRef.current?.result?.route && mapRef.current.status === 'done' ? mapRef.current : null;
       const screen = shown ? { map: { from: shown.result!.from?.name === 'You' ? 'your location' : shown.result!.from?.name ?? shown.from ?? 'your location', to: shown.result!.to.name, mode: shown.result!.route!.mode, seconds: shown.result!.route!.seconds, meters: shown.result!.route!.meters, steps: shown.result!.route!.steps.slice(0, 40).map((s) => ({ text: s.text.slice(0, 200), meters: s.meters ?? 0 })) } } : undefined;
       const knowledge = await knowledgeFor(meRef.current, text, { pin: opts.pin });
-      const body = { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}), ...(knowledge ? { knowledge } : {}), ...(opts.pin ? { pin: opts.pin } : {}) };
-      const r = await chatWithTables<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer; learned?: { id: string; kind: string; said: string; means: string }[]; learn?: unknown; choices?: string[] }>(meRef.current, body).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
+      // Roughly where the user is, for a situation, only when they shared it for a map in the last few minutes.
+      const mh = mapHere.current, near = mh && Date.now() - mh.at < 5 * 60_000 ? { lat: Math.round(mh.lat * 100) / 100, lon: Math.round(mh.lng * 100) / 100 } : undefined;
+      const body = { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}), ...(knowledge ? { knowledge } : {}), ...(opts.pin ? { pin: opts.pin } : {}), ...(quietRef.current ? { quiet: true } : {}), ...(near && meRef.current?.knowledge?.situations ? { near } : {}) };
+      const r = await chatWithTables<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer; learned?: { id: string; kind: string; said: string; means: string }[]; learn?: unknown; choices?: string[]; judge?: boolean }>(meRef.current, body).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
       const kept = await keepDeviceNotes(meRef.current, r.learn);
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
       // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
@@ -648,7 +688,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       const learnedNow = [...(r.learned ?? []), ...kept];
       setNextStep(opts.taught && r.knowledge?.taught ? { for: answer, question: text, kind: 'taught', ...opts.taught }
         : learnedNow.length ? { for: answer, question: text, kind: 'learned', items: learnedNow, device: device && kept.length > 0 }
-        : r.choices?.length ? { for: answer, question: text, kind: 'choices', options: r.choices } : null);
+        : r.choices?.length ? { for: answer, question: text, kind: 'choices', options: r.choices }
+        : r.judge ? { for: answer, question: text, kind: 'judge' } : null);
       setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setReply(answer); say(answer, 0);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) goSelf('/' + item.view); }
       else if (asked) goSelf(asked);
@@ -736,6 +777,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         if (!r.ok) throw Object.assign(new Error(j.error ?? 'The map couldn’t be shown just now.'), { usedUp: !!j.usedUp });
         const res = j as MapResult;
         set((m) => ({ ...m, status: 'done', result: res, error: undefined, located: !!here, times: res.route && res.route.mode !== 'fly' ? { ...m.times, [res.route.mode]: res.route.seconds } : m.times }));
+        // Walking for short trips, once the person said yes to that habit: a trip under 1 km asked without a way of
+        // travelling switches to walking.
+        if (v.auto && res.route && res.route.mode !== 'walk' && res.route.meters < 1000 && habitsNow().includes('walk-short')) { setMapModeFn('walk', true); return; }
         if (res.route) tell(`About ${minutesText(res.route.seconds).replace(' h', ' hours').replace(' min', ' minutes')} ${MODE_WORDS[res.route.mode]}.`);
         else if (res.noRoute && v.mode === 'fly') tell(res.noRoute);
         else if (res.noRoute && v.mode !== 'place') tell(here || v.from ? 'I found it, but no route this way. You can open it in a maps app.' : 'Here it is. Allow your location to see the way there.');
@@ -750,15 +794,17 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   };
   const showMapFn = (to: string, from?: string, how: MapAskMode | 'any' = 'any') => {
     picCtl.current?.abort(); setPictureId(null); setReply(null);
-    const v: MapView = { id: ++mapSeq.current, to, from, mode: how === 'any' ? lastMode() : how, status: 'loading', times: {}, located: false };
+    const v: MapView = { id: ++mapSeq.current, to, from, mode: how === 'any' ? lastMode() : how, auto: how === 'any', status: 'loading', times: {}, located: false };
     mapRef.current = v; setMap(v);
     loadMap(v);
   };
-  const setMapModeFn = (mode: MapMode | 'fly') => {
-    if (mode !== 'fly') keepMode(mode);
+  const setMapModeFn = (mode: MapMode | 'fly', byHabit = false) => {
+    if (mode !== 'fly' && !byHabit) keepMode(mode);
     const cur = mapRef.current;
     if (!cur) return;
-    const v: MapView = { ...cur, id: ++mapSeq.current, mode, status: 'loading' };
+    // Switching a short trip to walking, by hand: one sighting of the walking habit (once per place per day).
+    if (!byHabit && mode === 'walk' && (cur.result?.route?.meters ?? Infinity) < 1000) noticeFn('walk-short', `${hashKey(cur.to.toLowerCase())}.${today()}`);
+    const v: MapView = { ...cur, id: ++mapSeq.current, mode, auto: false, status: 'loading' };
     mapRef.current = v; setMap(v);
     loadMap(v);
   };
@@ -869,13 +915,14 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     // Wake word listening starts only if the user enabled it, only after sign-in, and only while the account has access
     // (when paid time has ended, the plan screen is shown instead and Niko doesn't listen).
     const wake = (me?.engine as EnginePrefs | undefined)?.wake;
-    if (me && wake && SR && me.access?.has !== false) { wantRec.current = true; startRec(); }
+    if (me && wake && SR && me.access?.has !== false && !quietRef.current) { wantRec.current = true; startRec(); }
     return () => { wantRec.current = false; try { rec.current?.stop(); } catch { /* noop */ } };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [me?.id, (me?.engine as any)?.wake, me?.access?.has]);
 
   const toggleMic = useCallback(() => {
     if (lockedRef.current) { requestUnlockFn(); return; }
+    if (quietRef.current) { quietOff.current = quietRef.current.title ?? 'asked'; quietRef.current = null; setQuietState(null); }
     stopSpeech();
     if (apiHearing()) { endFollowUp(); wantRec.current = true; listenByApi(8000); return; }
     if (!SR) { setLabel('No microphone'); setLine('This browser cannot listen. Type instead.'); return; }
@@ -955,6 +1002,100 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       } catch (e) { plainLine('Not undone', (e as Error).message); }
     })();
   };
+
+  // ---------------------------------------------------------------- quiet mode
+  /** The meeting quiet mode was turned off for, so it doesn't come straight back on during it. */
+  const quietOff = useRef<string | null>(null);
+  const enterQuiet = (q: { why: 'asked' | 'meeting'; title?: string }) => {
+    quietRef.current = q; setQuietState(q);
+    stopSpeech(); endFollowUp(); capture.current?.cancel(); capture.current = null; hearing.current++; active.current = false;
+    wantRec.current = false; try { rec.current?.stop(); } catch { /* already stopped */ } setMicOn(false);
+    idle();
+  };
+  const setQuietFn = (on: boolean) => {
+    if (on) { quietOff.current = null; enterQuiet({ why: 'asked' }); return; }
+    quietOff.current = quietRef.current?.title ?? 'asked';
+    quietRef.current = null; setQuietState(null);
+    const wake = (meRef.current?.engine as EnginePrefs | undefined)?.wake;
+    if (wake && SR && meRef.current?.access?.has !== false) { wantRec.current = true; startRecRef.current?.(); }
+    idle();
+  };
+  // A meeting on the calendar now turns quiet mode on (when situations may use the calendar), and off when it ends.
+  const [meetingEvents, setMeetingEvents] = useState<Brief['events']>([]);
+  useEffect(() => { if (brief?.events) setMeetingEvents(brief.events); }, [brief]);
+  useEffect(() => {
+    if (!me?.knowledge?.situations) return;
+    const load = () => { if (document.visibilityState === 'visible') void api<Brief>(`/brief?parts=events&tz=${new Date().getTimezoneOffset()}`).then((b) => setMeetingEvents(b.events ?? [])).catch(() => undefined); };
+    load();
+    const t = window.setInterval(load, 10 * 60_000);
+    return () => window.clearInterval(t);
+  }, [me?.id, me?.knowledge?.situations]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const check = () => {
+      if (lockedRef.current) return;
+      const m = meRef.current?.knowledge?.situations ? meetingNow(meetingEvents) : null;
+      if (m && !quietRef.current && quietOff.current !== m.title) enterQuiet({ why: 'meeting', title: m.title });
+      else if (!m && quietRef.current?.why === 'meeting') { quietOff.current = null; setQuietFn(false); }
+      if (!m && quietOff.current && quietOff.current !== 'asked') quietOff.current = null;
+    };
+    check();
+    const t = window.setInterval(check, 60_000);
+    return () => window.clearInterval(t);
+  }, [meetingEvents, me?.knowledge?.situations]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---------------------------------------------------------------- habits Niko notices
+  /** One sighting of a habit, from its watcher. After enough, Niko suggests it once (in the line on screen). */
+  const noticeFn = (habit: KnHabit, key: string) => {
+    const me = meRef.current;
+    if (!me?.knowledge?.learn || habitsNow(me).includes(habit)) return;
+    const device = me.knowledge.place === 'device';
+    void (async () => {
+      try {
+        const r = device ? await noticeHere(me.id, habit, key) : await api<{ suggest: boolean; id: string | null; ask?: string }>('/knowledge/notice', { body: { habit, key } });
+        if (!r.suggest || !r.id) return;
+        const ask = KN_HABITS[habit].ask;
+        setHabitAsk({ id: r.id, habit, ask, device });
+        if (!speaking.current && !inFlight.current) { setMode('idle'); setLabel('A suggestion'); setLine(ask); }
+      } catch { /* a habit is never worth an error */ }
+    })();
+  };
+  const answerHabitFn = (yes: boolean) => {
+    const h = habitRef.current, me = meRef.current;
+    if (!h || !me) return;
+    setHabitAsk(null);
+    void (async () => {
+      try {
+        if (h.device) { if (yes) await keepHabitHere(me.id, h.id); else await declineHabitHere(me.id, h.id); }
+        else await api(`/knowledge/learned/${h.id}/${yes ? 'keep' : 'decline'}`, { method: 'POST' });
+        if (yes) { if (h.device) setLocalHabits(await habitsHere(me.id)); else await refreshMe(); }
+        plainLine(yes ? 'Kept' : 'Okay', yes ? 'Done. Change it any time in What Niko learned.' : 'Okay, I won’t suggest it again.');
+      } catch (e) { plainLine('Not saved', (e as Error).message); }
+    })();
+  };
+  useEffect(() => {
+    const p = path.replace(/^\/app(?=\/|$)/, '') || '/';
+    if (p === '/' && habitAsk && !speaking.current && !inFlight.current && !lockedRef.current) { setMode('idle'); setLabel('A suggestion'); setLine(habitAsk.ask); }
+  }, [path, habitAsk]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The morning inbox habit: opening the inbox first thing on a weekday morning.
+  const isMorning = () => { const d = new Date(); return d.getDay() >= 1 && d.getDay() <= 5 && d.getHours() >= 5 && d.getHours() < 11; };
+  const today = () => { const d = new Date(); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; };
+  useEffect(() => {
+    const p = path.replace(/^\/app(?=\/|$)/, '') || '/';
+    if (p !== '/inbox' || !isMorning() || !me?.knowledge?.learn) return;
+    const key = `niko.inbox-morning.${me.id}.${today()}`;
+    try { if (localStorage.getItem(key)) return; localStorage.setItem(key, '1'); } catch { return; }
+    noticeFn('inbox-morning', today());
+  }, [path, me?.id, me?.knowledge?.learn]); // eslint-disable-line react-hooks/exhaustive-deps
+  // …and once said yes to: a short inbox summary on screen, the first time Niko opens on a weekday morning.
+  useEffect(() => {
+    const p = path.replace(/^\/app(?=\/|$)/, '') || '/';
+    if (p !== '/' || !me || !habitsNow(me).includes('inbox-morning') || !isMorning() || lockedRef.current) return;
+    const key = `niko.inbox-summary.${me.id}.${today()}`;
+    try { if (localStorage.getItem(key)) return; localStorage.setItem(key, '1'); } catch { return; }
+    const was = quietRef.current;
+    if (!was) { quietRef.current = { why: 'asked' }; }
+    void askAI('Give me a short summary of my inbox: what needs a reply first.').finally(() => { if (!was) quietRef.current = null; });
+  }, [path, me?.id, me?.knowledge?.habits, localHabits]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------------------------------------------------------- screen lock
   const [locked, setLocked] = useState(false);
@@ -1081,7 +1222,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   }, [me?.id, me?.lock?.on, me?.lock?.mins]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const value = useMemo<NikoState>(() => ({
-    me, refreshMe, mode, label, line, reply, weather, knowledge, followUp: nextStep, teach: teachFn, undoFollowUp: undoFollowUpFn, dismissFollowUp: () => setNextStep(null), brief, micOn, voiceSupported: !!SR || (hearsFor(me).length > 0 && captureSupported()), toggleMic, stop, ask,
+    me, refreshMe, mode, label, line, reply, weather, knowledge, followUp: nextStep, teach: teachFn, undoFollowUp: undoFollowUpFn, dismissFollowUp: () => setNextStep(null), quiet, setQuiet: setQuietFn, habitAsk, answerHabit: answerHabitFn, brief, micOn, voiceSupported: !!SR || (hearsFor(me).length > 0 && captureSupported()), toggleMic, stop, ask,
     dismissReply: () => setReply(null),
     setCommandHandler: (fn) => { handler.current = fn; },
     setGlanceHandler: (fn) => { glanceHandler.current = fn; },
@@ -1116,7 +1257,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     unlock: unlockFn,
     unlockWithPasskey: unlockWithPasskeyFn,
     lockNow: lockNowFn,
-  }), [me, refreshMe, mode, label, line, reply, weather, knowledge, nextStep, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk, locked, lockAsk]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [me, refreshMe, mode, label, line, reply, weather, knowledge, nextStep, quiet, habitAsk, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk, locked, lockAsk]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

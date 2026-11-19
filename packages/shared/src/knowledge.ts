@@ -77,8 +77,12 @@ export interface KnowledgePrefs {
   learn: boolean;
   /** How many learned notes are kept in Niko (server-kept, like `files`). */
   notes: number;
+  /** Use the calendar, the time and the location (where allowed for maps) to understand situations; read per question. */
+  situations: boolean;
+  /** Habits this person said yes to (server-kept, so the app can apply them without asking Knowledge). */
+  habits: string[];
 }
-export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false, files: 0, learn: true, notes: 0 };
+export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false, files: 0, learn: true, notes: 0, situations: true, habits: [] };
 const isMode = (v: unknown): v is KnMode => v === 'files' || v === 'only' || v === 'off';
 /** How Niko answers from one collection. */
 export const knModeOf = (p: KnowledgePrefs, collection: string): KnMode => p.modes[collection] ?? p.mode;
@@ -96,6 +100,8 @@ export function cleanKnowledgePrefs(v: unknown): KnowledgePrefs {
     files: typeof o.files === 'number' && Number.isInteger(o.files) && o.files >= 0 ? o.files : d.files,
     learn: typeof o.learn === 'boolean' ? o.learn : d.learn,
     notes: typeof o.notes === 'number' && Number.isInteger(o.notes) && o.notes >= 0 ? o.notes : d.notes,
+    situations: typeof o.situations === 'boolean' ? o.situations : d.situations,
+    habits: Array.isArray(o.habits) ? [...new Set(o.habits.filter((h): h is string => h === 'walk-short' || h === 'inbox-morning'))] : [],
   };
 }
 

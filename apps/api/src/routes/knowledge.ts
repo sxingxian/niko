@@ -4,11 +4,11 @@
 import { eq } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { users } from '@niko/db';
-import { aiAllowed, cleanKnowledgePrefs, cleanTarget, knowledgeAccess, knPlaceOf, knSearchOf, type KnowledgeAccess, type KnowledgePrefs } from '@niko/shared';
+import { aiAllowed, cleanKnowledgePrefs, cleanTarget, isHabit, KN_HABITS, knowledgeAccess, knPlaceOf, knSearchOf, type KnowledgeAccess, type KnowledgePrefs } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
 import { hmacSha256Hex } from '../lib/crypto';
-import { editNote, forgetAll, forgetFileMatches, forgetNote, learnedCount, listLearned, saveNote } from '../learned';
+import { confirmHabit, declineHabit, editNote, forgetAll, forgetFileMatches, forgetNote, habitsOn, learnedCount, listLearned, noticeHabit, saveNote } from '../learned';
 import { offFor } from '../access';
 import { addCloudflareNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeDb, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
 
@@ -41,9 +41,9 @@ async function syncCount(c: C, k: Kdb) {
 /** Keeps the number of learned notes with the account, so answering only looks notes up for someone who has some. */
 export async function syncNotes(c: C, k: Kdb) {
   const u = c.get('user');
-  const notes = await learnedCount(k, u.id);
+  const [notes, habits] = await Promise.all([learnedCount(k, u.id), habitsOn(k, u.id)]);
   const fresh = await c.get('db').select({ knowledge: users.knowledge }).from(users).where(eq(users.id, u.id)).limit(1);
-  const prefs = { ...cleanKnowledgePrefs(fresh[0]?.knowledge), notes };
+  const prefs = { ...cleanKnowledgePrefs(fresh[0]?.knowledge), notes, habits };
   await c.get('db').update(users).set({ knowledge: prefs as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
 }
 /** Notes learned in Niko need the Knowledge database and learning in the person's plan (it works without files). */
@@ -81,7 +81,7 @@ knowledge.put('/prefs', async (c) => {
   if (!access.files) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   const before = cleanKnowledgePrefs((u as { knowledge?: unknown }).knowledge);
   // The file count is kept by the server, never taken from the request.
-  const prefs = { ...cleanKnowledgePrefs({ ...before, ...b }), files: before.files, notes: before.notes };
+  const prefs = { ...cleanKnowledgePrefs({ ...before, ...b }), files: before.files, notes: before.notes, habits: before.habits };
   // A choice the account doesn't have is kept to what it does have.
   if (prefs.place === 'niko' && !access.niko && access.device) prefs.place = 'device';
   if (prefs.place === 'device' && !access.device && access.niko) prefs.place = 'niko';
@@ -216,9 +216,9 @@ knowledge.post('/learned', async (c) => {
   const u = c.get('user');
   if (await tooMany(c, 'kn-note:' + u.id, 1200, 60)) return c.json({ error: 'That’s a lot at once. Try again in a little while.' }, 429);
   const b = await c.req.json<{ kind?: unknown; said?: unknown; means?: unknown; how?: unknown }>().catch(() => ({} as { kind?: unknown; said?: unknown; means?: unknown; how?: unknown }));
-  const kind = b.kind === 'person' || b.kind === 'correction' || b.kind === 'remembered' ? b.kind : null;
+  const kind = b.kind === 'person' || b.kind === 'correction' || b.kind === 'remembered' || b.kind === 'playbook' ? b.kind : null;
   if (!kind || typeof b.said !== 'string' || typeof b.means !== 'string') return c.json({ error: 'Nothing to keep.' }, 400);
-  const how = (['told', 'corrected', 'chose', 'remember'] as const).find((h) => h === b.how) ?? 'told';
+  const how = (['told', 'corrected', 'chose', 'remember', 'confirmed', 'agreed'] as const).find((h) => h === b.how) ?? 'told';
   const place = knPlaceOf(s.prefs, s.access);
   try {
     const item = await saveNote(s.k, c.env, u.id, { kind, said: b.said, means: b.means, how }, { cloudflare: knSearchOf(s.prefs, s.access, place) === 'cloudflare' });
@@ -244,6 +244,30 @@ knowledge.delete('/learned', async (c) => {
   await syncNotes(c, s.k);
   await audit(c, 'knowledge.forget-all', { notes: n }, c.get('user').id);
   return c.json({ ok: true, forgot: n });
+});
+// Habits Niko notices: one sighting from the app's watcher (a short trip switched to walking, the inbox opened first
+// thing on a weekday morning). Suggested once, after enough sightings; kept only with a yes.
+knowledge.post('/notice', async (c) => {
+  const s = await notesStore(c); if (s instanceof Response) return s;
+  if (!s.prefs.learn) return c.json({ suggest: false });
+  const u = c.get('user');
+  if (await tooMany(c, 'kn-notice:' + u.id, 60, 60)) return c.json({ suggest: false });
+  const b = await c.req.json<{ habit?: unknown; key?: unknown }>().catch(() => ({} as { habit?: unknown; key?: unknown }));
+  if (!isHabit(b.habit) || typeof b.key !== 'string' || !/^[\w:.-]{1,60}$/.test(b.key)) return c.json({ error: 'Nothing to notice.' }, 400);
+  const r = await noticeHabit(s.k, u.id, b.habit, b.key);
+  if (r.id) await syncNotes(c, s.k);
+  return c.json({ suggest: r.suggest, id: r.id, ...(r.suggest ? { ask: KN_HABITS[b.habit].ask } : {}) });
+});
+knowledge.post('/learned/:id/keep', async (c) => {
+  const s = await notesStore(c); if (s instanceof Response) return s;
+  try { const item = await confirmHabit(s.k, c.get('user').id, c.req.param('id')); await syncNotes(c, s.k); return c.json({ ok: true, item }); }
+  catch (e) { return fail(c, e); }
+});
+knowledge.post('/learned/:id/decline', async (c) => {
+  const s = await notesStore(c); if (s instanceof Response) return s;
+  await declineHabit(s.k, c.get('user').id, c.req.param('id'));
+  await syncNotes(c, s.k);
+  return c.json({ ok: true });
 });
 // "That's the one" / "Not this one" on a similar match, from the person's own tap or voice in the app.
 knowledge.post('/taught', async (c) => {
