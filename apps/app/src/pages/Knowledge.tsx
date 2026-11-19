@@ -27,7 +27,7 @@ type StorageShown = { endpoint: string; bucket: string; region: string; access: 
 type PlaceInfo = { connected: boolean; label: string | null; root: string | null; storage?: StorageShown };
 type StorageForm = { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string; accessId: string; accessSecret: string };
 const EMPTY_STORAGE: StorageForm = { endpoint: '', bucket: '', accessKeyId: '', secretAccessKey: '', accessId: '', accessSecret: '' };
-type State = { available: boolean; access: KnowledgeAccess; prefs: KnowledgePrefs; limits: KnowledgeLimits; usage: { files: number; bytes: number }; ownSearch?: OwnSource[]; places?: Partial<Record<KnRemotePlace, PlaceInfo>> };
+type State = { available: boolean; access: KnowledgeAccess; prefs: KnowledgePrefs; limits: KnowledgeLimits; usage: { files: number; bytes: number }; ownSearch?: OwnSource[]; places?: Partial<Record<KnRemotePlace, PlaceInfo>>; split?: 'browser' | 'server' };
 type By = 'cloudflare' | 'device' | 'own';
 type Upload = { key: string; name: string; bytes: number; step: string; done: number; total: number; error?: string };
 
@@ -118,7 +118,7 @@ export function Knowledge() {
     saveSheet: (id, sid, b) => updateSheetHere(account, id, sid, b),
   } : {
     list: async () => (await api<{ files: KnFile[] }>('/knowledge/files')).files,
-    add: (f, c, onStep) => addFile(f, c, { readWithCloudflare: s.access.cloudflareRead && s.prefs.read === 'cloudflare', onStep }),
+    add: (f, c, onStep) => addFile(f, c, { readWithCloudflare: s.access.cloudflareRead && s.prefs.read === 'cloudflare', serverSplit: s.split === 'server', onStep }),
     remove: async (id, copy) => { await api(`/knowledge/files/${id}${copy ? '?copy=bin' : ''}`, { method: 'DELETE' }); },
     keep: async (id) => { await api(`/knowledge/files/${id}`, { method: 'PATCH', body: { flagged: false } }); },
     sheets: async (id) => (await api<{ sheets: KnSheet[] }>(`/knowledge/files/${id}/sheets`)).sheets,

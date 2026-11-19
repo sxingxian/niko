@@ -15,7 +15,7 @@ import { notionPage, notionPages, PlaceError, placeConnections, remoteFor } from
 import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile, roots, setRoot } from '../knPlacesStore';
 import { credentials } from '../providers';
 import { cleanStorage, loadStorage, saveStorage, shownStorage, testStorage } from '../knStorage';
-import { accountKnowledge, addCloudflareNumbers, addOwnNumbers, clearOwnNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
+import { accountKnowledge, addFromText, addCloudflareNumbers, addOwnNumbers, clearOwnNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
 
 export const knowledge = new Hono<AppEnv>();
 type C = Context<AppEnv>;
@@ -165,6 +165,20 @@ knowledge.post('/files/:id/pieces', async (c) => {
     return c.json({ ok: true, ...(await addPieces(s.k, c.env, c.get('user').id, c.req.param('id'), b, { cloudflare: useCloudflare(s.access, s.prefs), own })) });
   }
   catch (e) { return fail(c, e); }
+});
+
+// Splitting on Niko's server, when the admin has switched it on (Workers Paid): the whole file's text in one request.
+knowledge.post('/files/:id/text', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  const u = c.get('user');
+  if ((await knowledgeSettings(c.get('db'))).split !== 'server') return c.json({ error: 'Files are split in your browser.' }, 409);
+  if (await tooMany(c, 'kn-text:' + u.id, 60, 60)) return c.json({ error: 'That’s a lot of files at once. Try again in a little while.' }, 429);
+  const b = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  try {
+    const own = knSearchOf(s.prefs, s.access, 'niko') === 'own' ? await ownEmbedder(c.env, c.get('db'), u, s.prefs.own!) : undefined;
+    const lim = await limitsFor(c.get('db'), u);
+    return c.json({ ok: true, ...(await addFromText(s.k, c.env, u.id, c.req.param('id'), b, { cloudflare: useCloudflare(s.access, s.prefs), own }, lim.mbPerFile * 2 * 1024 * 1024)) });
+  } catch (e) { return fail(c, e); }
 });
 
 knowledge.post('/files/:id/sheets', async (c) => {

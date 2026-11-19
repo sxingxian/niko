@@ -9,7 +9,7 @@ import { neon } from '@neondatabase/serverless';
 import { eq } from 'drizzle-orm';
 import { appSettings, type Db } from '@niko/db';
 import {
-  askedFromFiles, cleanKnowledgeLimits, contentWords, KN_DEVICE_LEAD, KN_DEVICE_SIMILAR, KN_OWN_LEAD, KN_OWN_SIMILAR, type KnDeviceKnowledge, type KnTarget, cleanKnowledgeSettings, knowledgeLimits, knKindOf, knModeOf, knNeedsCloudflare, KN_LEAD, KN_SIMILAR,
+  askedFromFiles, prepareText, xmlProblem, cleanKnowledgeLimits, contentWords, KN_DEVICE_LEAD, KN_DEVICE_SIMILAR, KN_OWN_LEAD, KN_OWN_SIMILAR, type KnDeviceKnowledge, type KnTarget, cleanKnowledgeSettings, knowledgeLimits, knKindOf, knModeOf, knNeedsCloudflare, KN_LEAD, KN_SIMILAR,
   KN_CLOUDFLARE_DIMS, KN_DEVICE_DIMS, KN_PIECE_CHARS, KN_PIECES_PER_CALL, KN_READ_MAX_BYTES,
   KN_COL_TYPES, KN_SHEET_CELL_CHARS, KN_SHEET_MAX_COLS, KN_SHEET_MAX_ROWS, KN_SHEET_ROWS_PER_CALL,
   type KnColType, type KnColumn, type KnKind, type KnowledgeLimits, type KnowledgePrefs, type KnowledgeSettings, type KnTableAsk,
@@ -144,7 +144,7 @@ export async function startFile(k: Kdb, account: string, limits: KnowledgeLimits
 
 async function readingFile(k: Kdb, account: string, id: string) {
   if (!/^[0-9a-f-]{36}$/.test(id)) throw new KnError('No such file.', 404);
-  const [doc] = await k.q<{ id: string; status: string; kind: KnKind }>(`select id, status, kind from kn_documents where id = $1 and account_id = $2`, [id, account]);
+  const [doc] = await k.q<{ id: string; status: string; kind: KnKind; name: string }>(`select id, status, kind, name from kn_documents where id = $1 and account_id = $2`, [id, account]);
   if (!doc) throw new KnError('No such file.', 404);
   if (doc.status !== 'reading') throw new KnError('That file is already finished. Remove it and add it again to change it.', 409);
   return doc;
@@ -182,6 +182,36 @@ export async function addPieces(k: Kdb, env: Pick<Env, 'AI'>, account: string, i
      on conflict (document_id, ord) do nothing`,
     [account, id, pieces.map((_, i) => start + i), pieces.map((p) => p.heading), pieces.map((p) => p.body), cf, dev, own]);
   return { added: pieces.length };
+}
+
+/**
+ * Splitting on Niko's server (Admin · Knowledge › Split files on Niko's server, for Workers Paid): the browser sends
+ * the file's text (HTML and XML already turned into Markdown, PDF and Word already read by Cloudflare) and Niko splits
+ * it as the browser would (prepareText), then keeps the pieces and tables through the same checks as pieces sent one
+ * batch at a time. The file is finished with finishFile afterwards, as usual.
+ */
+export async function addFromText(k: Kdb, env: Pick<Env, 'AI'>, account: string, id: string, b: { kind?: unknown; text?: unknown; fromCloudflare?: unknown }, how: { cloudflare: boolean; own?: (texts: string[]) => Promise<number[][]> }, maxChars: number): Promise<{ pieces: number; sheets: number; flagged: boolean }> {
+  const doc = await readingFile(k, account, id);
+  const text = typeof b.text === 'string' ? b.text : '';
+  if (!text.trim()) throw new KnError('No text was found in that file.');
+  if (text.length > maxChars) throw new KnError('That file has too much text to add.', 413);
+  // Only the kinds the browser may send as text: the file's own kind, or Markdown for HTML and XML read in the browser.
+  const kind: KnKind = b.kind === 'md' && (doc.kind === 'html' || doc.kind === 'xml') ? 'md' : doc.kind;
+  if (kind === 'xml') { const p = xmlProblem(text); if (p) throw new KnError(p); }
+  let prepared;
+  try { prepared = prepareText(kind, doc.name ?? 'file', text, b.fromCloudflare === true && knNeedsCloudflare(doc.kind)); }
+  catch (e) { throw new KnError((e as Error).message || 'That file couldn’t be read.'); }
+  for (let i = 0; i < prepared.pieces.length; i += KN_PIECES_PER_CALL) {
+    await addPieces(k, env, account, id, { start: i, pieces: prepared.pieces.slice(i, i + KN_PIECES_PER_CALL) }, how);
+  }
+  for (const sh of prepared.sheets) {
+    const made = await addSheet(k, account, id, { name: sh.name, columns: sh.columns, rows: sh.rows.slice(0, KN_SHEET_ROWS_PER_CALL), header: sh.header });
+    for (let i = KN_SHEET_ROWS_PER_CALL; i < sh.rows.length; i += KN_SHEET_ROWS_PER_CALL) {
+      await addSheetRows(k, account, id, made.id, { start: i, rows: sh.rows.slice(i, i + KN_SHEET_ROWS_PER_CALL) });
+    }
+  }
+  if (prepared.flagged) await k.q(`update kn_documents set flagged = true where id = $1 and account_id = $2`, [id, account]);
+  return { pieces: prepared.pieces.length, sheets: prepared.sheets.length, flagged: prepared.flagged };
 }
 
 /** Keeps a spreadsheet's rows as a table, for the look-up tool. The first KN_SHEET_ROWS_PER_CALL rows come with it;

@@ -216,6 +216,7 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [find, setFind] = useState('');
+  const [split, setSplit] = useState<'browser' | 'server'>('browser');
   const load = useCallback(async () => {
     try {
       const [a, b] = await Promise.all([api<KnAdmin>('/admin/knowledge'), api<{ defaults: Record<string, boolean>; users: AiUser[] }>('/admin/ai')]);
@@ -230,6 +231,7 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
     const own = aiPerson?.aiAccess ?? {};
     setAccess(Object.fromEntries(KN_SHOWN.filter((k) => (person ? k in own : true)).map((k) => [k, person ? own[k]! : defaultOn(ai.defaults, k)])));
     setLimits(person ? { ...person.knowledgeLimits } : { ...kn.defaults });
+    setSplit(kn.split);
     setDirty(false);
   }, [sel, kn, ai]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!kn || !ai) return null;
@@ -253,7 +255,7 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
         await api(`/admin/knowledge/users/${person.id}`, { method: 'PUT', body: { limits } });
       } else {
         await api('/admin/ai/default', { method: 'PUT', body: { access: { ...ai.defaults, ...access } } });
-        await api('/admin/knowledge/settings', { method: 'PUT', body: { limits } });
+        await api('/admin/knowledge/settings', { method: 'PUT', body: { limits, split } });
       }
       await load(); setNote({ ok: true, text: person ? `Saved for ${person.name || person.email}.` : 'Saved. Everyone without their own changes gets this within a minute.' });
     } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
@@ -325,6 +327,16 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
             </div>
           ))}
         </div>
+        {!person && <div className="kn-group">
+          <span className="k kn-group-h">Reading files</span>
+          <div className="kn-krow">
+            <span className="kn-krow-t"><b>Split files on Niko’s server</b><span className="sub">{split === 'server' ? 'On · the browser sends the text, Niko splits it' : 'Off · each person’s browser splits their files'}</span></span>
+            <span className="kn-krow-m" />
+            <span className="kn-krow-c"><Switch on={split === 'server'} onChange={(v) => { setSplit(v ? 'server' : 'browser'); setDirty(true); setNote(null); }} label="Split files on Niko’s server" /></span>
+          </div>
+          {split === 'server' && <div className="kn-adm-warn">Needs Workers Paid ($5 a month): on the free plan, big files stop part-way. Files already added aren’t changed.</div>}
+          <p className="sub" style={{ fontSize: 12, margin: '8px 0 0' }}>Off: each person’s browser splits their files, as now (free plan). On: the browser sends the text and Niko splits it, which is quicker on phones and older computers. Files kept on This device are always read on the device.</p>
+        </div>}
         <p className="sub kn-foot">Knowledge files start off: people get them only when you turn them on, for everyone or for them. Lowering a limit never deletes anything; it only stops more files being added. Answering Telegram from Knowledge is each person’s own Settings switch. People see these as part of their plan, with no mention of an admin. Every change is written to the audit log.</p>
       </section>
     </div>

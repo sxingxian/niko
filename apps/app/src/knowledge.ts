@@ -59,8 +59,8 @@ function prepareInWorker(kind: KnKind, name: string, text: string, fromCloudflar
   });
 }
 
-/** Reads a file into pieces and sheets. Cloudflare is asked only for PDF, Word and spreadsheet files. */
-export async function prepare(file: File, readWithCloudflare: boolean): Promise<Prepared> {
+/** A file's text, ready to split: Cloudflare reads PDF, Word and spreadsheets; HTML and XML become Markdown here. */
+async function readText(file: File, readWithCloudflare: boolean): Promise<{ kind: KnKind; as: KnKind; text: string; fromCloudflare: boolean }> {
   const kind = knKindOf(file.name);
   if (!kind) throw new Error('Knowledge takes MD, TXT, CSV, TSV, JSON, XML, HTML, PDF, Word (DOCX), Excel (XLSX, XLS) and OpenDocument files.');
   let text: string, fromCloudflare = false, as: KnKind = kind;
@@ -76,14 +76,34 @@ export async function prepare(file: File, readWithCloudflare: boolean): Promise<
     // HTML and XML need the page's DOMParser, so they become Markdown here and are split in the background.
     if (kind === 'html' || kind === 'xml') { text = fromMarkup(text, kind); as = 'md'; }
   }
-  const out = await prepareInWorker(as, file.name, text, fromCloudflare);
-  return { kind, pieces: out.pieces, sheets: out.sheets, flagged: out.flagged };
+  return { kind, as, text, fromCloudflare };
+}
+/** Reads a file into pieces and sheets. Cloudflare is asked only for PDF, Word and spreadsheet files. */
+export async function prepare(file: File, readWithCloudflare: boolean): Promise<Prepared> {
+  const r = await readText(file, readWithCloudflare);
+  const out = await prepareInWorker(r.as, file.name, r.text, r.fromCloudflare);
+  return { kind: r.kind, pieces: out.pieces, sheets: out.sheets, flagged: out.flagged };
 }
 
 /** Adds one file: reads it, starts it on the server, sends its pieces and sheets, and finishes it. If anything fails
  *  part-way, the half-added file is removed so nothing is left behind. */
-export async function addFile(file: File, collection: string, opts: { readWithCloudflare: boolean; onStep?: (step: string, done: number, total: number) => void }): Promise<{ id: string; pieces: number }> {
+export async function addFile(file: File, collection: string, opts: { readWithCloudflare: boolean; serverSplit?: boolean; onStep?: (step: string, done: number, total: number) => void }): Promise<{ id: string; pieces: number }> {
   opts.onStep?.('Reading', 0, 1);
+  // Splitting on Niko's server (switched on by the admin): the text goes in one request and Niko splits it.
+  if (opts.serverSplit) {
+    const r = await readText(file, opts.readWithCloudflare);
+    const sha = await sha256Hex(await file.arrayBuffer());
+    const made = await api<{ id: string }>('/knowledge/files', { method: 'POST', body: { name: file.name, bytes: file.size, sha256: sha, collection, flagged: false } });
+    try {
+      opts.onStep?.('Adding', 0, 1);
+      await api(`/knowledge/files/${made.id}/text`, { method: 'POST', body: { kind: r.as, text: r.text, fromCloudflare: r.fromCloudflare } });
+      const done = await api<{ pieces: number }>(`/knowledge/files/${made.id}/done`, { method: 'POST' });
+      return { id: made.id, pieces: done.pieces };
+    } catch (e) {
+      await api(`/knowledge/files/${made.id}`, { method: 'DELETE' }).catch(() => undefined);
+      throw e;
+    }
+  }
   const prepared = await prepare(file, opts.readWithCloudflare);
   const sha256 = await sha256Hex(await file.arrayBuffer());
   const started = await api<{ id: string }>('/knowledge/files', { method: 'POST', body: { name: file.name, bytes: file.size, sha256, collection, flagged: prepared.flagged } });
