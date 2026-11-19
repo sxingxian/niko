@@ -62,8 +62,9 @@ export interface KnowledgePrefs {
    *  files" · off: don't use it. A collection without its own choice uses `mode`. */
   mode: KnMode;
   modes: Record<string, KnMode>;
-  /** Where new files are kept. */
-  place: 'niko' | 'device';
+  /** Where files are kept. In Notion, Google Drive, OneDrive or their own storage, Niko keeps a copy of each file there
+   *  (its own folder or page) and keeps the search pieces and rows itself, so search and totals work the same. */
+  place: KnPlace;
   /** Who reads PDF and Word files, and who makes search numbers. */
   read: 'cloudflare' | 'device';
   search: 'cloudflare' | 'device' | 'own';
@@ -85,6 +86,14 @@ export interface KnowledgePrefs {
   /** Habits this person said yes to (server-kept, so the app can apply them without asking Knowledge). */
   habits: string[];
 }
+/** Where Knowledge can be kept. The last four keep a copy of each file in the person's own app or storage. */
+export type KnPlace = 'niko' | 'device' | KnRemotePlace;
+export type KnRemotePlace = 'notion' | 'gdrive' | 'onedrive' | 's3';
+export const KN_REMOTE_PLACES: KnRemotePlace[] = ['notion', 'gdrive', 'onedrive', 's3'];
+export const isRemotePlace = (v: unknown): v is KnRemotePlace => (KN_REMOTE_PLACES as unknown[]).includes(v);
+export const KN_PLACE_NAMES: Record<KnPlace, string> = { niko: 'Niko', device: 'This device only', notion: 'Notion', gdrive: 'Google Drive', onedrive: 'OneDrive', s3: 'Your own storage' };
+/** The connection each place writes through (their own storage is set up on the Knowledge screen itself). */
+export const KN_PLACE_PROVIDER: Record<KnRemotePlace, string> = { notion: 'notion', gdrive: 'google-drive', onedrive: 'onedrive', s3: 'kn-storage' };
 export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', own: null, telegram: true, drafts: false, files: 0, learn: true, notes: 0, situations: true, habits: [] };
 /** Their own search numbers: one of their AI keys or their own model server, and an embedding model's name. */
 export function cleanOwnSearch(v: unknown): { ref: string; model: string } | null {
@@ -106,7 +115,7 @@ export function cleanKnowledgePrefs(v: unknown): KnowledgePrefs {
   if (o.modes && typeof o.modes === 'object') for (const [k, v] of Object.entries(o.modes as Record<string, unknown>).slice(0, 100)) if (isMode(v) && k.trim() && k.length <= 80) modes[k.trim()] = v;
   return {
     mode: isMode(o.mode) ? o.mode : d.mode, modes,
-    place: o.place === 'device' ? 'device' : d.place,
+    place: o.place === 'device' || isRemotePlace(o.place) ? o.place : d.place,
     read: o.read === 'device' ? 'device' : d.read,
     search: o.search === 'device' || o.search === 'own' ? o.search : d.search,
     own: cleanOwnSearch(o.own),
@@ -121,12 +130,16 @@ export function cleanKnowledgePrefs(v: unknown): KnowledgePrefs {
 }
 
 /** What one account may use, from its AI options (see AI_OPTION_GROUPS, group "knowledge"). */
-export interface KnowledgeAccess { files: boolean; niko: boolean; device: boolean; cloudflareRead: boolean; cloudflareSearch: boolean; learning: boolean; /** Search numbers from one of their AI keys, or their own model server. */ ownKey: boolean; ownServer: boolean }
+export interface KnowledgeAccess { files: boolean; niko: boolean; device: boolean; cloudflareRead: boolean; cloudflareSearch: boolean; learning: boolean; /** Search numbers from one of their AI keys, or their own model server. */ ownKey: boolean; ownServer: boolean;
+  /** Keeping a copy of their files in their own Notion, Google Drive, OneDrive or S3 storage (Niko keeps the pieces). */
+  notion: boolean; gdrive: boolean; onedrive: boolean; s3: boolean }
 export function knowledgeAccess(allowed: (key: string) => boolean): KnowledgeAccess {
   const files = allowed('kn:files');
   return { files, niko: files && allowed('kn:place:niko'), device: files && allowed('kn:place:device'),
     cloudflareRead: files && allowed('kn:cf-read'), cloudflareSearch: files && allowed('kn:cf-search'), learning: allowed('kn:learning'),
-    ownKey: files && allowed('kn:search-key'), ownServer: files && allowed('kn:search-server') };
+    ownKey: files && allowed('kn:search-key'), ownServer: files && allowed('kn:search-server'),
+    // The pieces of files kept elsewhere are still kept in Niko, so those places need Niko's database too.
+    ...Object.fromEntries(KN_REMOTE_PLACES.map((p) => [p, files && allowed('kn:place:niko') && allowed(`kn:place:${p}`)])) as Record<KnRemotePlace, boolean> };
 }
 
 /** What a sheet column holds, so counts and totals come out right. */

@@ -42,6 +42,9 @@ export function oauthConfig(provider: string, keys: AppKeys): OAuthCfg | null {
     case 'outlook-mail': return { ...MS, ...m, scopes: 'offline_access Mail.Read Mail.Send' };
     case 'outlook-calendar': return { ...MS, ...m, scopes: 'offline_access Calendars.Read' };
     case 'onenote': return { ...MS, ...m, scopes: 'offline_access Notes.Read' };
+    // Knowledge copies: Drive's narrowest scope (only files Niko creates), and OneDrive's own app folder.
+    case 'google-drive': return { ...GOOGLE, ...g, scopes: 'https://www.googleapis.com/auth/drive.file' };
+    case 'onedrive': return { ...MS, ...m, scopes: 'offline_access Files.ReadWrite.AppFolder' };
     case 'notion': return { authUrl: 'https://api.notion.com/v1/oauth/authorize', tokenUrl: 'https://api.notion.com/v1/oauth/token', scopes: '', ...g, extraAuth: { owner: 'user' }, basicAuth: true };
     case 'slack': return { authUrl: 'https://slack.com/oauth/v2/authorize', tokenUrl: 'https://slack.com/api/oauth.v2.access', scopes: 'chat:write,channels:history,im:history,channels:read', ...g };
     default: return null;

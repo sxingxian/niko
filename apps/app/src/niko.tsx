@@ -6,7 +6,7 @@ import { type KnHabit, type KnTarget, KN_HABITS, meetingNow, speakable, stripTag
 
 /** Where an answer came from in the person's files (from /chat). `ask`: the closest piece is only similar, so Home asks
  *  "Is this the one?". `taught`: the piece that leads is one the person taught. */
-export type KnowledgeAnswer = { lead: boolean; only: boolean; taught?: boolean; ask?: KnTarget; sources: { n: number; file: string; heading: string | null; collection: string }[] };
+export type KnowledgeAnswer = { lead: boolean; only: boolean; taught?: boolean; ask?: KnTarget; check?: string[]; sources: { n: number; file: string; heading: string | null; collection: string }[] };
 /** What Home shows under an answer about learning: choices to tap, notes just learned, or a taught match to undo. */
 export type FollowUp = { for: string; question: string } & (
   | { kind: 'choices'; options: string[] }
@@ -798,6 +798,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         : r.choices?.length ? { for: answer, question: text, kind: 'choices', options: r.choices }
         : r.judge ? { for: answer, question: text, kind: 'judge' } : null);
       setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setVoiceNote(vmNext.current ? { for: answer, learned: vmNext.current.learned } : null); vmNext.current = null; setDataUsed(r.data?.length ? { for: answer, items: r.data, question: text } : null); setReply(answer); say(answer, 0);
+      // Files kept in their own Notion, Drive or OneDrive: their copies are checked for changes after the answer is shown.
+      if (r.knowledge?.check?.length) void api('/knowledge/check', { method: 'POST', body: { files: r.knowledge.check } }).catch(() => undefined);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) goSelf('/' + item.view); }
       else if (asked) goSelf(asked);
       else if (page && handler.current?.(page, true)) { /* the list on screen turned its page, quietly: Niko is speaking */ }

@@ -1,13 +1,13 @@
 // Settings · Knowledge: each person gives Niko their own files. Niko keeps answering as it does now; when a file is a
 // confident match it leads the answer. Files are read and split here in the browser, then kept by Niko.
 // Laid out as the Knowledge-Settings mockup, with the shared controls (Segmented, SettingRow, Status, Meter).
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactElement } from 'react';
 import { api, Meter, Segmented, SettingRow, Status, Switch } from '@niko/ui';
 import {
-  knKindOf, knModeOf, knNeedsCloudflare, knPlaceOf, knSearchOf, KN_COL_TYPE_NAMES, KN_COL_TYPES, KN_DEVICE_MODEL_MB,
-  type KnColType, type KnColumn, type KnMode, type KnowledgeAccess, type KnowledgeLimits, type KnowledgePrefs,
+  isRemotePlace, knKindOf, knModeOf, knNeedsCloudflare, knPlaceOf, knSearchOf, knShownPlace, KN_COL_TYPE_NAMES, KN_COL_TYPES, KN_DEVICE_MODEL_MB, KN_PLACE_NAMES,
+  type KnColType, type KnColumn, type KnMode, type KnowledgeAccess, type KnowledgeLimits, type KnowledgePrefs, type KnPlace, type KnRemotePlace,
 } from '@niko/shared';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useNiko } from '../niko';
 import { LearnedAside, LearnedTab, TaughtSection } from './KnowledgeLearned';
 import { addFile, addNumbersInNiko } from '../knowledge';
@@ -18,10 +18,13 @@ import { embedDownload, embedReady, embedRemove, embedSupported } from '../embed
 import { Sheet } from './Designs';
 import { NoteLine, SettingsPage } from './Settings';
 
-type KnFile = { id: string; name: string; kind: string; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; flagged: boolean; sheets: number; rows: number; columns: number; numbers: { cloudflare: number; device: number; own?: number }; sha256: string; addedAt: string };
+type KnFile = { id: string; name: string; kind: string; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; flagged: boolean; sheets: number; rows: number; columns: number; numbers: { cloudflare: number; device: number; own?: number }; sha256: string; addedAt: string;
+  /** Files kept in their own Notion, Drive or OneDrive: where the copy is, a link to it, whether it's all there, any problem. */
+  place?: string; url?: string | null; copied?: boolean; copyError?: string | null };
 type KnSheet = { id: string; name: string; columns: KnColumn[]; rows: number; header: boolean; example: string[] };
 type OwnSource = { ref: string; name: string; example: string };
-type State = { available: boolean; access: KnowledgeAccess; prefs: KnowledgePrefs; limits: KnowledgeLimits; usage: { files: number; bytes: number }; ownSearch?: OwnSource[] };
+type PlaceInfo = { connected: boolean; label: string | null; root: string | null };
+type State = { available: boolean; access: KnowledgeAccess; prefs: KnowledgePrefs; limits: KnowledgeLimits; usage: { files: number; bytes: number }; ownSearch?: OwnSource[]; places?: Partial<Record<KnRemotePlace, PlaceInfo>> };
 type By = 'cloudflare' | 'device' | 'own';
 type Upload = { key: string; name: string; bytes: number; step: string; done: number; total: number; error?: string };
 
@@ -45,8 +48,20 @@ const IconUpload = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden=
 const IconFile = () => <svg className="kn-ic big" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l3 3v15H6z" /><path d="M12 10v6M9 13h6" /></svg>;
 const IconDevice = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2" /><path d="M2 19h20" /></svg>;
 const IconWarn = () => <svg className="kn-ic sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9 16H3z" /><path d="M12 10v4M12 17h.01" /></svg>;
-const PLACE_NAME = { niko: 'Niko', device: 'This device only' } as const;
-type Place = keyof typeof PLACE_NAME;
+const IconNotion = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l3 3v15H6z" /><path d="M9 10h6M9 14h6M9 18h4" /></svg>;
+const IconDrive = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h6l2 2h10v10H3z" /></svg>;
+const IconCloud = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10a4 4 0 0 0 .5-8A6 6 0 0 0 6 9.5 4.3 4.3 0 0 0 7 18z" /></svg>;
+const IconServer = () => <svg className="kn-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="2" /><rect x="4" y="13" width="16" height="7" rx="2" /><path d="M8 7.5h.01M8 16.5h.01" /></svg>;
+const PLACE_ICON: Record<KnPlace, () => ReactElement> = { niko: IconNiko, notion: IconNotion, gdrive: IconDrive, onedrive: IconCloud, s3: IconServer, device: IconDevice };
+/** The places in the order the mockup shows them. */
+const SPOTS: KnPlace[] = ['niko', 'notion', 'gdrive', 'onedrive', 's3', 'device'];
+/** The connection each place uses, for its Connect button. */
+const CONNECT: Partial<Record<KnRemotePlace, string>> = { notion: 'notion', gdrive: 'google-drive', onedrive: 'onedrive' };
+/** "in Niko", "in Google Drive", "on this device". */
+const inPlace = (p: KnPlace) => (p === 'device' ? 'on this device' : p === 's3' ? 'in your own storage' : `in ${KN_PLACE_NAMES[p]}`);
+const PLACE_NAME = KN_PLACE_NAMES;
+/** Where files are read and searched: Niko (files in their own apps too) or this device. */
+type Place = 'niko' | 'device';
 /** What the screen does with files, wherever they're kept. */
 interface Ops {
   list: () => Promise<KnFile[]>;
@@ -70,7 +85,9 @@ export function Knowledge() {
   const [menu, setMenu] = useState<string | null>(null);
   const [checking, setChecking] = useState<KnFile | null>(null);
   const [drag, setDrag] = useState(false);
-  const [picked, setPicked] = useState<Place | null>(null);
+  const [picked, setPicked] = useState<KnPlace | null>(null);
+  const [copying, setCopying] = useState<{ done: number; total: number; name: string; rows?: { done: number; total: number } } | null>(null);
+  const [notionPages, setNotionPages] = useState<{ id: string; title: string }[] | null>(null);
   const [moving, setMoving] = useState<{ done: number; total: number; name: string } | null>(null);
   const [model, setModel] = useState<{ ready: boolean; p: number | null }>({ ready: embedReady(), p: null });
   // A search service of their own picked in the list, waiting for its model name before it's saved.
@@ -80,6 +97,7 @@ export function Knowledge() {
   const [reread, setReread] = useState<{ done: number; total: number } | null>(null);
   const picker = useRef<HTMLInputElement>(null);
   const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
   const account = me?.id ?? '';
 
   const placeOf = (s: State | null): Place => (s ? knPlaceOf(s.prefs, s.access) : 'niko');
@@ -113,6 +131,12 @@ export function Knowledge() {
     } catch (e) { setNote({ ok: false, text: (e as Error).message }); }
   }, [account, opsFor]);
   useEffect(() => { void load(); }, [load]);
+  // Back from Connections after connecting a place.
+  useEffect(() => {
+    if (params.get('linked') === null) return;
+    setNote({ ok: true, text: 'Connected. You can move your files there now.' });
+    setParams({}, { replace: true });
+  }, [params, setParams]);
   // The ⋯ menu closes when you click anywhere else.
   useEffect(() => { if (!menu) return; const close = () => setMenu(null); window.addEventListener('click', close); return () => window.removeEventListener('click', close); }, [menu]);
 
@@ -128,12 +152,14 @@ export function Knowledge() {
   if (!st) return <SettingsPage title="Knowledge" sub={sub}><NoteLine note={note} /></SettingsPage>;
   const { access, prefs, limits } = st;
   const place = placeOf(st);
-  const shown: Place = picked ?? place;
+  const spot = knShownPlace(prefs, access);
+  const shown: KnPlace = picked ?? spot;
+  const remote = isRemotePlace(spot) ? spot : null;
   const ops = opsFor(place, st);
   const canKeep = place === 'device' ? access.device : access.niko;
   const search = knSearchOf(prefs, access, place);
   const readCf = place === 'niko' && access.cloudflareRead && prefs.read === 'cloudflare';
-  const busy = !!moving || !!reread || trying;
+  const busy = !!moving || !!reread || trying || !!copying;
   const tab: 'files' | 'learned' = access.learning && (params.get('tab') === 'learned' || !access.files) ? 'learned' : 'files';
   const tabs = access.learning && access.files ? (
     <div className="kn-pagetabs" role="tablist" aria-label="Knowledge">
@@ -165,7 +191,14 @@ export function Knowledge() {
       }
       if (f.size > limits.mbPerFile * MB) { update(key, { error: `Each file can be up to ${limits.mbPerFile} MB.` }); continue; }
       try {
-        await ops.add(f, col, (step, done, total) => update(key, { step, done, total }));
+        const added = await ops.add(f, col, (step, done, total) => update(key, { step, done, total })) as { id?: string } | undefined;
+        // Kept in Notion, Drive or OneDrive: the copy is made there now. If that fails, the file is still in Niko and
+        // can be copied later from "Where it's kept".
+        if (remote && added?.id) {
+          update(key, { step: `Copying ${inPlace(remote)}`, done: 0, total: 1 });
+          try { await copyOne(added.id, (r) => update(key, { done: r.done, total: r.total })); }
+          catch (e) { setNote({ ok: false, text: `${f.name} was added, but its copy ${inPlace(remote)} wasn’t made: ${(e as Error).message}` }); }
+        }
         setUploads((u) => u.filter((y) => y.key !== key));
       } catch (e) { update(key, { error: (e as Error).message }); }
     }
@@ -181,21 +214,63 @@ export function Knowledge() {
     catch (e) { setNote({ ok: false, text: (e as Error).message }); }
   };
 
-  // Moving copies every file to the new place first, then removes the old copy, one file at a time.
-  const move = async (to: Place) => {
+  // Copies one file to their own place, a step at a time (a document, a sheet, or in Notion the next rows of a sheet).
+  const copyOne = async (id: string, onRows?: (rows: { done: number; total: number }) => void) => {
+    for (let i = 0; i < 2000; i++) {
+      const r = await api<{ done: boolean; rows?: { done: number; total: number } }>(`/knowledge/files/${id}/copy`, { method: 'POST' });
+      if (r.rows) onRows?.(r.rows);
+      if (r.done) return;
+    }
+  };
+  // Copies every file not yet in their place, one at a time, with a progress line. Stops at the first problem.
+  const copyAll = async (to: KnRemotePlace) => {
+    const r = await api<{ files: string[] }>('/knowledge/copies');
+    const names = new Map(files.map((f) => [f.id, f.name]));
+    for (let i = 0; i < r.files.length; i++) {
+      const id = r.files[i]!, name = names.get(id) ?? '';
+      setCopying({ done: i, total: r.files.length, name });
+      await copyOne(id, (rows) => setCopying({ done: i, total: r.files.length, name, rows }));
+    }
+    return { count: r.files.length, to };
+  };
+  // Moving: to the device, every file's pieces come here and leave Niko; to Niko from the device, the other way. To
+  // Notion, Drive or OneDrive, Niko keeps the pieces and makes a copy of each file there. Copies in the place left stay.
+  const move = async (to: KnPlace) => {
     setNote(null);
     try {
-      // Files and what Niko learned both move (with no files, only the notes do).
       setMoving({ done: 0, total: Math.max(1, files.length), name: '' });
       const step = (done: number, total: number, name: string) => setMoving({ done, total, name });
-      if (to === 'device') await moveToDevice(account, files, step); else await moveToNiko(account, step);
-      await savePrefs({ place: to });
+      if (to === 'device') await moveToDevice(account, files, step);
+      else if (place === 'device') await moveToNiko(account, step);
+      setMoving(null);
+      if (!(await savePrefs({ place: to }))) return;
       setPicked(null);
-      setNote({ ok: true, text: files.length ? `Your files are now kept ${to === 'device' ? 'on this device' : 'in Niko'}.` : `New files will be kept ${to === 'device' ? 'on this device' : 'in Niko'}.` });
       await refreshMe();
+      if (isRemotePlace(to)) {
+        await load();
+        await copyAll(to);
+      }
+      setNote({ ok: true, text: files.length ? `Your files are now kept ${inPlace(to)}.` : `New files will be kept ${inPlace(to)}.` });
     } catch (e) {
-      setNote({ ok: false, text: `${(e as Error).message} Files already moved stay where they are now; the rest weren’t changed.` });
-    } finally { setMoving(null); await load(); }
+      setNote({ ok: false, text: `${(e as Error).message} ${isRemotePlace(to) ? 'Files not copied yet are still in Niko; copy them later from here.' : 'Files already moved stay where they are now; the rest weren’t changed.'}` });
+    } finally { setMoving(null); setCopying(null); await load(); }
+  };
+  const copyNow = async () => {
+    if (!remote) return;
+    setNote(null);
+    try { await copyAll(remote); setNote({ ok: true, text: `Your files are all ${inPlace(remote)} now.` }); }
+    catch (e) { setNote({ ok: false, text: (e as Error).message }); }
+    finally { setCopying(null); await load(); }
+  };
+  // Connecting happens on Connections; once linked, it comes back here.
+  const connect = (p: KnRemotePlace) => {
+    try { sessionStorage.setItem('kn-return', CONNECT[p] ?? ''); } catch { /* storage off */ }
+    navigate(`/connections?connect=${CONNECT[p]}`);
+  };
+  const pickNotionPage = async (v: string) => {
+    setNote(null);
+    try { await api('/knowledge/places/notion', { method: 'PUT', body: { page: v === 'new' ? null : v } }); await load(); }
+    catch (e) { setNote({ ok: false, text: (e as Error).message }); }
   };
 
   // Making search numbers again: for files in Niko, by Cloudflare, their own service or on this device; for files
@@ -259,8 +334,14 @@ export function Knowledge() {
   const bytes = files.reduce((a, f) => a + f.bytes, 0);
   const pickedInput = <input ref={picker} type="file" multiple hidden accept={readCf ? ACCEPT_ALL : ACCEPT_TEXT} onChange={(e) => { if (e.target.files?.length) void add(e.target.files); e.target.value = ''; }} />;
   const choose = <button type="button" className="pri md" disabled={busy} onClick={() => picker.current?.click()}>Choose files</button>;
-  const places: Place[] = (['niko', 'device'] as const).filter((p) => (p === 'niko' ? access.niko : access.device));
-  const placeStatus = (p: Place) => p === place ? `In use · ${n(files.length, 'file', 'files')}` : p === 'niko' ? 'All your devices' : 'Stays on this computer';
+  const info = (p: KnPlace) => (isRemotePlace(p) ? st.places?.[p] : undefined);
+  const places: KnPlace[] = SPOTS.filter((p) => (p === 'niko' ? access.niko : p === 'device' ? access.device : !!info(p)));
+  const placeStatus = (p: KnPlace) => p === spot ? `In use · ${n(files.length, 'file', 'files')}` : p === 'niko' ? 'All your devices' : p === 'device' ? 'Stays on this computer'
+    : info(p)?.connected ? `Connected${info(p)?.label ? ` · ${info(p)!.label}` : ''}` : 'Not connected yet';
+  const shownInfo = info(shown);
+  const canMoveTo = !isRemotePlace(shown) || !!shownInfo?.connected;
+  const notCopied = remote ? files.filter((f) => f.status === 'ready' && !f.copied) : [];
+  const copyProblem = remote ? files.find((f) => f.copyError)?.copyError ?? null : null;
   const modelRow = search === 'device' && !ownPick && embedSupported();
   const owns = place === 'niko' ? st.ownSearch ?? [] : [];
   const ownNow = ownPick ?? (search === 'own' ? prefs.own : null);
@@ -294,13 +375,13 @@ export function Knowledge() {
         <div className="kn-main">
           {tabs}
           <section className="g kn-card" aria-label="Where your Knowledge is kept">
-            <div className="kn-head"><b className="kn-h">Where it’s kept</b><span className="srow-hint">{!places.length ? 'Not included in your plan' : files.length ? `Now: ${PLACE_NAME[place]} · ${n(files.length, 'file', 'files')}` : 'Nothing kept yet'}</span></div>
+            <div className="kn-head"><b className="kn-h">Where it’s kept</b><span className="srow-hint">{!places.length ? 'Not included in your plan' : files.length ? `Now: ${PLACE_NAME[spot]} · ${n(files.length, 'file', 'files')}` : 'Nothing kept yet'}</span></div>
             {places.length > 0 && <>
               <div className="kn-places">
                 {places.map((p) => (
-                  <button key={p} type="button" className="kn-place" aria-pressed={shown === p} disabled={busy} onClick={() => setPicked(p === place ? null : p)}>
-                    <span className="kn-place-top">{p === 'niko' ? <IconNiko /> : <IconDevice />}<b>{PLACE_NAME[p]}</b>{p === 'niko' && <span className="kn-pill rec">Recommended</span>}</span>
-                    <span className={'srow-hint' + (p === place ? ' ready' : '')}>{placeStatus(p)}</span>
+                  <button key={p} type="button" className="kn-place" aria-pressed={shown === p} disabled={busy} onClick={() => setPicked(p === spot ? null : p)}>
+                    <span className="kn-place-top">{PLACE_ICON[p]()}<b>{PLACE_NAME[p]}</b>{p === 'niko' && <span className="kn-pill rec">Recommended</span>}</span>
+                    <span className={'srow-hint' + (p === spot ? ' ready' : isRemotePlace(p) && !info(p)?.connected ? ' wait' : '')}>{placeStatus(p)}</span>
                   </button>
                 ))}
               </div>
@@ -311,20 +392,51 @@ export function Knowledge() {
                     <span className="kn-use-l"><span>{size(st.usage.bytes)} of {limits.mbTotal} MB included in your plan</span><span className="srow-hint">{n(st.usage.files, 'file', 'files')} of {limits.files.toLocaleString()}</span></span>
                     <Meter value={st.usage.bytes / (limits.mbTotal * MB)} label="Space used" />
                   </div>}
-                </> : <>
+                </> : shown === 'device' ? <>
                   <span className="kn-devwarn"><IconWarn />Only on this computer. Your phone won’t see these files, Telegram replies can’t use them, and clearing this site’s data deletes them.</span>
                   <span className="srow-hint">Niko reads, stores and searches everything here, locked to your account. Only the parts that match a question go with it to the AI.</span>
                   {place === 'device' && files.length > 0 && <span className="srow-hint">{n(files.length, 'file', 'files')} · {size(bytes)} on this computer · up to {limits.files.toLocaleString()} files</span>}
+                </> : <>
+                  {shown === 'notion' && <>
+                    <span className="kn-lead">Your files go on a “Niko Knowledge” page in Notion: documents as pages, spreadsheets as databases. Edit them in Notion; Niko picks up changes the next time it uses them.</span>
+                    <span className="srow-hint">Niko also keeps the search pieces and rows, so answers stay quick and totals still work. Niko can only see the pages it puts there. Big spreadsheets take a while the first time, about 3 rows a second.</span>
+                    {shownInfo?.connected && <label className="kn-field"><span className="kn-k">Notion page</span>
+                      <select className="in" aria-label="Notion page" value="" disabled={busy}
+                        onFocus={() => { if (!notionPages) void api<{ pages: { id: string; title: string }[] }>('/knowledge/places/notion/pages').then((r) => setNotionPages(r.pages)).catch((e) => setNote({ ok: false, text: (e as Error).message })); }}
+                        onChange={(e) => { if (e.target.value) void pickNotionPage(e.target.value); }}>
+                        <option value="">{shownInfo.root ? `Using “${shownInfo.root}”` : `Create “Niko Knowledge” in ${shownInfo.label ? `${shownInfo.label}’s workspace` : 'your workspace'}`}</option>
+                        {shownInfo.root && <option value="new">Create a new “Niko Knowledge” page</option>}
+                        {(notionPages ?? []).map((pg) => <option key={pg.id} value={pg.id}>{pg.title}</option>)}
+                        {!notionPages && <option value="" disabled>Use an existing page…</option>}
+                      </select>
+                    </label>}
+                  </>}
+                  {shown === 'gdrive' && <>
+                    <span className="kn-lead">A “Niko Knowledge” folder in your Drive: documents as Google Docs, spreadsheets as Google Sheets. Edit them in Drive; Niko picks up changes the next time it uses them.</span>
+                    <span className="srow-hint">Niko also keeps the search pieces and rows, so answers stay quick and totals still work. Niko can only see the files it puts there, nothing else in your Drive.</span>
+                  </>}
+                  {shown === 'onedrive' && <>
+                    <span className="kn-lead">{shownInfo?.connected ? '' : 'Connect OneDrive first. Personal and work Microsoft accounts both work. '}Files go in Niko’s own folder in your OneDrive (Apps › Niko › Niko Knowledge): documents as .md, spreadsheets as .csv.</span>
+                    <span className="srow-hint">Niko can only see its own folder. It also keeps the search pieces and rows.</span>
+                  </>}
+                  {isRemotePlace(shown) && !shownInfo?.connected && CONNECT[shown] && <span><button type="button" className="bt md" disabled={busy} onClick={() => connect(shown)}>Connect {PLACE_NAME[shown]}</button></span>}
+                  {shown === spot && copying && <span className="kn-move-t"><Status tone="busy">Copying {Math.min(copying.done + 1, copying.total)} of {copying.total}{copying.name ? ` · ${copying.name}` : ''}{copying.rows && copying.rows.total > 20 ? ` · ${copying.rows.done.toLocaleString()} of ${copying.rows.total.toLocaleString()} rows` : ''}</Status><Meter value={copying.total ? (copying.done + (copying.rows ? copying.rows.done / Math.max(1, copying.rows.total) : 0)) / copying.total : 0} warnAt={2} label="Copying files" /></span>}
+                  {shown === spot && !copying && notCopied.length > 0 && <div className="kn-move">
+                    <span className="srow-hint">{copyProblem ?? `${n(notCopied.length, 'file isn’t', 'files aren’t')} ${inPlace(shown)} yet.`}</span>
+                    <button type="button" className="bt md" disabled={busy} onClick={() => void copyNow()}>{copyProblem ? 'Try again' : 'Copy now'}</button>
+                  </div>}
                 </>}
-                {(shown !== place || moving) && (
+                {(shown !== spot || moving) && (
                   <div className="kn-move">
                     {moving ? <>
                       <span className="kn-move-t"><Status tone="busy">Moving {Math.min(moving.done + 1, moving.total)} of {moving.total}{moving.name ? ` · ${moving.name}` : ''}</Status><Meter value={moving.total ? moving.done / moving.total : 0} warnAt={2} label="Moving files" /></span>
                     </> : <>
                       <span className="srow-hint">{files.length
-                        ? `Moving copies your ${n(files.length, 'file', 'files')} to ${PLACE_NAME[shown]}, then removes the copy ${place === 'niko' ? 'in Niko' : 'on this device'}. Nothing is lost.`
-                        : `New files will be kept ${shown === 'niko' ? 'in Niko' : 'on this device'}.`}</span>
-                      <button type="button" className="pri md" onClick={() => void move(shown)}>{files.length ? `Move to ${PLACE_NAME[shown]}` : `Use ${PLACE_NAME[shown]}`}</button>
+                        ? isRemotePlace(shown) ? `Moving copies your ${n(files.length, 'file', 'files')} to ${PLACE_NAME[shown]}. Niko keeps their search pieces, so answers don’t change.${remote ? ' Copies in the place you leave stay there.' : ''}`
+                          : shown === 'device' || place === 'device' ? `Moving copies your ${n(files.length, 'file', 'files')} to ${PLACE_NAME[shown]}, then removes the copy ${inPlace(spot)}. Nothing is lost.${remote ? ` Copies ${inPlace(spot)} stay there.` : ''}`
+                          : `Niko stops using the copies ${inPlace(spot)}; they stay there. Your files and their search pieces are already in Niko.`
+                        : `New files will be kept ${inPlace(shown)}.`}</span>
+                      <button type="button" className="pri md" disabled={busy || !canMoveTo} onClick={() => void move(shown)}>{files.length ? `Move to ${PLACE_NAME[shown]}` : `Use ${PLACE_NAME[shown]}`}</button>
                     </>}
                   </div>
                 )}
@@ -386,6 +498,7 @@ export function Knowledge() {
                       <span className="kn-more" onClick={(e) => e.stopPropagation()}>
                         <button type="button" className="more-b" aria-label={`More for ${f.name}`} aria-haspopup="menu" aria-expanded={menu === f.id} onClick={() => setMenu(menu === f.id ? null : f.id)}>⋯</button>
                         {menu === f.id && <span className="kn-menu g" role="menu">
+                          {f.url && f.place && isRemotePlace(f.place) && <a role="menuitem" href={f.url} target="_blank" rel="noopener noreferrer" onClick={() => setMenu(null)}>Open in {PLACE_NAME[f.place]}</a>}
                           {f.sheets > 0 && <button type="button" role="menuitem" onClick={() => { setMenu(null); setChecking(f); }}>Check columns</button>}
                           <button type="button" role="menuitem" className="danger" disabled={busy} onClick={() => void remove(f)}>Remove file</button>
                         </span>}

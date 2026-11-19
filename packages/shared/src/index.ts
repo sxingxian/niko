@@ -7,6 +7,7 @@ export * from './maps';
 export * from './speechtext';
 export * from './knowledge';
 export * from './knowledgeDevice';
+export * from './knowledgeSplit';
 export * from './learned';
 export * from './dataSources';
 import { MAP_PROVIDERS, mapPreset, type MapProvider, type MapSource } from './maps';
@@ -86,6 +87,9 @@ export const PROVIDERS: ProviderDef[] = [
   { id: 'synology-calendar', name: 'Synology Calendar', group: 'calendar', how: 'Your NAS address · CalDAV', kind: 'credentials', fields: [hostField, userField, passField], can: { read: false, send: false } },
   { id: 'notion', name: 'Notion', group: 'notes', how: 'Notion sign-in · pages you pick', kind: 'oauth', app: 'notion', can: { read: true, send: false } },
   { id: 'onenote', name: 'OneNote', group: 'notes', how: 'Microsoft sign-in', kind: 'oauth', app: 'microsoft', can: { read: true, send: false } },
+  // For keeping Knowledge files: Niko can see only the files it makes (Drive) or its own folder (OneDrive).
+  { id: 'google-drive', name: 'Google Drive', group: 'notes', how: 'Google sign-in · only files Niko makes', kind: 'oauth', app: 'google', can: { read: true, send: false } },
+  { id: 'onedrive', name: 'OneDrive', group: 'notes', how: 'Microsoft sign-in · only Niko’s own folder', kind: 'oauth', app: 'microsoft', can: { read: true, send: false } },
   { id: 'make', name: 'Make.com', group: 'automation', how: 'Signed webhooks, in and out', kind: 'webhook', fields: [{ key: 'url', label: 'Webhook URL', type: 'url', placeholder: 'https://hook.' }], can: { read: false, send: true } },
   { id: 'n8n', name: 'n8n', group: 'automation', how: 'Webhooks · your n8n server', kind: 'webhook', fields: [{ key: 'url', label: 'Webhook URL', type: 'url', placeholder: 'https://' }], can: { read: false, send: true } },
   { id: 'power-automate', name: 'Power Automate', group: 'automation', how: 'HTTP trigger URL · your flows', kind: 'webhook', fields: [{ key: 'url', label: 'HTTP trigger URL', type: 'url', placeholder: 'https://' }], can: { read: false, send: true } },
@@ -138,7 +142,7 @@ const clientSecret: ProviderField = { key: 'clientSecret', label: 'Client secret
 export const APPS: AppDef[] = [
   { id: 'google', name: 'Google', where: 'Register Niko once in Google Cloud. It takes about five minutes and is free.', file: 'google-json', steps: [
     { text: 'Create a project called Niko.', link: 'https://console.cloud.google.com/projectcreate', linkLabel: 'Create project' },
-    { text: 'Turn on the Gmail and Calendar APIs for it.', link: 'https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com,calendar-json.googleapis.com', linkLabel: 'Turn on APIs' },
+    { text: 'Turn on the Gmail, Calendar and Drive APIs for it.', link: 'https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com,calendar-json.googleapis.com,drive.googleapis.com', linkLabel: 'Turn on APIs' },
     { text: 'Set up sign-in: app name Niko, your email, audience External (that is what lets personal Gmail accounts in).', link: 'https://console.cloud.google.com/auth/overview', linkLabel: 'Set up sign-in' },
     { text: 'Under Audience, press Publish app. Left in Testing, Google signs Niko out every 7 days. When you connect, Google warns the app is unverified once: choose Advanced, then Go to Niko.', link: 'https://console.cloud.google.com/auth/audience', linkLabel: 'Open Audience' },
     { text: 'Create a client: type Web application, and add each address below under Authorised redirect URIs.', link: 'https://console.cloud.google.com/auth/clients/create', linkLabel: 'Create client', redirects: true },
@@ -154,14 +158,14 @@ export const APPS: AppDef[] = [
     { ...clientSecret, label: 'Client secret value' },
     { key: 'tenant', label: 'Directory (tenant) ID', type: 'text', placeholder: 'Leave empty', optional: true, advanced: 'Only to limit Niko to one organisation’s accounts. Leave empty for personal and work accounts.' },
   ] },
-  { id: 'notion', name: 'Notion', where: 'notion.so/my-integrations → New integration → type Public.', fields: [{ ...clientId, label: 'OAuth client ID' }, { ...clientSecret, label: 'OAuth client secret' }] },
+  { id: 'notion', name: 'Notion', where: 'notion.so/my-integrations → New integration → type Public. Under Capabilities, tick Read content, Insert content and Update content (Knowledge keeps its copies with them).', fields: [{ ...clientId, label: 'OAuth client ID' }, { ...clientSecret, label: 'OAuth client secret' }] },
   { id: 'slack', name: 'Slack', where: 'api.slack.com/apps → Create New App → OAuth & Permissions.', fields: [clientId, clientSecret, { key: 'signingSecret', label: 'Signing secret (to receive messages)', type: 'password', optional: true }] },
 ];
 
 export const GROUPS: { id: ProviderGroup; name: string; note: string }[] = [
   { id: 'mail', name: 'Mail', note: 'Read · draft · send after approval' },
   { id: 'calendar', name: 'Calendar', note: 'Read · create after approval' },
-  { id: 'notes', name: 'Notes', note: 'Only what you share' },
+  { id: 'notes', name: 'Notes and files', note: 'Only what you share' },
   { id: 'automation', name: 'Automation', note: 'Run and trigger your flows' },
   { id: 'messaging', name: 'Messaging', note: 'Read · reply' },
   { id: 'weather', name: 'Weather', note: 'Here and anywhere you ask' },
@@ -394,9 +398,10 @@ export const AI_OPTION_GROUPS: AiOptionGroup[] = [
     { key: 'kn:files', name: 'Knowledge files', sub: 'Niko keeps their files and answers from them', offByDefault: true, feature: true },
     { key: 'kn:place:niko', name: 'Kept in Niko', sub: 'A separate Niko database' },
     { key: 'kn:place:device', name: 'Kept on their device', sub: 'Files stay on that device' },
-    { key: 'kn:place:notion', name: 'Notion', sub: 'Their Notion connection' },
-    { key: 'kn:place:gdrive', name: 'Google Drive', sub: 'Their Google connection' },
-    { key: 'kn:place:onedrive', name: 'OneDrive', sub: 'Their Microsoft connection' },
+    { key: 'kn:place:notion', name: 'Notion', sub: 'A copy in their Notion · Niko keeps the pieces' },
+    { key: 'kn:place:gdrive', name: 'Google Drive', sub: 'A copy in their Drive · Niko keeps the pieces' },
+    { key: 'kn:place:onedrive', name: 'OneDrive', sub: 'A copy in their OneDrive · Niko keeps the pieces' },
+    { key: 'kn:place:s3', name: 'Their own storage', sub: 'A copy in S3 storage they set up · Niko keeps the pieces' },
     { key: 'kn:cf-read', name: 'Cloudflare reads files', sub: 'PDF, Word and spreadsheets into text · keeps nothing' },
     { key: 'kn:cf-search', name: 'Cloudflare search', sub: 'Search numbers for their files · keeps nothing' },
     { key: 'kn:search-key', name: 'Search with their AI key', sub: 'An embedding model on one of their own AI keys · their key' },

@@ -1,11 +1,17 @@
 // Knowledge kept on "This device": the browser keeps the files, reads them and searches them, and sends only the few
 // pieces that may answer a question along with that question. These are the shared rules for what it may send, and
 // the same spreadsheet look-ups the server runs, done here on rows the browser keeps.
-import { tableTags, type KnColumn, type KnowledgeAccess, type KnowledgePrefs, type KnTableAsk } from './knowledge';
+import { isRemotePlace, tableTags, type KnColumn, type KnowledgeAccess, type KnowledgePrefs, type KnPlace, type KnRemotePlace, type KnTableAsk } from './knowledge';
 
 /** Where files are kept and how they are searched, kept to what the account may use. */
 export const knPlaceOf = (p: Pick<KnowledgePrefs, 'place'>, a: Pick<KnowledgeAccess, 'niko' | 'device'>): 'niko' | 'device' =>
   (p.place === 'device' && a.device) || (!a.niko && a.device) ? 'device' : 'niko';
+/** Where their files' copies are kept, when that's one of their own apps or storage (allowed by their plan); the search
+ *  pieces of those files are kept in Niko, so knPlaceOf is 'niko' for them. */
+export const knRemoteOf = (p: Pick<KnowledgePrefs, 'place'>, a: KnowledgeAccess): KnRemotePlace | null =>
+  isRemotePlace(p.place) && a[p.place] && knPlaceOf(p, a) === 'niko' ? p.place : null;
+/** The place shown as chosen: one of their own apps or storage, else Niko or this device. */
+export const knShownPlace = (p: Pick<KnowledgePrefs, 'place'>, a: KnowledgeAccess): KnPlace => knRemoteOf(p, a) ?? knPlaceOf(p, a);
 export const knSearchOf = (p: Pick<KnowledgePrefs, 'search'> & { own?: KnowledgePrefs['own'] }, a: Pick<KnowledgeAccess, 'cloudflareSearch'> & Partial<Pick<KnowledgeAccess, 'ownKey' | 'ownServer'>>, place: 'niko' | 'device'): 'cloudflare' | 'device' | 'own' =>
   place === 'niko' && a.cloudflareSearch && p.search === 'cloudflare' ? 'cloudflare'
     : place === 'niko' && p.search === 'own' && !!p.own && (p.own.ref === 'self-hosted-ai' ? !!a.ownServer : !!a.ownKey) ? 'own' : 'device';

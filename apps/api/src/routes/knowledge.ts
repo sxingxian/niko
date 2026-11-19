@@ -4,13 +4,16 @@
 import { eq } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { users } from '@niko/db';
-import { aiAllowed, cleanKnowledgePrefs, cleanTarget, isHabit, KN_HABITS, knowledgeAccess, knPlaceOf, knSearchOf, type KnowledgeAccess, type KnowledgePrefs } from '@niko/shared';
+import { aiAllowed, cleanKnowledgePrefs, cleanTarget, isHabit, isRemotePlace, KN_HABITS, KN_PLACE_NAMES, KN_REMOTE_PLACES, knowledgeAccess, knPlaceOf, knRemoteOf, knSearchOf, type KnowledgeAccess, type KnowledgePrefs, type KnRemotePlace } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
 import { hmacSha256Hex } from '../lib/crypto';
 import { confirmHabit, declineHabit, editNote, forgetAll, forgetFileMatches, forgetNote, habitsOn, learnedCount, listLearned, noticeHabit, saveNote } from '../learned';
 import { offFor } from '../access';
 import { ownEmbedder, ownSearchSources } from '../ownEmbed';
+import { notionPage, notionPages, PlaceError, placeConnections, remoteFor } from '../knPlaces';
+import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile, roots, setRoot } from '../knPlacesStore';
+import { credentials } from '../providers';
 import { addCloudflareNumbers, addOwnNumbers, clearOwnNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeDb, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
 
 export const knowledge = new Hono<AppEnv>();
@@ -64,6 +67,23 @@ async function store(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: Kn
   return { k, ...w };
 }
 
+/** For each place their plan allows: whether it's connected (and as whom), and the name of Niko's folder or page. */
+async function placesInfo(c: C, k: Kdb, access: KnowledgeAccess) {
+  const allowed = KN_REMOTE_PLACES.filter((p) => access[p] && p !== 's3');
+  if (!allowed.length) return {};
+  const [conn, made] = await Promise.all([placeConnections(c.get('db'), c.get('user').id), roots(k, c.get('user').id)]);
+  return Object.fromEntries(allowed.map((p) => [p, { ...conn[p as 'notion' | 'gdrive' | 'onedrive'], root: made[p] ?? null }]));
+}
+/** Their chosen place, signed in, for copying; a plain problem when it can't be used. */
+async function placeFor(c: C, s: { access: KnowledgeAccess; prefs: KnowledgePrefs }, place?: KnRemotePlace) {
+  const p = place ?? knRemoteOf(s.prefs, s.access);
+  if (!p || !s.access[p]) return { error: c.json({ error: NOT_ON_ACCOUNT }, 403) };
+  const remote = await remoteFor(c.env, c.get('db'), c.get('user').id, p);
+  if (!remote) return { error: c.json({ error: `Connect ${KN_PLACE_NAMES[p]} first.`, connect: p }, 409) };
+  return { remote };
+}
+const placeFail = (c: C, e: unknown) => (e instanceof PlaceError ? c.json({ error: e.message }, e.status === 401 || e.status === 403 ? 409 : 502) : fail(c, e));
+
 // Everything the Knowledge screen needs at once.
 knowledge.get('/', async (c) => {
   const u = c.get('user'), k = knowledgeDb(c.env);
@@ -72,6 +92,8 @@ knowledge.get('/', async (c) => {
   return c.json({
     available: !!k && (w.access.files || w.access.learning), access: w.access, prefs: w.prefs, limits: await limitsFor(c.get('db'), u),
     split: settings.split, usage: k && w.access.niko ? await usage(k, u.id) : { files: 0, bytes: 0 },
+    // The places their plan allows besides Niko and this device: connected or not, and Niko's folder or page there.
+    places: k && w.access.niko ? await placesInfo(c, k, w.access) : {},
     // Their own services that can make search numbers (only those their plan allows).
     ownSearch: w.access.ownKey || w.access.ownServer ? (await ownSearchSources(c.env, c.get('db'), u)).filter((x) => (x.ref === 'self-hosted-ai' ? w.access.ownServer : w.access.ownKey)) : [],
   });
@@ -89,6 +111,17 @@ knowledge.put('/prefs', async (c) => {
   if (prefs.place === 'niko' && !access.niko && access.device) prefs.place = 'device';
   if (prefs.place === 'device' && !access.device && access.niko) prefs.place = 'niko';
   if (!access.cloudflareRead) prefs.read = 'device';
+  // One of their own apps or storage: allowed by the plan, connected, and with Niko's folder or page made there now,
+  // so a connection problem shows straight away. Moving back to Niko: Niko stops using the copies (they stay there).
+  if (isRemotePlace(prefs.place) && prefs.place !== before.place) {
+    if (!access[prefs.place]) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+    const k = knowledgeDb(c.env);
+    if (!k) return c.json({ error: NOT_HERE }, 503);
+    const remote = await remoteFor(c.env, c.get('db'), u.id, prefs.place);
+    if (!remote) return c.json({ error: `Connect ${KN_PLACE_NAMES[prefs.place]} first.`, connect: prefs.place }, 409);
+    try { await placeRoot(k, remote, u.id); } catch (e) { return placeFail(c, e); }
+  }
+  if (prefs.place === 'niko' && isRemotePlace(before.place)) { const k = knowledgeDb(c.env); if (k) await leavePlaces(k, u.id); }
   if (prefs.search === 'cloudflare' && !access.cloudflareSearch) prefs.search = 'device';
   // Their own service: allowed by the plan, and tried once before it's saved, so a wrong model is caught now.
   if (prefs.search === 'own') {
@@ -181,9 +214,74 @@ knowledge.patch('/files/:id', async (c) => {
 
 knowledge.delete('/files/:id', async (c) => {
   const s = await store(c); if (s instanceof Response) return s;
+  // Its copies go to the bin there too (Notion, Drive and OneDrive keep them a while), except when the file is only
+  // moving to this device, where the copies stay.
+  const copies = c.req.query('keep') === '1' ? null : await copiesOf(s.k, c.get('user').id, c.req.param('id'));
+  if (copies) {
+    const remote = await remoteFor(c.env, c.get('db'), c.get('user').id, copies.place).catch(() => null);
+    if (remote) for (const it of copies.items) await remote.trash(it.id, it.kind).catch((e) => console.warn(`knowledge copy not removed: ${String((e as Error)?.message ?? e).slice(0, 120)}`));
+  }
   const gone = await deleteFile(s.k, c.get('user').id, c.req.param('id'));
   if (gone) { await forgetFileMatches(s.k, c.get('user').id, c.req.param('id')); await syncCount(c, s.k); await syncNotes(c, s.k); await audit(c, 'knowledge.file-removed', {}, c.get('user').id); }
   return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------- copies in their own place
+// The files not yet copied to their place (the screen copies them one at a time, with a progress line).
+knowledge.get('/copies', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  const place = knRemoteOf(s.prefs, s.access);
+  return c.json({ place, files: place ? await notCopied(s.k, c.get('user').id, place) : [] });
+});
+// One step of copying a file there: a document, or one sheet (in Notion, the next rows of it).
+knowledge.post('/files/:id/copy', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  const u = c.get('user');
+  if (await tooMany(c, 'kn-copy:' + u.id, 900, 60)) return c.json({ error: 'That’s a lot at once. Try again in a little while.' }, 429);
+  const r = await placeFor(c, s); if (r.error) return r.error;
+  try { return c.json({ ok: true, ...(await copyStep(s.k, r.remote, u.id, c.req.param('id'))) }); }
+  catch (e) { return fail(c, e); }
+});
+// After an answer used files kept elsewhere: their copies are checked (every ten minutes at most) and read again when
+// they were changed there. The app calls this once the answer is shown, so the answer is never held up.
+knowledge.post('/check', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  const u = c.get('user');
+  if (await tooMany(c, 'kn-check:' + u.id, 120, 60)) return c.json({ ok: true, updated: 0 });
+  const b = await c.req.json<{ files?: unknown }>().catch(() => ({} as { files?: unknown }));
+  const due = await dueForCheck(s.k, u.id, Array.isArray(b.files) ? b.files.filter((x): x is string => typeof x === 'string') : []);
+  let updated = 0;
+  for (const f of due) {
+    const remote = s.access[f.place] ? await remoteFor(c.env, c.get('db'), u.id, f.place).catch(() => null) : null;
+    if (!remote) continue;
+    const search = knSearchOf(s.prefs, s.access, 'niko');
+    const own = search === 'own' ? await ownEmbedder(c.env, c.get('db'), u, s.prefs.own!).catch(() => undefined) : undefined;
+    const r = await refreshFile(s.k, c.env, remote, u.id, f.id, { cloudflare: search === 'cloudflare', own }).catch((e) => { console.warn(`knowledge check: ${String((e as Error)?.message ?? e).slice(0, 160)}`); return 'same' as const; });
+    if (r === 'updated') updated++;
+  }
+  return c.json({ ok: true, updated });
+});
+// Notion: the pages Niko can see, to pick one for the copies; or Niko's own page (made the first time it's needed).
+knowledge.get('/places/notion/pages', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  if (!s.access.notion) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  const cred = await credentials(c.env, c.get('db'), c.get('user').id, 'notion').catch(() => null);
+  if (!cred?.accessToken) return c.json({ error: 'Connect Notion first.', connect: 'notion' }, 409);
+  try { return c.json({ pages: await notionPages(cred.accessToken) }); } catch (e) { return placeFail(c, e); }
+});
+knowledge.put('/places/notion', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  if (!s.access.notion) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  const b = await c.req.json<{ page?: unknown }>().catch(() => ({} as { page?: unknown }));
+  const u = c.get('user');
+  if (b.page === null) { await setRoot(s.k, u.id, 'notion', null); return c.json({ ok: true, root: null }); }
+  const cred = await credentials(c.env, c.get('db'), u.id, 'notion').catch(() => null);
+  if (!cred?.accessToken) return c.json({ error: 'Connect Notion first.', connect: 'notion' }, 409);
+  try {
+    const p = await notionPage(cred.accessToken, typeof b.page === 'string' ? b.page : '');
+    await setRoot(s.k, u.id, 'notion', { id: p.id, name: p.title });
+    return c.json({ ok: true, root: p.title });
+  } catch (e) { return placeFail(c, e); }
 });
 
 // Moving a file to the person's device, and making its search numbers again when they change how it's searched.
