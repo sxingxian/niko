@@ -15,7 +15,7 @@ import { piecesMarkdown, sheetCsv, splitText, parseDelimited } from '../packages
 import { notionBlocks, notionMarkdown, remoteFor, PlaceError, safeName } from '../apps/api/src/knPlaces.ts';
 import { addPieces, addSheet, finishFile, listFiles, startFile } from '../apps/api/src/knowledge.ts';
 import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile } from '../apps/api/src/knPlacesStore.ts';
-import { isKnowledgeNotion, knowledgeNotionIds } from '../apps/api/src/knNotes.ts';
+import { isKnowledgeNotion, knowledgeNotionIds, withoutKnowledge } from '../apps/api/src/knNotes.ts';
 import { relocate, rootsMade, setRoot } from '../apps/api/src/knPlacesStore.ts';
 import { binLearnedCopy, learnedCopyOf, learnedMarkdown, markLearnedDirty, setLearnedCopy, syncLearnedCopy } from '../apps/api/src/knLearnedCopy.ts';
 import { confirmHabit, forgetAllFileMatches, forgetNotesOnly, keepHabit, listLearned, noticeHabit, saveNote } from '../apps/api/src/learned.ts';
@@ -361,6 +361,32 @@ await ok('Niko’s Notes leaves out the Notion pages Niko made for Knowledge, no
   assert.ok(isKnowledgeNotion({ id: docId, parent: { page_id: 'work-wiki' } }, ids));
   assert.ok(!isKnowledgeNotion({ id: 'their-page', parent: { page_id: 'work-wiki' } }, ids), 'their own pages on it stay too');
   assert.deepEqual([...await knowledgeNotionIds(k, '00000000-0000-4000-8000-0000000000e5')], [], 'another account: nothing');
+});
+
+await ok('Notes leaves out what Niko’s Notion connection made, even pages Niko lost track of, and what sits in them', async () => {
+  const BOT = 'b0b0b0b0-0000-4000-8000-000000000001', ME = 'aaaaaaaa-0000-4000-8000-000000000002';
+  const id = (n) => n.toString(16).padStart(32, '0');
+  // Niko keeps no record of any of these (an old "Niko Knowledge" page after a change of place, a copy kept).
+  const pages = [
+    { id: id(1), created_by: { id: BOT }, parent: { type: 'workspace' } },              // Niko's old page
+    { id: id(2), created_by: { id: BOT }, parent: { page_id: id(1) } },                 // What Niko learned on it
+    { id: id(3), created_by: { id: ME }, parent: { page_id: id(1) } },                  // a page they added on Niko's page
+    { id: id(4), created_by: { id: ME }, parent: { database_id: id(90) } },             // a row they added to Niko's database
+    { id: id(5), created_by: { id: ME }, parent: { database_id: id(91) } },             // a row in their own database
+    { id: id(6), created_by: { id: ME }, parent: { page_id: id(92) } },                 // a page in their own wiki
+    { id: id(7), created_by: { id: ME }, parent: { type: 'workspace' } },               // their own note
+  ];
+  const asked = [];
+  const creator = async (x, kind) => { asked.push(`${kind}:${x}`); return x === id(90) ? BOT : ME; };
+  const kept = await withoutKnowledge(pages, new Set(), BOT, creator);
+  assert.deepEqual(kept.map((p) => p.id), [id(5), id(6), id(7)]);
+  assert.deepEqual(asked.sort(), [`database:${id(90)}`, `database:${id(91)}`, `page:${id(92)}`].sort(), 'only parents not in the list are looked up');
+  // Niko’s records still count when Notion can’t say who made a page; a lookup that fails keeps the page.
+  assert.deepEqual((await withoutKnowledge(pages, new Set([id(1)]), '', creator)).map((p) => p.id), [id(4), id(5), id(6), id(7)]);
+  assert.deepEqual((await withoutKnowledge([pages[3]], new Set(), BOT, async () => { throw new Error('down'); })).map((p) => p.id), [id(4)]);
+  // A page they picked for Knowledge is theirs; Niko’s copies on it go.
+  assert.ok(!isKnowledgeNotion({ id: 'work-wiki', created_by: { id: ME } }, new Set(), BOT));
+  assert.ok(isKnowledgeNotion({ id: 'copy', created_by: { id: BOT.replace(/-/g, '') }, parent: { page_id: 'work-wiki' } }, new Set(), BOT));
 });
 
 await ok('another page or folder: copies are made again there, the old ones stay, Niko’s old folder is forgotten', async () => {
