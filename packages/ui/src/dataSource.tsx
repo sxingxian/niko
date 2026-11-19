@@ -65,7 +65,11 @@ export function KeyFields({ d, set, admin, hasKey }: { d: SourceDraft; set: (p: 
         {admin && <label className="fld"><span className="k">Key</span><select className="in" value={d.keyMode} onChange={(e) => set({ keyMode: e.target.value as DataKeyMode })}><option value="one">One key for everyone (yours)</option><option value="own">Each person adds their own</option></select></label>}
         {d.keyMode === 'one' && <label className="fld"><span className="k">{admin ? 'Your key' : 'Key'}</span><input className="in" type="password" autoComplete="off" value={d.key} maxLength={500} onChange={(e) => set({ key: e.target.value })} placeholder={hasKey ? keep : ''} /></label>}
       </div>}
-      {(d.auth === 'header' || d.auth === 'query') && <span className="ds-hint">The service’s docs say what it’s called (LTA DataMall: a header named AccountKey; a Bearer token: header Authorization, key “Bearer …”). {d.keyMode === 'own' && admin ? 'People enter their own key when they turn it on.' : 'Kept encrypted on Niko’s server and never shown again.'}</span>}
+      {d.auth === 'header' && /^\s*bearer\s/i.test(d.key) && d.authName.trim().toLowerCase() !== 'authorization' && <div className="ds-ro" role="alert">
+        <span className="ds-hint ds-warn">“Bearer” only goes with a header called Authorization. In {d.authName.trim() || 'this header'} the key usually goes on its own.</span>
+        <button type="button" className="ds-lnk" onClick={() => set({ key: d.key.replace(/^\s*bearer\s+/i, '') })}>Remove “Bearer”</button>
+      </div>}
+      {(d.auth === 'header' || d.auth === 'query') && <span className="ds-hint">The docs say what the header is called, and whether the key goes on its own (LTA DataMall: header AccountKey, just the key) or after a word (header Authorization, key “Bearer …”). {d.keyMode === 'own' && admin ? 'People enter their own key when they turn it on.' : 'Kept encrypted on Niko’s server and never shown again.'}</span>}
       {d.auth === 'token' && <div className="ds-token">
         <label className="fld"><span className="k">Token address</span><input className="in" value={t.url} inputMode="url" spellCheck={false} onChange={(e) => setT({ url: e.target.value })} placeholder="https://login.example.com/oauth2/token" /></label>
         <div className="fld"><span className="k">Signs in with</span>
