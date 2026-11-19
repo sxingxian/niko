@@ -8,7 +8,7 @@ import { aiAllowed, cleanKnowledgePrefs, knowledgeAccess, type KnowledgeAccess, 
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
 import { offFor } from '../access';
-import { addPieces, addSheet, deleteFile, finishFile, KnError, knowledgeDb, knowledgeSettings, limitsFor, listFiles, readWithCloudflare, search, startFile, usage, type Kdb } from '../knowledge';
+import { addPieces, addSheet, addSheetRows, deleteFile, finishFile, keepAsData, KnError, knowledgeDb, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
 
 export const knowledge = new Hono<AppEnv>();
 type C = Context<AppEnv>;
@@ -92,6 +92,13 @@ knowledge.post('/files/:id/sheets', async (c) => {
   catch (e) { return fail(c, e); }
 });
 
+knowledge.post('/files/:id/sheets/:sheet/rows', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  const b = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  try { return c.json({ ok: true, ...(await addSheetRows(s.k, c.get('user').id, c.req.param('id'), c.req.param('sheet'), b)) }); }
+  catch (e) { return fail(c, e); }
+});
+
 knowledge.post('/files/:id/done', async (c) => {
   const s = await store(c); if (s instanceof Response) return s;
   try {
@@ -99,6 +106,28 @@ knowledge.post('/files/:id/done', async (c) => {
     await audit(c, 'knowledge.file-added', { pieces: r.pieces }, c.get('user').id);
     return c.json({ ok: true, ...r });
   } catch (e) { return fail(c, e); }
+});
+
+knowledge.get('/files/:id/sheets', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  try { return c.json({ sheets: await listSheets(s.k, c.get('user').id, c.req.param('id')) }); }
+  catch (e) { return fail(c, e); }
+});
+
+// "Check columns": names, what each column holds, and whether the first row is the header.
+knowledge.put('/files/:id/sheets/:sheet', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  const b = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  try { return c.json({ ok: true, sheet: await updateSheet(s.k, c.get('user').id, c.req.param('id'), c.req.param('sheet'), b) }); }
+  catch (e) { return fail(c, e); }
+});
+
+// "Keep as data" on a file whose text reads like instructions to an AI.
+knowledge.patch('/files/:id', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  const b = await c.req.json<{ flagged?: unknown }>().catch(() => ({} as { flagged?: unknown }));
+  if (b.flagged !== false) return c.json({ error: 'Nothing to change.' }, 400);
+  return (await keepAsData(s.k, c.get('user').id, c.req.param('id'))) ? c.json({ ok: true }) : c.json({ error: 'No such file.' }, 404);
 });
 
 knowledge.delete('/files/:id', async (c) => {

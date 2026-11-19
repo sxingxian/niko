@@ -1,9 +1,9 @@
 // Niko admin portal: sign-in with a second factor, then users and registration.
 import { StrictMode, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, ApiError, BackgroundPreview, DesignPreview, Field, PasswordField, Switch } from '@niko/ui';
+import { api, ApiError, Meter, BackgroundPreview, DesignPreview, Field, PasswordField, Switch } from '@niko/ui';
 import { BACKGROUNDS, backgroundInfo, DESIGNS, designInfo, type BackgroundInfo, type DesignInfo } from '@niko/shared';
-import { AI_OPTION_GROUPS, AI_PRESETS, aiAllowed, defaultOn, BUILTIN_TOKEN, hearPresetOf, imagePresetOf, presetOf, providedIds, voicePresetOf, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
+import { AI_OPTION_GROUPS, AI_PRESETS, aiAllowed, defaultOn, KN_DB_FREE_BYTES, KN_FILE_STEPS, KN_MB_FILE_STEPS, KN_MB_TOTAL_STEPS, type KnowledgeLimits, BUILTIN_TOKEN, hearPresetOf, imagePresetOf, presetOf, providedIds, voicePresetOf, HEAR_PROVIDERS, IMAGE_PROVIDERS, MAP_PROVIDERS, USAGE_KINDS, USAGE_NAMES, USAGE_STEPS, USAGE_UNITS, VOICE_PROVIDERS, type MapField, type ProvidedSetup, type UsageKind, aiHasBrain, aiOff, CALENDAR_LIMIT_STEPS, GLANCE_PART_NAMES, GLANCE_PARTS, GLANCE_STEPS, GRACE_STEPS, lengthLabel, MAX_MONTHS, money, offersLine, plansDiffer, plansOffered, showCode, toCents, unlockPlan, type AccessState, type AccountLimits, type GlanceLimits, type PaymentSettings } from '@niko/shared';
 import '@niko/ui/src/styles.css';
 import './admin.css';
 
@@ -187,6 +187,144 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
           })}
         </div>
         <p className="sub" style={{ fontSize: 12, lineHeight: 1.5 }}>Turning a service off hides it from that person’s screens and the server refuses it, so a key they already saved stops being used. Their keys are kept, not deleted, and work again when you turn the service back on. Every change is written to the audit log.</p>
+      </section>
+    </div>
+  </>;
+}
+
+// ---------------------------------------------------------------- Knowledge (as the Admin-Knowledge mockup)
+type KnAdminUser = { id: string; name: string; email: string; role: string; status: string; knowledgeLimits: Partial<KnowledgeLimits>; used: { files: number; bytes: number } };
+type KnAdmin = { ready: boolean; usage: { bytes: number; files: number; people: number } | null; split: 'browser' | 'server'; defaults: KnowledgeLimits; users: KnAdminUser[] };
+/** The Knowledge switches built so far, in their groups (the others in AI_OPTION_GROUPS arrive with their stages). */
+const KN_GROUPS: [string, string[]][] = [['Files', ['kn:files']], ['Where they keep files', ['kn:place:niko']], ['Cloudflare', ['kn:cf-read', 'kn:cf-search']]];
+const KN_SHOWN = KN_GROUPS.flatMap(([, keys]) => keys);
+const KN_LIMIT_ROWS: [keyof KnowledgeLimits, string, string, number[], (n: number) => string][] = [
+  ['files', 'Files', 'How many files each person can keep', KN_FILE_STEPS, (n) => `${n.toLocaleString()} files`],
+  ['mbPerFile', 'Size of each file', 'The largest file they can add', KN_MB_FILE_STEPS, (n) => `${n} MB`],
+  ['mbTotal', 'All their files together', 'Counts the files as added, before splitting', KN_MB_TOTAL_STEPS, (n) => `${n} MB`],
+];
+const knSize = (b: number) => (b < 1024 * 1024 ? `${Math.round(b / 1024)} KB` : b < 1024 ** 3 ? `${(b / 1024 / 1024).toFixed(b < 10 * 1024 * 1024 ? 1 : 0)} MB` : `${(b / 1024 ** 3).toFixed(1)} GB`);
+/** Whether each person can give Niko their own files, where, with Cloudflare or not, and how much: a default, then per person. */
+function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
+  const [kn, setKn] = useState<KnAdmin | null>(null);
+  const [ai, setAi] = useState<{ defaults: Record<string, boolean>; users: AiUser[] } | null>(null);
+  const [sel, setSel] = useState('all');
+  const [access, setAccess] = useState<Record<string, boolean>>({});
+  const [limits, setLimits] = useState<Partial<KnowledgeLimits>>({});
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [find, setFind] = useState('');
+  const load = useCallback(async () => {
+    try {
+      const [a, b] = await Promise.all([api<KnAdmin>('/admin/knowledge'), api<{ defaults: Record<string, boolean>; users: AiUser[] }>('/admin/ai')]);
+      setKn(a); setAi(b);
+    } catch (e) { guard(e); }
+  }, [guard]);
+  useEffect(() => { void load(); }, [load]);
+  const person = kn?.users.find((p) => p.id === sel) ?? null;
+  const aiPerson = ai?.users.find((p) => p.id === sel) ?? null;
+  useEffect(() => {
+    if (!kn || !ai) return;
+    const own = aiPerson?.aiAccess ?? {};
+    setAccess(Object.fromEntries(KN_SHOWN.filter((k) => (person ? k in own : true)).map((k) => [k, person ? own[k]! : defaultOn(ai.defaults, k)])));
+    setLimits(person ? { ...person.knowledgeLimits } : { ...kn.defaults });
+    setDirty(false);
+  }, [sel, kn, ai]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!kn || !ai) return null;
+  const defOn = (k: string) => defaultOn(ai.defaults, k);
+  const on = (k: string) => (k in access ? access[k]! : person ? defOn(k) : defaultOn({}, k));
+  const changed = (k: string) => !!person && k in access && access[k] !== defOn(k);
+  const setOn = (k: string, v: boolean) => { const next = { ...access }; if (person && v === defOn(k)) delete next[k]; else next[k] = v; setAccess(next); setDirty(true); setNote(null); };
+  const resetOn = (k: string) => { const next = { ...access }; delete next[k]; setAccess(next); setDirty(true); };
+  const limOf = (k: keyof KnowledgeLimits) => limits[k] ?? kn.defaults[k];
+  const limChanged = (k: keyof KnowledgeLimits) => !!person && limits[k] !== undefined && limits[k] !== kn.defaults[k];
+  const setLim = (k: keyof KnowledgeLimits, v: number) => { const next = { ...limits }; if (person && v === kn.defaults[k]) delete next[k]; else next[k] = v; setLimits(next); setDirty(true); setNote(null); };
+  const count = (p: KnAdminUser) => Object.keys(p.knowledgeLimits).length + KN_SHOWN.filter((k) => k in (ai.users.find((u) => u.id === p.id)?.aiAccess ?? {})).length;
+  const filesOn = on('kn:files');
+  const save = async () => {
+    setBusy(true); setNote(null);
+    try {
+      // AI options keep every switch together, so the Knowledge ones are saved alongside the rest unchanged.
+      if (person) {
+        const rest = Object.fromEntries(Object.entries(aiPerson?.aiAccess ?? {}).filter(([k]) => !KN_SHOWN.includes(k)));
+        await api(`/admin/ai/users/${person.id}`, { method: 'PUT', body: { access: { ...rest, ...access } } });
+        await api(`/admin/knowledge/users/${person.id}`, { method: 'PUT', body: { limits } });
+      } else {
+        await api('/admin/ai/default', { method: 'PUT', body: { access: { ...ai.defaults, ...access } } });
+        await api('/admin/knowledge/settings', { method: 'PUT', body: { limits } });
+      }
+      await load(); setNote({ ok: true, text: person ? `Saved for ${person.name || person.email}.` : 'Saved. Everyone without their own changes gets this within a minute.' });
+    } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
+  };
+  const item = (key: string) => AI_OPTION_GROUPS.find((g) => g.id === 'knowledge')!.items.find((i) => i.key === key)!;
+  const q = find.trim().toLowerCase();
+  const first = person ? (person.name || person.email).split(' ')[0] : '';
+  const total = person ? limOf('mbTotal') * 1024 * 1024 : 0;
+  const changedMark = (isChanged: boolean, reset: () => void) => isChanged ? <><span className="chg">Changed</span><button className="lnk" onClick={reset}>Reset</button></> : null;
+  return <>
+    <header className="kn-adm-head">
+      <div><h1>Knowledge</h1><p className="sub" style={{ fontSize: 15, maxWidth: 760 }}>Whether each person can give Niko their own files, where they may keep them, and how much. You never see what is in anyone’s files, only counts and sizes.</p></div>
+      <section className="g kn-db" aria-label="Knowledge database">
+        {kn.ready && kn.usage ? <>
+          <span className="kn-db-top"><span className="k">Knowledge database</span><span>{knSize(kn.usage.bytes)} of {knSize(KN_DB_FREE_BYTES)}</span></span>
+          <Meter value={kn.usage.bytes / KN_DB_FREE_BYTES} label="Knowledge database used" />
+          <span className="sub">Its own free Neon project, so it can never fill up accounts. {kn.usage.files.toLocaleString()} {kn.usage.files === 1 ? 'file' : 'files'} from {kn.usage.people} {kn.usage.people === 1 ? 'person' : 'people'}. Warns at 80%.</span>
+        </> : kn.ready ? <><span className="k">Knowledge database</span><span className="sub">Connected.</span></>
+          : <><span className="k">Knowledge database</span><span className="sub">Not set up yet, so Knowledge is off for everyone. Add <code>KNOWLEDGE_DATABASE_URL</code> as a Cloudflare build secret and deploy (docs/DEPLOYMENT.md, section 1a).</span></>}
+      </section>
+    </header>
+    {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
+    <div className="ai-grid">
+      <section className="g card ai-people" aria-label="Applies to">
+        <span className="k" style={{ padding: '0 6px' }}>Applies to</span>
+        <input className="in lim-find" type="search" aria-label="Find a person" placeholder="Find a person" value={find} onChange={(e) => setFind(e.target.value)} />
+        <div className="ai-list">
+          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default', tone: '' }, ...kn.users.filter((p) => !q || `${p.name} ${p.email}`.toLowerCase().includes(q)).map((p) => ({ id: p.id, name: p.name || p.email, sub: p.email, badge: p.role === 'admin' ? 'Admin' : count(p) ? `${count(p)} ${count(p) === 1 ? 'change' : 'changes'}` : 'Default', tone: p.role === 'admin' ? ' is-free' : count(p) ? ' is-chg' : '' }))].map((p) => (
+            <button key={p.id} className="who-row" aria-pressed={p.id === sel} onClick={() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; setSel(p.id); setNote(null); }}>
+              <span className="who-txt"><b>{p.name}</b><span>{p.sub}</span></span><span className={'lim-badge' + p.tone}>{p.badge}</span>
+            </button>
+          ))}
+        </div>
+        <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>New accounts and invites get the default.</p>
+      </section>
+      <section className="g card ai-options kn-opts" aria-label="Knowledge settings">
+        <div className="ai-head">
+          <div><h2>{person ? person.name || person.email : 'Everyone · default'}</h2>
+            <p className="sub" style={{ fontSize: 13 }}>{person ? (person.role === 'admin' ? 'Admins always have every option; these apply if they are made a member.' : count(person) ? 'Different from the default where marked. Everything else follows the default.' : `Follows the default. Change anything to change it for ${first} only.`) : 'What every account gets, unless it is changed for that person.'}</p></div>
+          <div className="ai-acts">
+            {person && <button className="bt" onClick={() => { setAccess({}); setLimits({}); setDirty(true); }} disabled={!count(person) && !dirty}>Reset to default</button>}
+            <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+        {person && <div className="kn-useline">
+          <span className="kn-useline-l"><span>{first} uses {knSize(person.used.bytes)} of {limOf('mbTotal')} MB · {person.used.files.toLocaleString()} of {limOf('files').toLocaleString()} files</span><Meter value={total ? person.used.bytes / total : 0} label={`Space ${first} uses`} /></span>
+          <span className="sub">Kept in Niko’s Knowledge database. You see sizes and counts only.</span>
+        </div>}
+        {KN_GROUPS.map(([title, keys]) => <div key={title} className="kn-group">
+          <span className="k kn-group-h">{title}</span>
+          {keys.map((k) => {
+            const it = item(k), gated = k !== 'kn:files' && !filesOn;
+            return <div key={k} className={'kn-krow' + (gated ? ' dim' : '')}>
+              <span className="kn-krow-t"><b>{it.name}</b><span className="sub">{changed(k) ? `Default is ${defOn(k) ? 'on' : 'off'}` : it.sub}</span></span>
+              <span className="kn-krow-m">{changedMark(changed(k), () => resetOn(k))}</span>
+              <span className="kn-krow-c"><Switch on={on(k)} onChange={(v) => setOn(k, v)} label={it.name} disabled={gated} /></span>
+            </div>;
+          })}
+        </div>)}
+        <div className="kn-group">
+          <span className="k kn-group-h">How much each person keeps</span>
+          {KN_LIMIT_ROWS.map(([k, name, sub, steps, label]) => (
+            <div key={k} className={'kn-krow' + (filesOn ? '' : ' dim')}>
+              <span className="kn-krow-t"><b>{name}</b><span className="sub">{limChanged(k) ? `Default is ${label(kn.defaults[k])}` : sub}</span></span>
+              <span className="kn-krow-m">{changedMark(limChanged(k), () => setLim(k, kn.defaults[k]))}</span>
+              <span className="kn-krow-c"><select className="in kn-sel" aria-label={name} value={limOf(k)} onChange={(e) => setLim(k, Number(e.target.value))} disabled={!filesOn}>
+                {steps.map((n) => <option key={n} value={n}>{label(n)}</option>)}
+              </select></span>
+            </div>
+          ))}
+        </div>
+        <p className="sub kn-foot">Knowledge files start off: people get them only when you turn them on, for everyone or for them. Lowering a limit never deletes anything; it only stops more files being added. Answering Telegram from Knowledge is each person’s own Settings switch. People see these as part of their plan, with no mention of an admin. Every change is written to the audit log.</p>
       </section>
     </div>
   </>;
@@ -1900,7 +2038,7 @@ function AuditTab({ guard, person, onPerson }: { guard: (e: unknown) => void; pe
 }
 
 function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?: { name: string; email: string } | null }) {
-  const [tab, setTab] = useState<'users' | 'payments' | 'designs' | 'backgrounds' | 'ai' | 'keys' | 'glance' | 'limits' | 'security' | 'audit'>('users');
+  const [tab, setTab] = useState<'users' | 'payments' | 'designs' | 'backgrounds' | 'ai' | 'keys' | 'glance' | 'limits' | 'knowledge' | 'security' | 'audit'>('users');
   const [me, setMe] = useState<{ name: string; email: string } | null>(initialMe ?? null);
   const [auditFor, setAuditFor] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -1928,6 +2066,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
           <button className="nv" aria-current={tab === 'keys' ? 'page' : undefined} onClick={() => setTab('keys')}>Included keys</button>
           <button className="nv" aria-current={tab === 'glance' ? 'page' : undefined} onClick={() => setTab('glance')}>New items</button>
           <button className="nv" aria-current={tab === 'limits' ? 'page' : undefined} onClick={() => setTab('limits')}>Limits</button>
+          <button className="nv" aria-current={tab === 'knowledge' ? 'page' : undefined} onClick={() => setTab('knowledge')}>Knowledge</button>
           <button className="nv" aria-current={tab === 'security' ? 'page' : undefined} onClick={() => setTab('security')}>Security</button>
           <button className="nv" aria-current={tab === 'audit' ? 'page' : undefined} onClick={() => { setAuditFor(null); setTab('audit'); }}>Audit log</button>
         </nav>
@@ -1935,7 +2074,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
       </aside>
       <main key={tab} className="hud-in">
         {tab === 'users' ? <PeopleTab onSignedOut={onSignedOut} onOpenPayments={() => setTab('payments')} onAudit={(id) => { setAuditFor(id); setTab('audit'); }} />
- : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'designs' ? <DesignsAdmin guard={guard} /> : tab === 'backgrounds' ? <BackgroundsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'keys' ? <KeysLibrary guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'security' ? <>
+ : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'designs' ? <DesignsAdmin guard={guard} /> : tab === 'backgrounds' ? <BackgroundsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'keys' ? <KeysLibrary guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'knowledge' ? <KnowledgeAdmin guard={guard} /> : tab === 'security' ? <>
           <header><h1>Security</h1><p className="sub" style={{ fontSize: 15 }}>Your own admin sign-in: authenticator app and recovery codes.</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
           <div className="two">

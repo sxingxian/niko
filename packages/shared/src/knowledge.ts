@@ -21,10 +21,14 @@ export const KN_PIECES_PER_CALL = 48;      // pieces sent to the server in one r
 export const KN_SHEET_MAX_ROWS = 20_000;   // rows kept from one sheet
 export const KN_SHEET_MAX_COLS = 60;
 export const KN_SHEET_CELL_CHARS = 500;
+export const KN_SHEET_ROWS_PER_CALL = 1000; // rows sent to the server in one request
 export const KN_SHEET_ROW_PIECES_MAX = 2000; // sheets up to this many rows also get one searchable piece per row
 export const KN_DEVICE_DIMS = 384;         // search numbers made on the device
 export const KN_CLOUDFLARE_DIMS = 1024;    // search numbers made by Cloudflare (bge-m3)
 export const KN_READ_MAX_BYTES = 10 * 1024 * 1024; // the largest file Cloudflare reading takes
+/** Storage in one Neon Free plan project (1 GB since October 2026; https://neon.com/faqs/free-plan-limits-and-quotas).
+ *  Knowledge has its own project, so this is what the admin's database bar measures against. */
+export const KN_DB_FREE_BYTES = 1024 ** 3;
 
 /** How much each account may keep. The admin sets a default and can change it per person. */
 export interface KnowledgeLimits { files: number; mbPerFile: number; mbTotal: number }
@@ -52,9 +56,12 @@ export function cleanKnowledgeSettings(v: unknown): KnowledgeSettings {
 }
 
 /** Each person's own Knowledge choices (Settings · Knowledge). */
+export type KnMode = 'files' | 'only' | 'off';
 export interface KnowledgePrefs {
-  /** files: files first when Niko is sure · only: only when asked "from my files" · off: don't use files. */
-  mode: 'files' | 'only' | 'off';
+  /** How Niko answers from each collection. files: files first when Niko is sure · only: only when asked "from my
+   *  files" · off: don't use it. A collection without its own choice uses `mode`. */
+  mode: KnMode;
+  modes: Record<string, KnMode>;
   /** Where new files are kept. */
   place: 'niko' | 'device';
   /** Who reads PDF and Word files, and who makes search numbers. */
@@ -62,16 +69,24 @@ export interface KnowledgePrefs {
   search: 'cloudflare' | 'device';
   /** Telegram replies can use Knowledge. */
   telegram: boolean;
+  /** Reply drafts can use Knowledge (off keeps drafts quick: they read only the message). */
+  drafts: boolean;
 }
-export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true };
+export const KN_PREF_DEFAULTS: KnowledgePrefs = { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false };
+const isMode = (v: unknown): v is KnMode => v === 'files' || v === 'only' || v === 'off';
+/** How Niko answers from one collection. */
+export const knModeOf = (p: KnowledgePrefs, collection: string): KnMode => p.modes[collection] ?? p.mode;
 export function cleanKnowledgePrefs(v: unknown): KnowledgePrefs {
   const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>, d = KN_PREF_DEFAULTS;
+  const modes: Record<string, KnMode> = {};
+  if (o.modes && typeof o.modes === 'object') for (const [k, v] of Object.entries(o.modes as Record<string, unknown>).slice(0, 100)) if (isMode(v) && k.trim() && k.length <= 80) modes[k.trim()] = v;
   return {
-    mode: o.mode === 'only' || o.mode === 'off' ? o.mode : d.mode,
+    mode: isMode(o.mode) ? o.mode : d.mode, modes,
     place: o.place === 'device' ? 'device' : d.place,
     read: o.read === 'device' ? 'device' : d.read,
     search: o.search === 'device' ? 'device' : d.search,
     telegram: typeof o.telegram === 'boolean' ? o.telegram : d.telegram,
+    drafts: typeof o.drafts === 'boolean' ? o.drafts : d.drafts,
   };
 }
 
@@ -82,3 +97,9 @@ export function knowledgeAccess(allowed: (key: string) => boolean): KnowledgeAcc
   return { files, niko: files && allowed('kn:place:niko'), device: files && allowed('kn:place:device'),
     cloudflareRead: files && allowed('kn:cf-read'), cloudflareSearch: files && allowed('kn:cf-search'), learning: allowed('kn:learning') };
 }
+
+/** What a sheet column holds, so counts and totals come out right. */
+export type KnColType = 'text' | 'number' | 'date' | 'yesno';
+export const KN_COL_TYPES: KnColType[] = ['text', 'number', 'date', 'yesno'];
+export const KN_COL_TYPE_NAMES: Record<KnColType, string> = { text: 'Text', number: 'Number', date: 'Date', yesno: 'Yes / no' };
+export interface KnColumn { name: string; type: KnColType }

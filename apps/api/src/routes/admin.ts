@@ -7,7 +7,7 @@ import { isMode, keysFor, modeStatus, stripe, StripeError, stripeReady } from '.
 import { forgetGlanceDefaults, GLANCE_DEFAULT_KEY, glanceDefaults } from '../glance';
 import { accountDefaults, ACCOUNT_LIMITS_KEY, forgetAccountDefaults } from '../limits';
 import { AI_DEFAULT_KEY, aiDefaults, forgetAiDefaults } from '../access';
-import { KN_SETTINGS_KEY, knowledgeDb, knowledgeSettings } from '../knowledge';
+import { databaseUsage, KN_SETTINGS_KEY, knowledgeDb, knowledgeSettings } from '../knowledge';
 import type { AppEnv } from '../env';
 import { hashRecoveryCode, makeRecoveryCodes, newTotpSecret, randomToken, seal, sha256, totpStep, totpUri, unseal } from '../lib/crypto';
 import { verifyPassword } from '../lib/password';
@@ -539,9 +539,10 @@ admin.put('/glance/users/:id', requireAdmin, async (c) => {
 admin.get('/knowledge', requireAdmin, async (c) => {
   const db = c.get('db');
   const list = await db.select({ id: users.id, name: users.name, email: users.email, role: users.role, status: users.status, knowledgeLimits: users.knowledgeLimits }).from(users).orderBy(users.createdAt);
-  const settings = await knowledgeSettings(db);
-  return c.json({ ready: !!knowledgeDb(c.env), split: settings.split, defaults: knowledgeLimits(settings.limits, {}),
-    users: list.map((u) => ({ ...u, knowledgeLimits: cleanKnowledgeLimits(u.knowledgeLimits) })) });
+  const settings = await knowledgeSettings(db), k = knowledgeDb(c.env);
+  const usage = k ? await databaseUsage(k).catch(() => null) : null;
+  return c.json({ ready: !!k, usage: usage ? { bytes: usage.bytes, files: usage.files, people: usage.people } : null, split: settings.split, defaults: knowledgeLimits(settings.limits, {}),
+    users: list.map((u) => ({ ...u, knowledgeLimits: cleanKnowledgeLimits(u.knowledgeLimits), used: usage?.accounts[u.id] ?? { files: 0, bytes: 0 } })) });
 });
 admin.put('/knowledge/settings', requireAdmin, async (c) => {
   const b = await c.req.json<{ split?: unknown; limits?: unknown }>().catch(() => ({} as { split?: unknown; limits?: unknown }));

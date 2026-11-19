@@ -11,8 +11,8 @@ import { appSettings, type Db } from '@niko/db';
 import {
   cleanKnowledgeLimits, cleanKnowledgeSettings, knowledgeLimits, knKindOf, knNeedsCloudflare,
   KN_CLOUDFLARE_DIMS, KN_DEVICE_DIMS, KN_PIECE_CHARS, KN_PIECES_PER_CALL, KN_READ_MAX_BYTES,
-  KN_SHEET_CELL_CHARS, KN_SHEET_MAX_COLS, KN_SHEET_MAX_ROWS,
-  type KnKind, type KnowledgeLimits, type KnowledgeSettings,
+  KN_COL_TYPES, KN_SHEET_CELL_CHARS, KN_SHEET_MAX_COLS, KN_SHEET_MAX_ROWS, KN_SHEET_ROWS_PER_CALL,
+  type KnColType, type KnColumn, type KnKind, type KnowledgeLimits, type KnowledgeSettings,
 } from '@niko/shared';
 import type { Env } from './env';
 
@@ -86,7 +86,7 @@ export async function readWithCloudflare(env: Pick<Env, 'AI'>, name: string, byt
 }
 
 // ---------------------------------------------------------------- files
-export interface KnFile { id: string; name: string; kind: KnKind; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; addedAt: string }
+export interface KnFile { id: string; name: string; kind: KnKind; collection: string; bytes: number; status: 'reading' | 'ready' | 'failed'; error: string | null; pieces: number; flagged: boolean; sheets: number; rows: number; columns: number; addedAt: string }
 const cleanText = (v: unknown, n: number) => (typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, n) : '');
 const cleanName = (v: unknown) => cleanText(v, 255).replace(/[\\/]/g, '-');
 
@@ -96,7 +96,7 @@ export async function usage(k: Kdb, account: string): Promise<{ files: number; b
 }
 
 /** Starts a file: checks it fits the account's limits and isn't already there, and keeps a row while it is read. */
-export async function startFile(k: Kdb, account: string, limits: KnowledgeLimits, meta: { name?: unknown; bytes?: unknown; sha256?: unknown; collection?: unknown }): Promise<{ id: string }> {
+export async function startFile(k: Kdb, account: string, limits: KnowledgeLimits, meta: { name?: unknown; bytes?: unknown; sha256?: unknown; collection?: unknown; flagged?: unknown }): Promise<{ id: string }> {
   const name = cleanName(meta.name), kind = knKindOf(name);
   if (!name || !kind) throw new KnError('Knowledge takes MD, TXT, CSV, TSV, JSON, XML, HTML, PDF, Word (DOCX), Excel (XLSX, XLS) and OpenDocument files.');
   const bytes = typeof meta.bytes === 'number' && Number.isInteger(meta.bytes) && meta.bytes >= 0 ? meta.bytes : -1;
@@ -113,8 +113,8 @@ export async function startFile(k: Kdb, account: string, limits: KnowledgeLimits
   if (used.files >= limits.files) throw new KnError(`You can keep up to ${limits.files} files. Remove one to add another.`, 413);
   if (used.bytes + bytes > limits.mbTotal * MB) throw new KnError(`Your files can take up to ${limits.mbTotal} MB in all. Remove some to add this one.`, 413);
   const [row] = await k.q<{ id: string }>(
-    `insert into kn_documents (account_id, collection, name, kind, bytes, sha256, status) values ($1, $2, $3, $4, $5, $6, 'reading') returning id`,
-    [account, collection, name, kind, bytes, sha256]);
+    `insert into kn_documents (account_id, collection, name, kind, bytes, sha256, status, flagged) values ($1, $2, $3, $4, $5, $6, 'reading', $7) returning id`,
+    [account, collection, name, kind, bytes, sha256, meta.flagged === true]);
   return { id: row!.id };
 }
 
@@ -143,7 +143,8 @@ export async function addPieces(k: Kdb, env: Pick<Env, 'AI'>, account: string, i
   let cf: (string | null)[] = pieces.map(() => null), dev: (string | null)[] = pieces.map(() => null);
   if (how.cloudflare) {
     cf = (await embed(env, pieces.map((p) => (p.heading ? `${p.heading}\n${p.body}` : p.body)))).map(vecText);
-  } else {
+  } else if (b.vectors !== undefined) {
+    // Search numbers made on the device. Without any, the pieces are found by their words only.
     const vs = Array.isArray(b.vectors) ? b.vectors : [];
     if (vs.length !== pieces.length) throw new KnError('Each piece needs its search numbers from this device.');
     dev = vs.map((v) => vecText(checkVector(v, KN_DEVICE_DIMS)));
@@ -157,26 +158,103 @@ export async function addPieces(k: Kdb, env: Pick<Env, 'AI'>, account: string, i
   return { added: pieces.length };
 }
 
-/** Keeps a spreadsheet's rows as a table, for the look-up tool. */
-export async function addSheet(k: Kdb, account: string, id: string, b: { name?: unknown; columns?: unknown; rows?: unknown }): Promise<{ id: string; rows: number }> {
+/** Keeps a spreadsheet's rows as a table, for the look-up tool. The first KN_SHEET_ROWS_PER_CALL rows come with it;
+ *  the rest follow with addSheetRows. */
+export async function addSheet(k: Kdb, account: string, id: string, b: { name?: unknown; columns?: unknown; rows?: unknown; header?: unknown }): Promise<{ id: string; rows: number }> {
   const doc = await readingFile(k, account, id);
   if (!['csv', 'tsv', 'xlsx', 'xls', 'ods'].includes(doc.kind)) throw new KnError('Only spreadsheets and CSV or TSV files have sheets.');
-  const columns = (Array.isArray(b.columns) ? b.columns : []).map((c) => cleanText(c, 120));
-  if (!columns.length || columns.length > KN_SHEET_MAX_COLS) throw new KnError(`A sheet needs between 1 and ${KN_SHEET_MAX_COLS} columns.`);
-  const rows = (Array.isArray(b.rows) ? b.rows : []);
-  if (rows.length > KN_SHEET_MAX_ROWS) throw new KnError(`A sheet can keep up to ${KN_SHEET_MAX_ROWS.toLocaleString('en')} rows.`, 413);
-  const cells = rows.map((r) => {
-    if (!Array.isArray(r)) throw new KnError('Each row must be a list of cells.');
-    return JSON.stringify(columns.map((_, i) => cleanText(typeof r[i] === 'number' ? String(r[i]) : r[i], KN_SHEET_CELL_CHARS)));
-  });
-  const [sh] = await k.q<{ id: string }>(`insert into kn_sheets (account_id, document_id, name, columns, row_count) values ($1, $2, $3, $4::jsonb, $5) returning id`,
-    [account, id, cleanText(b.name, 120) || 'Sheet', JSON.stringify(columns), cells.length]);
-  for (let i = 0; i < cells.length; i += 1000) {
-    const part = cells.slice(i, i + 1000);
-    await k.q(`insert into kn_sheet_rows (sheet_id, ord, cells) select $1, t.o, t.c::jsonb from unnest($2::int[], $3::text[]) as t(o, c)`,
-      [sh!.id, part.map((_, j) => i + j), part]);
-  }
+  const columns = cleanColumns(b.columns);
+  const cells = rowCells(b.rows, columns.length);
+  const [sh] = await k.q<{ id: string }>(`insert into kn_sheets (account_id, document_id, name, columns, row_count, header) values ($1, $2, $3, $4::jsonb, $5, $6) returning id`,
+    [account, id, cleanText(b.name, 120) || 'Sheet', JSON.stringify(columns), cells.length, b.header !== false]);
+  if (cells.length) await k.q(`insert into kn_sheet_rows (sheet_id, ord, cells) select $1, t.o, t.c::jsonb from unnest($2::int[], $3::text[]) as t(o, c)`,
+    [sh!.id, cells.map((_, j) => j), cells]);
   return { id: sh!.id, rows: cells.length };
+}
+function rowCells(v: unknown, width: number): string[] {
+  const rows = Array.isArray(v) ? v : [];
+  if (rows.length > KN_SHEET_ROWS_PER_CALL) throw new KnError(`Send up to ${KN_SHEET_ROWS_PER_CALL} rows at a time.`, 413);
+  return rows.map((r) => {
+    if (!Array.isArray(r)) throw new KnError('Each row must be a list of cells.');
+    return JSON.stringify(Array.from({ length: width }, (_, i) => cleanText(typeof r[i] === 'number' ? String(r[i]) : r[i], KN_SHEET_CELL_CHARS)));
+  });
+}
+/** More rows for a sheet, numbered from `start`, while its file is still being added. */
+export async function addSheetRows(k: Kdb, account: string, fileId: string, sheetId: string, b: { start?: unknown; rows?: unknown }): Promise<{ rows: number }> {
+  await readingFile(k, account, fileId);
+  if (!/^[0-9a-f-]{36}$/.test(sheetId)) throw new KnError('No such sheet.', 404);
+  const [sh] = await k.q<{ columns: unknown[] }>(`select columns from kn_sheets where id = $1 and document_id = $2 and account_id = $3`, [sheetId, fileId, account]);
+  if (!sh) throw new KnError('No such sheet.', 404);
+  const start = typeof b.start === 'number' && Number.isInteger(b.start) && b.start >= 0 ? b.start : -1;
+  if (start < 0) throw new KnError('Where these rows start is missing.');
+  const cells = rowCells(b.rows, sh.columns.length);
+  if (start + cells.length > KN_SHEET_MAX_ROWS) throw new KnError(`A sheet can keep up to ${KN_SHEET_MAX_ROWS.toLocaleString('en')} rows.`, 413);
+  if (cells.length) await k.q(`insert into kn_sheet_rows (sheet_id, ord, cells) select $1, t.o, t.c::jsonb from unnest($2::int[], $3::text[]) as t(o, c) on conflict (sheet_id, ord) do nothing`,
+    [sheetId, cells.map((_, j) => start + j), cells]);
+  const [n] = await k.q<{ n: number }>(`update kn_sheets set row_count = (select count(*) from kn_sheet_rows where sheet_id = $1) where id = $1 returning row_count as n`, [sheetId]);
+  return { rows: n?.n ?? 0 };
+}
+
+/** Column names and what each holds. A plain name is text. Names are made unique and never empty. */
+function cleanColumns(v: unknown): KnColumn[] {
+  const raw = Array.isArray(v) ? v : [];
+  if (!raw.length || raw.length > KN_SHEET_MAX_COLS) throw new KnError(`A sheet needs between 1 and ${KN_SHEET_MAX_COLS} columns.`);
+  const seen = new Set<string>();
+  return raw.map((c, i) => {
+    const o = (typeof c === 'string' ? { name: c } : c && typeof c === 'object' ? c : {}) as { name?: unknown; type?: unknown };
+    let name = cleanText(o.name, 120) || `Column ${i + 1}`;
+    for (let n = 2; seen.has(name.toLowerCase()); n++) name = `${cleanText(o.name, 110) || 'Column'} (${n})`;
+    seen.add(name.toLowerCase());
+    return { name, type: (KN_COL_TYPES as string[]).includes(o.type as string) ? (o.type as KnColType) : 'text' };
+  });
+}
+
+export interface KnSheet { id: string; name: string; columns: KnColumn[]; rows: number; header: boolean; example: string[] }
+export async function listSheets(k: Kdb, account: string, fileId: string): Promise<KnSheet[]> {
+  if (!/^[0-9a-f-]{36}$/.test(fileId)) throw new KnError('No such file.', 404);
+  const rows = await k.q<{ id: string; name: string; columns: unknown; row_count: number; header: boolean; cells: string[] | null }>(
+    `select s.id, s.name, s.columns, s.row_count, s.header, r.cells from kn_sheets s left join kn_sheet_rows r on r.sheet_id = s.id and r.ord = 0
+     where s.document_id = $1 and s.account_id = $2 order by s.name`, [fileId, account]);
+  if (!rows.length) {
+    const [doc] = await k.q(`select id from kn_documents where id = $1 and account_id = $2`, [fileId, account]);
+    if (!doc) throw new KnError('No such file.', 404);
+  }
+  return rows.map((r) => ({ id: r.id, name: r.name, columns: cleanColumns(r.columns), rows: r.row_count, header: r.header, example: Array.isArray(r.cells) ? r.cells.map(String) : [] }));
+}
+
+/** Fixes a sheet's columns after it was added: names, what each holds, and whether the first row is the header.
+ *  Turning the header on makes the first row the names; turning it off puts the names back as the first row. */
+export async function updateSheet(k: Kdb, account: string, fileId: string, sheetId: string, b: { columns?: unknown; header?: unknown }): Promise<KnSheet> {
+  const sheets = await listSheets(k, account, fileId);
+  const sh = sheets.find((s) => s.id === sheetId);
+  if (!sh) throw new KnError('No such sheet.', 404);
+  let columns = cleanColumns(b.columns ?? sh.columns);
+  if (columns.length !== sh.columns.length) throw new KnError('Keep the same number of columns.');
+  let rowCount = sh.rows;
+  const header = typeof b.header === 'boolean' && b.header !== sh.header ? b.header : null;
+  if (header === true && sh.rows > 0) {
+    // The first row becomes the names (keeping the types chosen), and the rows move up by one.
+    columns = cleanColumns(sh.example.map((name, i) => ({ name, type: columns[i]!.type })));
+    await k.q(`delete from kn_sheet_rows where sheet_id = $1 and ord = 0`, [sheetId]);
+    await k.q(`update kn_sheet_rows set ord = ord + 1000000 where sheet_id = $1`, [sheetId]);
+    await k.q(`update kn_sheet_rows set ord = ord - 1000001 where sheet_id = $1`, [sheetId]);
+    rowCount--;
+  } else if (header === false) {
+    // The names go back in as the first row, and the columns are numbered.
+    await k.q(`update kn_sheet_rows set ord = ord + 1000001 where sheet_id = $1`, [sheetId]);
+    await k.q(`update kn_sheet_rows set ord = ord - 1000000 where sheet_id = $1`, [sheetId]);
+    await k.q(`insert into kn_sheet_rows (sheet_id, ord, cells) values ($1, 0, $2::jsonb)`, [sheetId, JSON.stringify(columns.map((c) => c.name))]);
+    columns = columns.map((c, i) => ({ name: `Column ${i + 1}`, type: c.type }));
+    rowCount++;
+  }
+  await k.q(`update kn_sheets set columns = $3::jsonb, row_count = $4, header = $5 where id = $1 and account_id = $2`, [sheetId, account, JSON.stringify(columns), rowCount, header ?? sh.header]);
+  return (await listSheets(k, account, fileId)).find((s) => s.id === sheetId)!;
+}
+
+/** Keeps a flagged file as data: the person has seen the warning. */
+export async function keepAsData(k: Kdb, account: string, id: string): Promise<boolean> {
+  if (!/^[0-9a-f-]{36}$/.test(id)) return false;
+  return (await k.q(`update kn_documents set flagged = false where id = $1 and account_id = $2 returning id`, [id, account])).length > 0;
 }
 
 export async function finishFile(k: Kdb, account: string, id: string): Promise<{ pieces: number }> {
@@ -189,9 +267,13 @@ export async function finishFile(k: Kdb, account: string, id: string): Promise<{
 }
 
 export async function listFiles(k: Kdb, account: string): Promise<KnFile[]> {
-  const rows = await k.q<{ id: string; name: string; kind: KnKind; collection: string; bytes: number; status: KnFile['status']; error: string | null; chunk_count: number; created_at: string | Date }>(
-    `select id, name, kind, collection, bytes, status, error, chunk_count, created_at from kn_documents where account_id = $1 order by created_at desc limit 1000`, [account]);
-  return rows.map((r) => ({ id: r.id, name: r.name, kind: r.kind, collection: r.collection, bytes: r.bytes, status: r.status, error: r.error, pieces: r.chunk_count, addedAt: new Date(r.created_at).toISOString() }));
+  const rows = await k.q<{ id: string; name: string; kind: KnKind; collection: string; bytes: number; status: KnFile['status']; error: string | null; chunk_count: number; flagged: boolean; sheets: number; rows: string; columns: number; created_at: string | Date }>(
+    `select d.id, d.name, d.kind, d.collection, d.bytes, d.status, d.error, d.chunk_count, d.flagged, d.created_at,
+            (select count(*)::int from kn_sheets s where s.document_id = d.id) as sheets,
+            (select coalesce(sum(s.row_count), 0)::bigint from kn_sheets s where s.document_id = d.id) as rows,
+            (select coalesce(max(jsonb_array_length(s.columns)), 0)::int from kn_sheets s where s.document_id = d.id) as columns
+     from kn_documents d where d.account_id = $1 order by d.created_at desc limit 1000`, [account]);
+  return rows.map((r) => ({ id: r.id, name: r.name, kind: r.kind, collection: r.collection, bytes: r.bytes, status: r.status, error: r.error, pieces: r.chunk_count, flagged: r.flagged, sheets: r.sheets, rows: Number(r.rows), columns: r.columns, addedAt: new Date(r.created_at).toISOString() }));
 }
 
 export async function deleteFile(k: Kdb, account: string, id: string): Promise<boolean> {
@@ -236,4 +318,12 @@ export async function search(k: Kdb, env: Pick<Env, 'AI'>, account: string, quer
      order by score desc, c.id limit ${limit}`,
     vec ? [account, q, vec] : [account, q]);
   return rows.map((r) => ({ id: Number(r.id), fileId: r.document_id, file: r.name, collection: r.collection, heading: r.heading, text: r.body, piece: r.ord, similarity: r.sim == null ? 0 : Math.max(0, Math.min(1, Number(r.sim))), score: Number(r.score) }));
+}
+
+/** Size of the Knowledge database and how many files and people it holds, for the admin. Never what is in them. */
+export async function databaseUsage(k: Kdb): Promise<{ bytes: number; files: number; people: number; accounts: Record<string, { files: number; bytes: number }> }> {
+  const [r] = await k.q<{ bytes: string; files: number; people: number }>(
+    `select pg_database_size(current_database())::bigint as bytes, count(*)::int as files, count(distinct account_id)::int as people from kn_documents`);
+  const per = await k.q<{ account_id: string; files: number; bytes: string }>(`select account_id, count(*)::int as files, coalesce(sum(bytes), 0)::bigint as bytes from kn_documents group by account_id`);
+  return { bytes: Number(r?.bytes ?? 0), files: r?.files ?? 0, people: r?.people ?? 0, accounts: Object.fromEntries(per.map((x) => [x.account_id, { files: x.files, bytes: Number(x.bytes) }])) };
 }
