@@ -33,6 +33,9 @@ export interface Remote {
   readSheet(id: string): Promise<string[][]>;
   /** Moves the copy to the bin there (recoverable in Notion, Drive and OneDrive). */
   trash(id: string, kind: 'doc' | 'sheet'): Promise<void>;
+  /** Documents with exactly this title already in Niko's folder or page there, newest first, so one Niko wrote before
+   *  (and lost track of) is used again instead of a second one. */
+  findDocs?(root: string, title: string): Promise<{ id: string; url: string | null }[]>;
 }
 
 export const ROOT_NAME = 'Niko Knowledge';
@@ -187,6 +190,18 @@ function notion(token: string): Remote {
     async trash(id, kind) {
       await req(kind === 'doc' ? `/pages/${id}` : `/databases/${id}`, { method: 'PATCH', json: { archived: true } });
     },
+    async findDocs(root, name) {
+      const found: { id: string; url: string | null; at: string }[] = [];
+      let cursor: string | undefined;
+      for (let n = 0; n < 3; n++) {
+        const j = await json<{ results?: { id: string; type?: string; child_page?: { title?: string }; last_edited_time?: string; archived?: boolean; in_trash?: boolean }[]; has_more?: boolean; next_cursor?: string }>(
+          await req(`/blocks/${root}/children?page_size=100${cursor ? `&start_cursor=${encodeURIComponent(cursor)}` : ''}`));
+        for (const b of j.results ?? []) if (b.type === 'child_page' && !b.archived && !b.in_trash && b.child_page?.title === name) found.push({ id: b.id, url: `https://www.notion.so/${b.id.replace(/-/g, '')}`, at: b.last_edited_time ?? '' });
+        if (!j.has_more || !j.next_cursor) break;
+        cursor = j.next_cursor;
+      }
+      return found.sort((a, b) => b.at.localeCompare(a.at)).map(({ id, url }) => ({ id, url }));
+    },
   };
 }
 /** Pages Niko can see in their Notion (the ones they shared when connecting), to pick where copies go. */
@@ -250,6 +265,12 @@ function gdrive(token: string): Remote {
     async readDoc(id) { return exportAs(id, 'text/markdown').catch(() => exportAs(id, 'text/plain')); },
     async readSheet(id) { return parseDelimited(await exportAs(id, 'text/csv'), ','); },
     async trash(id) { await call('gdrive', `${DRIVE}/files/${id}`, token, { method: 'PATCH', json: { trashed: true } }); },
+    async findDocs(root, title) {
+      // Niko can only see the files it made (narrow access), so only its own documents come back.
+      const q = `name = '${title.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}' and '${root.replace(/'/g, '')}' in parents and trashed = false and mimeType = '${G_DOC}'`;
+      const j = await json<{ files?: { id: string; webViewLink?: string }[] }>(await call('gdrive', `${DRIVE}/files?q=${encodeURIComponent(q)}&orderBy=modifiedTime desc&pageSize=10&fields=files(id,webViewLink)`, token));
+      return (j.files ?? []).map((f) => ({ id: f.id, url: f.webViewLink ?? null }));
+    },
   };
 }
 
@@ -307,6 +328,19 @@ function onedrive(token: string): Remote {
     readDoc: content,
     async readSheet(id) { return parseDelimited(await content(id), ','); },
     async trash(id) { await call('onedrive', `${GRAPH}/items/${encodeURIComponent(id)}`, token, { method: 'DELETE' }); },
+    // The same file is written over, so its name stays (a new file each time drifted to "… 1.md").
+    async replaceDoc(id, title, markdown) {
+      const bytes = new TextEncoder().encode(markdown);
+      if (bytes.length > 4 * MB) throw new PlaceError('Too big to write over; written as a new file.', 413);
+      const f = await json<{ id: string; webUrl?: string; cTag?: string }>(await call('onedrive', `${GRAPH}/items/${encodeURIComponent(id)}/content`, token, { method: 'PUT', headers: { 'content-type': 'text/markdown' }, body: bytes }));
+      return { id: f.id, url: f.webUrl ?? null, version: f.cTag ?? null };
+    },
+    async findDocs(root, title) {
+      try {
+        const f = await json<{ id: string; webUrl?: string; deleted?: unknown }>(await call('onedrive', `${GRAPH}/items/${encodeURIComponent(root)}:/${encodeURIComponent(`${safeName(title)}.md`)}`, token));
+        return f.deleted ? [] : [{ id: f.id, url: f.webUrl ?? null }];
+      } catch (e) { if (e instanceof PlaceError && e.gone) return []; throw e; }
+    },
   };
 }
 
