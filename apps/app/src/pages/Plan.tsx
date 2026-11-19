@@ -6,6 +6,7 @@ import { api, Icon } from '@niko/ui';
 import { money, type AccessInfo, type Plan } from '@niko/shared';
 import { useNiko } from '../niko';
 import { Shell, TestNote } from './Auth';
+import { voiceForgetAll } from '../voiceMatch';
 
 const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '');
 const per = (p: Plan) => (p === 'monthly' ? '/ month' : '/ year');
@@ -65,7 +66,7 @@ export function PlanGate({ children }: { children: ReactNode }) {
   const ret = usePlanReturn(() => setDone(true), !!access && !access.has);
   useEffect(() => { if (access?.plans.length && !access.plans.some((p) => p.plan === pick)) setPick(access.plans[0]!.plan); }, [access]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!access || (access.has && !done)) return <>{children}</>;
-  const signOut = async () => { await api('/auth/sign-out', { method: 'POST' }).catch(() => undefined); await refreshMe(); };
+  const signOut = async () => { await api('/auth/sign-out', { method: 'POST' }).catch(() => undefined); await voiceForgetAll(); await refreshMe(); };
   if (done) {
     return (
       <><div className="bg" /><Shell tag="Good to have you." label="Subscribed">

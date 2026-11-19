@@ -124,6 +124,63 @@ export function captureUtterance(opts: { waitMs: number; maxMs?: number; strict?
   return { done, finish: () => stopNow(true), cancel: () => stopNow(false) };
 }
 
+/** Joins frames recorded at `rate` and brings them down to 16 kHz (averaging over each step, a simple low-pass). */
+export function to16k(chunks: Float32Array[], rate: number): Float32Array {
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const all = new Float32Array(total);
+  let o = 0;
+  for (const c of chunks) { all.set(c, o); o += c.length; }
+  const ratio = rate / RATE, n = Math.floor(total / ratio), out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(total, Math.floor((i + 1) * ratio));
+    let s = 0; for (let j = a; j < b; j++) s += all[j]!;
+    out[i] = s / Math.max(1, b - a);
+  }
+  return out;
+}
+/** The 16 kHz samples inside a WAV file made by captureUtterance. */
+export async function wavSamples(wav: Blob): Promise<Float32Array> {
+  const buf = await wav.arrayBuffer();
+  const pcm = new Int16Array(buf, 44, Math.floor((buf.byteLength - 44) / 2));
+  return Float32Array.from(pcm, (v) => v / 0x8000);
+}
+
+/** Keeps the last few seconds the microphone heard, at 16 kHz, so a request recognised by the browser's own speech
+ *  recognition (which gives words, not sound) can still be checked against the voiceprint. Nothing is recorded to
+ *  disk or sent; the buffer is overwritten as it goes. */
+export interface Ring { take(fromMs: number): Float32Array; stop(): void; ok: Promise<boolean> }
+export function startRing(seconds = 12): Ring {
+  let ctx: AudioContext | null = null, stream: MediaStream | null = null, stopped = false;
+  const size = seconds * RATE, buf = new Float32Array(size);
+  let at = 0, filled = 0;
+  try { ctx = new AudioContext(); void ctx.resume().catch(() => undefined); } catch { ctx = null; }
+  const ok = (async () => {
+    if (!ctx) return false;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+      if (stopped) { stream.getTracks().forEach((t) => t.stop()); return false; }
+      const src = ctx.createMediaStreamSource(stream), node = ctx.createScriptProcessor(4096, 1, 1), rate = ctx.sampleRate;
+      node.onaudioprocess = (ev) => {
+        const x = to16k([new Float32Array(ev.inputBuffer.getChannelData(0))], rate);
+        for (let i = 0; i < x.length; i++) { buf[at] = x[i]!; at = (at + 1) % size; }
+        filled = Math.min(size, filled + x.length);
+      };
+      src.connect(node); node.connect(ctx.destination);
+      return true;
+    } catch { return false; }
+  })();
+  return {
+    ok,
+    take(fromMs: number) {
+      const n = Math.min(filled, Math.max(0, Math.round(((performance.now() - fromMs) / 1000) * RATE)));
+      const out = new Float32Array(n);
+      for (let i = 0; i < n; i++) out[i] = buf[(at - n + i + size) % size]!;
+      return out;
+    },
+    stop() { stopped = true; stream?.getTracks().forEach((t) => t.stop()); void ctx?.close().catch(() => undefined); },
+  };
+}
+
 /** Joins the recorded frames, brings them down to 16 kHz, and wraps them as a 16-bit WAV file. */
 function toWav(chunks: Float32Array[], rate: number): Blob {
   const total = chunks.reduce((n, c) => n + c.length, 0);

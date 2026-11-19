@@ -18,6 +18,8 @@ import { MapSettings, type MapLists } from './MapSettings';
 import { ScreenLock } from './ScreenLock';
 import { AccountInfo, IncludedCard, MonthLine, UsageLines, useUsage } from './Usage';
 import { captureSupported, captureUtterance, transcribe, type Capture } from '../listen';
+import { voiceForgetAll } from '../voiceMatch';
+import { VoiceMatchSetting } from './VoiceMatch';
 
 function useMedia(q: string) {
   const [on, setOn] = useState(() => typeof window !== 'undefined' && window.matchMedia(q).matches);
@@ -37,7 +39,7 @@ export function SettingsLayout() {
   const { me, refreshMe } = useNiko();
   const nav = useNavigate();
   const { pathname } = useLocation();
-  const signOut = async () => { await api('/auth/sign-out', { method: 'POST' }); await refreshMe(); nav('/sign-in', { replace: true }); };
+  const signOut = async () => { await api('/auth/sign-out', { method: 'POST' }); await voiceForgetAll(); await refreshMe(); nav('/sign-in', { replace: true }); };
   // Each settings page opens at its top (the browser would otherwise keep the scroll of the page before), and on a
   // phone the section tabs slide so the open one is in view.
   const navRef = useRef<HTMLElement>(null);
@@ -1539,8 +1541,8 @@ export function Voice() {
           </>}
           <div className="eng-line"><span>Wake when I say “Niko”</span><Switch on={!!e.wake} onChange={(x) => set({ wake: x })} label="Wake when I say Niko" /></div>
           <div className="eng-line"><span>After Niko answers, keep listening for a few seconds so you can carry on talking</span><span className="k later">On</span></div>
-          {/* Shown only when this account is allowed it (off until the admin turns it on); the voice check itself comes in a later stage. */}
-          {aiAllowed(off, 'h:only-me') && <div className="eng-line"><span>Respond only to my voice <span className="k soon">Not available yet</span></span><Switch on={false} onChange={() => undefined} label="Respond only to my voice" disabled /></div>}
+          {/* Shown only when this account is allowed it (off until the admin turns it on). */}
+          {aiAllowed(off, 'h:only-me') && me && <VoiceMatchSetting account={me.id} on={!!e.onlyMyVoice} setOn={(x) => { set({ onlyMyVoice: x }); void api('/me', { method: 'PATCH', body: { engine: { onlyMyVoice: x } } }).then(refreshMe).catch(() => undefined); }} />}
           <p className="hint">Keys are encrypted on the server, never stored in this browser, and never shown again after saving. Recordings go to the service once and are never stored. Two keys from the same account share one allowance, so a backup helps most when it is from another account or service.</p>
         </section>
       </div>

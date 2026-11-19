@@ -19,7 +19,10 @@ export type HabitAsk = { id: string; habit: string; ask: string; device: boolean
 import { enterFullscreen, exitFullscreen, fullscreenSupported } from './fullscreen';
 import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag, takeStepsTag } from './speech';
 import { scrollScreen } from './scroll';
-import { captureSupported, captureUtterance, transcribe, type Capture } from './listen';
+import { captureSupported, captureUtterance, startRing, transcribe, wavSamples, type Capture, type Ring } from './listen';
+import { trimSilence } from './voiceFeatures';
+import { voiceCheck, voiceLearn, voiceSupported as voiceCheckSupported } from './voiceMatch';
+import { useVoiceHere } from './pages/VoiceMatch';
 import { chatWithTables, keepDeviceNotes, knowledgeAccount, knowledgeFor } from './knowledgeChat';
 import { declineHabitHere, forgetNoteHere, habitsHere, keepHabitHere, noticeHere, teachHere } from './knowledgeDevice';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
@@ -88,6 +91,17 @@ interface NikoState {
   /** The files an answer came from (Knowledge), for the answer it came with. */
   knowledge: { for: string; k: KnowledgeAnswer } | null;
   followUp: FollowUp | null;
+  /** "Respond only to my voice": a spoken request that didn't match was ignored; "That was me" asks it after all. */
+  voiceChip: boolean;
+  thatWasMe: () => void;
+  dismissVoiceChip: () => void;
+  /** The answer that came from a "That was me" (and whether it was added to the voiceprint). */
+  voiceNote: { for: string; learned: boolean } | null;
+  /** On for this account, but this device has no voiceprint yet (Niko answers anyone here until it's set up). */
+  voiceBanner: boolean;
+  /** For the top bar: "Only you", or "Not set up here"; null when the setting is off. */
+  voiceMode: 'you' | 'not-here' | null;
+  laterVoiceBanner: () => void;
   /** "That's the one" / "Not this one" for the similar piece Home shows. */
   teach: (answer: 'yes' | 'no') => void;
   /** Undoes what was just learned or taught. */
@@ -228,6 +242,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [reply, setReply] = useState<string | null>(null);
   const [weather, setWeather] = useState<{ for: string; card: WeatherCard } | null>(null);
   const [knowledge, setKnowledge] = useState<{ for: string; k: KnowledgeAnswer } | null>(null);
+  const [voiceChip, setVoiceChip] = useState(false);
+  const [voiceNote, setVoiceNote] = useState<{ for: string; learned: boolean } | null>(null);
+  const [bannerLater, setBannerLater] = useState(() => { try { return sessionStorage.getItem('niko.voice.later') === '1'; } catch { return false; } });
   const [nextStep, setNextStep] = useState<FollowUp | null>(null);
   const knowledgeRef = useRef(knowledge); knowledgeRef.current = knowledge;
   const followRef = useRef(nextStep); followRef.current = nextStep;
@@ -255,6 +272,15 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const speaking = useRef(false); // while Niko talks, what the mic hears is Niko itself, so it is ignored
   const followUp = useRef<number | undefined>(undefined);
   const startRecRef = useRef<() => void>(() => undefined);
+  // "Respond only to my voice" (on for the account, allowed, and set up on this device): each spoken request is checked
+  // against this device's voiceprint before it goes on to speech in and the AI.
+  const vmActive = useRef(false);
+  const ring = useRef<Ring | null>(null);     // the last few seconds heard, for requests the browser's recognition heard
+  const barge = useRef<Capture | null>(null); // listens for the owner's voice while Niko talks (only the owner can stop it)
+  const vmPending = useRef<{ embedding: number[] | null; run: () => void } | null>(null);
+  const vmNext = useRef<{ learned: boolean } | null>(null);
+  const vmTimer = useRef<number | undefined>(undefined);
+  const stopRef = useRef<() => void>(() => undefined);
   // Speech in through a service (Voice → Listening): one request is recorded and sent, instead of the device's own recognition.
   const capture = useRef<Capture | null>(null);
   const askRef = useRef<(t: string) => void>(() => undefined);
@@ -358,6 +384,17 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       if (capture.current !== cap) return;
       capture.current = null;
       if (!wav) { unmuteMic(); endListeningRef.current(); return; }
+      // Respond only to my voice: checked on this device first; only a match is sent to be turned into words.
+      const hear = async () => {
+        setMode('thinking'); setLabel('Hearing'); setLine('Turning that into words…');
+        try { const r = await transcribe(wav); if (r.text.trim()) askRef.current(r.text.trim()); else { setMode('idle'); setLabel('Didn’t catch that'); setLine('Say it again, or tap the mic.'); } }
+        catch (e) { setMode('idle'); setLabel('Problem'); setLine((e as Error).message); }
+      };
+      if (vmActive.current && !(await voicePass(trimSilence(await wavSamples(wav)), () => void hear()))) {
+        if (hearing.current !== mine) return;
+        unmuteMic(); stayedQuiet(); return;
+      }
+      if (hearing.current !== mine) return;
       setMode('thinking'); setLabel('Hearing'); setLine('Turning that into words…');
       try {
         const r = await transcribe(wav);
@@ -423,6 +460,70 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   /** How long Niko waits for someone to start talking, after a tap, its name, or an answer. */
   const listenWindow = () => { endFollowUp(); followUp.current = window.setTimeout(() => { followUp.current = undefined; endListeningRef.current(); }, FOLLOW_UP_MS); };
 
+  // ---------------------------------------------------------------- respond only to my voice
+  const vmOn = !!me && aiAllowed(me.aiOff ?? [], 'h:only-me') && !!(me.engine as EnginePrefs | undefined)?.onlyMyVoice && voiceCheckSupported();
+  const vmHere = useVoiceHere(vmOn ? me?.id : undefined);
+  vmActive.current = vmOn && !!vmHere?.setUp;
+  const OTHER_LINE = 'Another voice, so Niko stayed quiet. Nothing was sent.';
+  const stayedQuiet = () => { idle(); setLabel('Standing by'); setLine(OTHER_LINE); };
+  const hideVoiceChip = () => { window.clearTimeout(vmTimer.current); vmPending.current = null; setVoiceChip(false); };
+  /** Checks a spoken request against this device's voiceprint. A match goes ahead; anything else (another voice, or too
+   *  short to tell) is ignored, and for 5 seconds "That was me" offers to ask it after all. */
+  const voicePass = async (samples: Float32Array | null, run: () => void): Promise<boolean> => {
+    const id = meRef.current?.id;
+    if (!vmActive.current || !id) return true;
+    const r = samples && samples.length > 6400 ? await voiceCheck(id, samples) : { you: false, embedding: null };
+    if (r.you) { hideVoiceChip(); return true; }
+    window.clearTimeout(vmTimer.current);
+    vmPending.current = { embedding: r.embedding, run };
+    setVoiceChip(true);
+    vmTimer.current = window.setTimeout(hideVoiceChip, 5000);
+    return false;
+  };
+  const thatWasMeFn = () => {
+    const p = vmPending.current, id = meRef.current?.id;
+    hideVoiceChip();
+    if (!p) return;
+    void (async () => {
+      const learned = !!(p.embedding && id && (await voiceLearn(id, p.embedding)));
+      vmNext.current = { learned };
+      p.run();
+    })();
+  };
+  /** A request the browser's own recognition heard: its sound comes from the last few seconds kept in `ring`. */
+  const voicePassHeard = (from: number, run: () => void, after?: () => void) => {
+    if (!vmActive.current) { run(); return; }
+    const x = ring.current ? trimSilence(ring.current.take(Math.max(from, performance.now() - 10_000))) : null;
+    void voicePass(x, run).then((ok) => { if (ok) run(); else after?.(); });
+  };
+  // The rolling buffer runs only while the browser's recognition is listening and the check is on here.
+  const vmRing = vmOn && !!vmHere?.setUp && micOn && !!SR;
+  useEffect(() => {
+    if (!vmRing) return;
+    const r = startRing();
+    ring.current = r;
+    return () => { r.stop(); if (ring.current === r) ring.current = null; };
+  }, [vmRing]);
+  /** While Niko talks: only the owner's voice can stop it. Other voices (and Niko's own, heard back) are ignored.
+   *  Not on iPhone and iPad, where opening the mic during playback turns the sound down; the stop button works as ever. */
+  const startBarge = () => {
+    const id = meRef.current?.id;
+    if (!vmActive.current || barge.current || !id || /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent))) return;
+    void (async () => {
+      while (speaking.current && vmActive.current) {
+        const c = captureUtterance({ waitMs: 120_000, maxMs: 5000, strict: true });
+        barge.current = c;
+        const watch = window.setInterval(() => { if (!speaking.current) c.cancel(); }, 250);
+        const wav = await c.done;
+        window.clearInterval(watch);
+        if (barge.current === c) barge.current = null;
+        if (!wav || !speaking.current) continue;
+        const r = await voiceCheck(id, trimSilence(await wavSamples(wav)));
+        if (r.you && speaking.current) { stopRef.current(); return; }
+      }
+    })();
+  };
+
   /** After Niko answers, keep listening for a few seconds so the conversation can carry on without saying "Niko" again. */
   const FOLLOW_UP_MS = 9000;
   /** keep: listen without changing the line on screen. After a stop, an error or the end of an answer the line says
@@ -471,6 +572,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     speaking.current = true;
     lastSaid.current = { text, until: Number.POSITIVE_INFINITY };
     muteMic();
+    startBarge();
     setMode('speaking'); setLabel('Speaking'); setLine(text.length > 160 ? text.slice(0, 157) + '…' : text);
     const device = () => {
       if (!window.speechSynthesis) return done();
@@ -690,7 +792,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         : learnedNow.length ? { for: answer, question: text, kind: 'learned', items: learnedNow, device: device && kept.length > 0 }
         : r.choices?.length ? { for: answer, question: text, kind: 'choices', options: r.choices }
         : r.judge ? { for: answer, question: text, kind: 'judge' } : null);
-      setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setReply(answer); say(answer, 0);
+      setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setVoiceNote(vmNext.current ? { for: answer, learned: vmNext.current.learned } : null); vmNext.current = null; setReply(answer); say(answer, 0);
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) goSelf('/' + item.view); }
       else if (asked) goSelf(asked);
       else if (page && handler.current?.(page, true)) { /* the list on screen turned its page, quietly: Niko is speaking */ }
@@ -871,10 +973,13 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     if (!SR || rec.current || speaking.current || capture.current) return;
     const r = new SR();
     r.continuous = true; r.interimResults = true; r.maxAlternatives = 3; r.lang = navigator.language || 'en-US';
+    const began = new Map<number, number>(); // when each phrase started, to take its sound for the voice check
     r.onresult = (ev: any) => {
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const res = ev.results[i];
         if (speaking.current || rec.current !== r) continue; // Niko's own voice, or a recogniser already switched off
+        if (!began.has(i)) began.set(i, performance.now() - 900);
+        const from = began.get(i)!;
         // Recognisers often spell the name differently in their first guess, so check every alternative.
         const alts: string[] = Array.from({ length: res.length }, (_, k) => String(res[k]?.transcript ?? '').trim());
         // Niko's own last line, heard late through the speaker: never a question.
@@ -888,11 +993,16 @@ export function NikoProvider({ children }: { children: ReactNode }) {
           continue;
         }
         if (hit) {
-          if (hit.command) { active.current = false; void ask(hit.command); }
+          if (hit.command) { active.current = false; const c = hit.command; voicePassHeard(from, () => void ask(c), stayedQuiet); }
           else if (lockedRef.current) requestUnlockFn();
           else if (apiHearing()) listenByApi(8000); // the request itself goes to the speech-in service
           else { active.current = true; setMode('listening'); setLabel('Listening'); setLine('Go ahead.'); listenWindow(); }
-        } else if (active.current && alts[0]) { active.current = false; endFollowUp(); void ask(alts[0]); }
+        } else if (active.current && alts[0]) {
+          active.current = false; endFollowUp();
+          const t = alts[0];
+          // Another voice during the follow-up window: still listening for the owner.
+          voicePassHeard(from, () => void ask(t), () => { active.current = true; setMode('listening'); setLabel('Listening'); setLine(OTHER_LINE); listenWindow(); });
+        }
       }
     };
     r.onend = () => {
@@ -948,6 +1058,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       setLine(SR && (meRef.current?.engine as EnginePrefs | undefined)?.wake ? 'Say “Niko, continue” to carry on, or tap the mic.' : 'Tap the mic and say “continue” to carry on, or “try again”.');
     } else { wantRec.current = false; idle(); }
   }, [idle, listenForFollowUp]);
+  stopRef.current = stop;
 
   // ---------------------------------------------------------------- a fresh start on Inbox, Calendar and Notes
   // Each of them starts a new conversation: nothing said before carries on, is continued, or is remembered by the AI.
@@ -1232,6 +1343,10 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     rest: idle,
     carryOn: () => (wantRec.current ? listenForFollowUp() : idle()),
     voiceProblem,
+    voiceChip, thatWasMe: thatWasMeFn, dismissVoiceChip: hideVoiceChip, voiceNote,
+    voiceBanner: vmOn && !!vmHere && !vmHere.setUp && !bannerLater,
+    voiceMode: !vmOn || !vmHere ? null : vmHere.setUp ? 'you' : 'not-here',
+    laterVoiceBanner: () => { setBannerLater(true); try { sessionStorage.setItem('niko.voice.later', '1'); } catch { /* private mode */ } },
     pendingOpen,
     clearPendingOpen: () => setPendingOpen(null),
     pictures,
@@ -1257,7 +1372,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     unlock: unlockFn,
     unlockWithPasskey: unlockWithPasskeyFn,
     lockNow: lockNowFn,
-  }), [me, refreshMe, mode, label, line, reply, weather, knowledge, nextStep, quiet, habitAsk, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk, locked, lockAsk]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [me, refreshMe, mode, label, line, reply, weather, knowledge, nextStep, quiet, habitAsk, brief, micOn, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk, locked, lockAsk, voiceChip, voiceNote, vmOn, vmHere, bannerLater]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
