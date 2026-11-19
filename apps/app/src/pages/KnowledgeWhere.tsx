@@ -55,7 +55,7 @@ export function PlaceWhere({ place, folder, root, picked, workspace, busy, onRel
                 <option value="">{picked && root ? `Now: ${root}` : pages ? (pages.length ? 'Choose a page' : 'No pages shared with Niko yet') : 'Loading your pages…'}</option>
                 {(pages ?? []).map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}
               </select>
-              <span className="srow-hint">Only pages you shared with Niko are listed. That page stays in your Notes in Niko; Niko’s copies on it don’t.</span></span></label>
+              <span className="srow-hint">Only pages you shared with Niko are listed. That page becomes Knowledge’s: it and everything on it stay out of your Notes in Niko.</span></span></label>
         </div>
         <div className="kn-where-acts">
           <span className="srow-hint">{err ? <span className="no">{err}</span> : 'Changing it copies your files and what Niko learned there. Copies already made stay where they are.'}</span>

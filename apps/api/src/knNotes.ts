@@ -1,16 +1,17 @@
 // Keeping Knowledge out of the person's Notes in Niko: the Notion pages Niko made for Knowledge (copies of their files,
-// those files' databases and rows, "What Niko learned", and Niko's own "Niko Knowledge" page) are left out of Notes, the
-// glance and the briefing. A page the person picked for Knowledge is theirs and stays.
+// those files' databases and rows, "What Niko learned", and Niko's own "Niko Knowledge" page) and a page the person
+// chose to keep Knowledge on (with everything on it) are left out of Notes, the glance and the briefing.
 import type { Kdb } from './knowledge';
 
-/** The Notion pages and databases Niko made for Knowledge (copies of files, their databases, what Niko learned, and its
- *  own "Niko Knowledge" page, not a page the person picked), so Niko's Notes leaves them out. Ids without dashes. */
-export async function knowledgeNotionIds(k: Kdb, account: string): Promise<Set<string>> {
+/** The Notion pages and databases that are Knowledge's: copies of files, their databases, what Niko learned, and the
+ *  page Knowledge is kept on, whether Niko made it or the person chose it. Ids without dashes.
+ *  picked: false leaves out a page the person chose (the page picker still offers it). */
+export async function knowledgeNotionIds(k: Kdb, account: string, opts: { picked?: boolean } = {}): Promise<Set<string>> {
   const rows = await k.q<{ id: string }>(
     `select remote_id as id from kn_documents where account_id = $1 and place = 'notion' and remote_id is not null
      union select s.remote_id from kn_sheets s join kn_documents d on d.id = s.document_id where s.account_id = $1 and d.place = 'notion' and s.remote_id is not null
-     union select root_id from kn_places where account_id = $1 and place = 'notion' and made
-     union select remote_id from kn_learned_copy where account_id = $1 and place = 'notion' and remote_id is not null`, [account]);
+     union select root_id from kn_places where account_id = $1 and place = 'notion' and (made or $2)
+     union select remote_id from kn_learned_copy where account_id = $1 and place = 'notion' and remote_id is not null`, [account, opts.picked !== false]);
   return new Set(rows.map((r) => r.id.replace(/-/g, '').toLowerCase()));
 }
 type NPage = { id?: unknown; created_by?: { id?: unknown }; parent?: { page_id?: unknown; database_id?: unknown } };
@@ -24,7 +25,7 @@ export function isKnowledgeNotion(p: NPage, ids: Set<string>, bot = ''): boolean
 }
 
 /** Leaves out of a list of Notion pages everything Niko made for Knowledge and everything sitting in it: what Niko keeps
- *  track of, what Notion says Niko's connection created, and pages whose page or database is one of those. A parent that
+ *  track of, what Notion says Niko's connection created, and pages whose page or database is one of those (so pages the person keeps on Knowledge's page go too). A parent that
  *  isn't in the list is looked up (a few per list, remembered), so rows of Niko's databases and pages the person added
  *  on Niko's page go too. `creator` gives who created a page or database, or null if it can't be read. */
 export async function withoutKnowledge<T extends NPage>(pages: T[], ids: Set<string>, bot: string, creator: (id: string, kind: 'page' | 'database') => Promise<string | null>): Promise<T[]> {
