@@ -2,7 +2,7 @@
 // the person's own words and taps (see learnAllowed in @niko/shared); answering looks the relevant ones up for each
 // question, the same way as files. Every query filters by the account. The admin sees counts only.
 import {
-  meetingNow, contentWords, habitSure, isHabit, KN_HABIT_AFTER, KN_HABIT_FADE_DAYS, KN_HABITS, KN_LEARNED_MAX, KN_MEANS_CHARS, KN_SAID_CHARS, KN_TAUGHT_MAX, KN_TAUGHT_NEAR, KN_TAUGHT_WORDS, cleanTarget, knHowName, knLevel, looksSecret, wordsAlike,
+  meetingNow, searchWords, habitSure, isHabit, KN_HABIT_AFTER, KN_HABIT_FADE_DAYS, KN_HABITS, KN_LEARNED_MAX, KN_MEANS_CHARS, KN_SAID_CHARS, KN_TAUGHT_MAX, KN_TAUGHT_NEAR, KN_TAUGHT_WORDS, cleanTarget, knHowName, knLevel, looksSecret, wordsAlike,
   type KnHabit, type KnHow, type KnLearnedItem, type KnLearnedKind, type KnTarget,
 } from '@niko/shared';
 import type { Env } from './env';
@@ -148,7 +148,7 @@ export async function habitsOn(k: Kdb, account: string): Promise<KnHabit[]> {
 /** The notes that may help with one question (up to 8): by the words in it, by meaning when there are Cloudflare
  *  numbers, and any note whose words appear in the question. Their use is counted. */
 export async function notesFor(k: Kdb, account: string, text: string, how: { vector?: number[] | null; situation?: boolean }): Promise<KnLearnedItem[]> {
-  const words = contentWords(text).slice(0, 30).map((w) => w.replace(/[^\p{L}\p{N}]/gu, '')).filter(Boolean);
+  const words = searchWords(text).slice(0, 30).map((w) => w.replace(/[^\p{L}\p{N}]/gu, '')).filter(Boolean);
   const any = words.join(' | ');
   const params: unknown[] = [account, text.slice(0, 500), any || 'zzzz'];
   let near = '';

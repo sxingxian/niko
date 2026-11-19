@@ -9,7 +9,7 @@ import { neon } from '@neondatabase/serverless';
 import { eq } from 'drizzle-orm';
 import { appSettings, type Db } from '@niko/db';
 import {
-  askedFromFiles, prepareText, xmlProblem, cleanKnowledgeLimits, contentWords, KN_DEVICE_LEAD, KN_DEVICE_SIMILAR, KN_OWN_LEAD, KN_OWN_SIMILAR, type KnDeviceKnowledge, type KnTarget, cleanKnowledgeSettings, knowledgeLimits, knKindOf, knModeOf, knNeedsCloudflare, KN_LEAD, KN_SIMILAR,
+  askedFromFiles, prepareText, xmlProblem, cleanKnowledgeLimits, searchWords, KN_DEVICE_LEAD, KN_DEVICE_SIMILAR, KN_OWN_LEAD, KN_OWN_SIMILAR, type KnDeviceKnowledge, type KnTarget, cleanKnowledgeSettings, knowledgeLimits, knKindOf, knModeOf, knNeedsCloudflare, KN_LEAD, KN_SIMILAR,
   KN_CLOUDFLARE_DIMS, KN_DEVICE_DIMS, KN_PIECE_CHARS, KN_PIECES_PER_CALL, KN_READ_MAX_BYTES,
   KN_COL_TYPES, KN_SHEET_CELL_CHARS, KN_SHEET_MAX_COLS, KN_SHEET_MAX_ROWS, KN_SHEET_ROWS_PER_CALL,
   type KnColType, type KnColumn, type KnKind, type KnowledgeLimits, type KnowledgePrefs, type KnowledgeSettings, type KnTableAsk,
@@ -218,7 +218,8 @@ export async function addFromText(k: Kdb, env: Pick<Env, 'AI'>, account: string,
  *  the rest follow with addSheetRows. */
 export async function addSheet(k: Kdb, account: string, id: string, b: { name?: unknown; columns?: unknown; rows?: unknown; header?: unknown }): Promise<{ id: string; rows: number }> {
   const doc = await readingFile(k, account, id);
-  if (!['csv', 'tsv', 'xlsx', 'xls', 'ods'].includes(doc.kind)) throw new KnError('Only spreadsheets and CSV or TSV files have sheets.');
+  // A JSON file that is a list of records is kept as a table too, the way the reader splits it (fromJson).
+  if (!['csv', 'tsv', 'xlsx', 'xls', 'ods', 'json'].includes(doc.kind)) throw new KnError('Only spreadsheets, CSV, TSV and JSON files have sheets.');
   const columns = cleanColumns(b.columns);
   const cells = rowCells(b.rows, columns.length);
   const [sh] = await k.q<{ id: string }>(`insert into kn_sheets (account_id, document_id, name, columns, row_count, header) values ($1, $2, $3, $4::jsonb, $5, $6) returning id`,
@@ -431,7 +432,7 @@ export async function search(k: Kdb, env: Pick<Env, 'AI'>, account: string, quer
   const limit = Math.min(Math.max(how.limit ?? 6, 1), 20);
   // Word search matches any of the question's words (ranked by how many and how close), not all of them: a whole
   // question rarely has every word in one piece. Words are letters and digits only.
-  const anyWords = contentWords(q).slice(0, 30).map((w) => w.replace(/[^\p{L}\p{N}]/gu, '')).filter(Boolean).join(' | ') || 'zzzz';
+  const anyWords = searchWords(q).slice(0, 30).map((w) => w.replace(/[^\p{L}\p{N}]/gu, '')).filter(Boolean).join(' | ') || 'zzzz';
   let vec: string | null = null, col: 'embedding' | 'embedding_device' | 'embedding_own' = 'embedding';
   if (how.ownVector?.length) { vec = vecText(how.ownVector); col = 'embedding_own'; }
   else if (how.cloudflare) vec = vecText(how.cfVector ?? (await embed(env, [q]))[0]!);

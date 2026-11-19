@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import { addPieces, addSheet, addSheetRows, databaseUsage, deleteFile, embed, finishFile, keepAsData, KnError, listFiles, listSheets, purgeAccount, readWithCloudflare, search, startFile, updateSheet, usage } from '../apps/api/src/knowledge.ts';
+import { searchWords } from '../packages/shared/src/learned.ts';
 import { cleanKnowledgeLimits, cleanKnowledgePrefs, knKindOf, knowledgeAccess, knowledgeLimits, KN_LIMIT_DEFAULTS } from '../packages/shared/src/knowledge.ts';
 
 function pgBin() {
@@ -155,6 +156,22 @@ await ok('spreadsheets are kept as tables; cells are cleaned and cut to length',
   const md = await startFile(k, A, limits, { name: 'plain.md', bytes: 3, sha256: sha('9') });
   await rejects(addSheet(k, A, md.id, { name: 'x', columns: ['a'], rows: [] }), 400, /Only spreadsheets/);
   await deleteFile(k, A, md.id);
+  // A JSON list of records is kept as a table too (the reader makes one), so adding it doesn't fail.
+  const js = await startFile(k, A, limits, { name: 'contracts.json', bytes: 9, sha256: sha('e') });
+  assert.equal((await addSheet(k, A, js.id, { name: 'contracts', columns: ['Client', 'Notice days'], rows: [['Acme', '60']] })).rows, 1);
+  await deleteFile(k, A, js.id);
+});
+await ok('word search goes by the words that matter, not “the”, “how” and “much”', async () => {
+  assert.deepEqual(searchWords('How much is the blender?'), ['blender']);
+  assert.deepEqual(searchWords('What does the kettle cost?'), ['kettle', 'cost']);
+  assert.deepEqual(searchWords('How much?'), ['how', 'much'], 'all of them when only common words are left');
+  const f = await startFile(k, A, limits, { name: 'words.md', bytes: 9, sha256: sha('f') });
+  await addPieces(k, env, A, f.id, { start: 0, pieces: [
+    { heading: 'Policy', body: 'The shop is open when the manager says so. How much the delivery is depends on the order. The more the better, and the sooner the better, and the rest is up to the team.' },
+    { heading: 'Price list · Blender', body: 'Item: Blender. Price: 129' }] }, { cloudflare: false });
+  await finishFile(k, A, f.id);
+  assert.equal((await search(k, env, A, 'How much is the blender?', { cloudflare: false }))[0]?.heading, 'Price list · Blender');
+  await deleteFile(k, A, f.id);
 });
 await ok('a file with no text can’t be finished', async () => {
   const f = await startFile(k, A, limits, { name: 'empty.txt', bytes: 0, sha256: sha('b') });
