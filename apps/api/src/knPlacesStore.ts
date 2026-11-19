@@ -32,9 +32,26 @@ export async function setRoot(k: Kdb, account: string, place: KnRemotePlace, roo
              on conflict (account_id, place) do update set root_id = excluded.root_id, root_name = excluded.root_name, made = false, created_at = now()`, [account, place, root.id, root.name.slice(0, 200)]);
 }
 
+/** They chose another page or folder in a place: copies already made stay where they are, and everything is copied to the
+ *  new one (files when the app next copies, what Niko learned on its next sync). Niko's own page or folder for the old
+ *  choice is forgotten, so the next copy makes the new one. */
+export async function relocate(k: Kdb, account: string, place: KnRemotePlace): Promise<{ files: number; learned: boolean }> {
+  await k.q(`delete from kn_places where account_id = $1 and place = $2 and made`, [account, place]);
+  const files = await k.q(`update kn_documents set remote_id = null, remote_url = null, remote_version = null, remote_checked_at = null, remote_error = null
+     where account_id = $1 and place = $2 returning id`, [account, place]);
+  if (files.length) await k.q(`update kn_sheets s set remote_id = null, remote_url = null, remote_version = null, remote_rows = 0 from kn_documents d
+     where d.id = s.document_id and s.account_id = $1 and d.place = $2`, [account, place]);
+  const learned = await k.q(`update kn_learned_copy set remote_id = null, remote_url = null, dirty = true, synced_at = null, error = null
+     where account_id = $1 and place = $2 returning account_id`, [account, place]);
+  return { files: files.length, learned: learned.length > 0 };
+}
 export async function roots(k: Kdb, account: string): Promise<Partial<Record<KnRemotePlace, string>>> {
-  const rows = await k.q<{ place: KnRemotePlace; root_name: string }>(`select place, root_name from kn_places where account_id = $1`, [account]);
-  return Object.fromEntries(rows.map((r) => [r.place, r.root_name]));
+  return Object.fromEntries(Object.entries(await rootsMade(k, account)).map(([p, r]) => [p, r!.name]));
+}
+/** Niko's page or folder in each place, and whether Niko made it (false: a page they picked). */
+export async function rootsMade(k: Kdb, account: string): Promise<Partial<Record<KnRemotePlace, { name: string; made: boolean }>>> {
+  const rows = await k.q<{ place: KnRemotePlace; root_name: string; made: boolean }>(`select place, root_name, made from kn_places where account_id = $1`, [account]);
+  return Object.fromEntries(rows.map((r) => [r.place, { name: r.root_name, made: r.made !== false }]));
 }
 
 // ---------------------------------------------------------------- copying a file there
@@ -216,4 +233,4 @@ export async function refreshFile(k: Kdb, env: Pick<Env, 'AI'>, remote: Remote, 
     throw e;
   }
 }
-export const placeName = (p: KnRemotePlace) => ({ notion: 'Notion', gdrive: 'Google Drive', onedrive: 'OneDrive', s3: 'storage' })[p];
+export const placeName = (p: KnRemotePlace) => ({ notion: 'Notion', gdrive: 'Google Drive', onedrive: 'OneDrive', s3: 'storage', obsidian: 'vault' } as Record<KnRemotePlace, string>)[p];

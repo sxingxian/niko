@@ -4,7 +4,7 @@
 import { eq } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { users } from '@niko/db';
-import { aiAllowed, cleanKnowledgePrefs, cleanTarget, isHabit, isRemotePlace, KN_HABITS, KN_PLACE_NAMES, KN_REMOTE_PLACES, knowledgeAccess, knLearnPlaceOf, knPlaceOf, knRemoteOf, knSearchOf, type KnowledgeAccess, type KnowledgePrefs, type KnRemotePlace } from '@niko/shared';
+import { aiAllowed, cleanKnowledgePrefs, cleanTarget, isHabit, isRemotePlace, KN_HABITS, KN_PLACE_NAMES, KN_REMOTE_PLACES, knowledgeAccess, knLearnPlaceOf, knPlaceOf, cleanFolder, knFolder, knFolderIsPath, KN_DEFAULT_FOLDER, knRemoteOf, knSearchOf, type KnowledgeAccess, type KnowledgePrefs, type KnRemotePlace } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
 import { hmacSha256Hex } from '../lib/crypto';
@@ -13,10 +13,11 @@ import { confirmHabit, declineHabit, editNote, forgetAll, forgetAllFileMatches, 
 import { offFor } from '../access';
 import { ownEmbedder, ownSearchSources } from '../ownEmbed';
 import { notionPage, notionPages, PlaceError, placeConnections, remoteFor } from '../knPlaces';
-import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile, roots, setRoot } from '../knPlacesStore';
+import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile, relocate, roots, rootsMade, setRoot } from '../knPlacesStore';
 import { credentials } from '../providers';
 import { isKnowledgeNotion, knowledgeNotionIds } from '../knNotes';
 import { cleanStorage, loadStorage, saveStorage, shownStorage, testStorage } from '../knStorage';
+import { cleanObsidian, loadObsidian, saveObsidian, shownObsidian, testObsidian } from '../knObsidian';
 import { accountKnowledge, addFromText, addCloudflareNumbers, addOwnNumbers, clearOwnNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
 
 export const knowledge = new Hono<AppEnv>();
@@ -63,6 +64,23 @@ async function notesStore(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; pref
   if (!w.access.learning) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   return { k, ...w };
 }
+/** A place for files or for what Niko learns: the Knowledge database, and either allowed by their plan. */
+async function placeStore(c: C, place: KnRemotePlace): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: KnowledgePrefs } | Response> {
+  const k = accountKnowledge(c.env, c.get('user').id);
+  if (!k) return c.json({ error: NOT_HERE }, 503);
+  const w = await who(c);
+  if (!w.access[place] && !w.access.learnPlaces[place]) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  return { k, ...w };
+}
+/** Keeps the name of Niko's page or folder in a place with their Knowledge settings. */
+async function saveFolder(c: C, place: KnRemotePlace, name: string) {
+  const u = c.get('user');
+  const [fresh] = await c.get('db').select({ knowledge: users.knowledge }).from(users).where(eq(users.id, u.id)).limit(1);
+  const prefs = cleanKnowledgePrefs(fresh?.knowledge);
+  const folders = { ...prefs.folders, [place]: name };
+  if (name === KN_DEFAULT_FOLDER[place]) delete folders[place];
+  await c.get('db').update(users).set({ knowledge: { ...prefs, folders } as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
+}
 /** Files kept in Niko need the Knowledge database, Knowledge files and the Niko place. */
 async function store(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: KnowledgePrefs } | Response> {
   const k = accountKnowledge(c.env, c.get('user').id);
@@ -76,23 +94,23 @@ async function store(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: Kn
 async function placesInfo(c: C, k: Kdb, access: KnowledgeAccess) {
   const allowed = KN_REMOTE_PLACES.filter((p) => access[p]);
   if (!allowed.length) return {};
-  const [conn, made, storage] = await Promise.all([placeConnections(c.get('db'), c.get('user').id), roots(k, c.get('user').id), access.s3 ? loadStorage(c.env, c.get('db'), c.get('user').id) : null]);
-  return Object.fromEntries(allowed.map((p) => [p, { ...conn[p], root: made[p] ?? null, ...(p === 's3' && storage ? { storage: shownStorage(storage) } : {}) }]));
+  const [conn, made, storage, vault] = await Promise.all([placeConnections(c.get('db'), c.get('user').id), rootsMade(k, c.get('user').id), access.s3 ? loadStorage(c.env, c.get('db'), c.get('user').id) : null, access.obsidian ? loadObsidian(c.env, c.get('db'), c.get('user').id) : null]);
+  return Object.fromEntries(allowed.map((p) => [p, { ...conn[p], root: made[p]?.name ?? null, picked: made[p]?.made === false, ...(p === 's3' && storage ? { storage: shownStorage(storage) } : {}), ...(p === 'obsidian' && vault ? { obsidian: shownObsidian(vault) } : {}) }]));
 }
 /** The places their plan allows for a copy of what Niko learns: connected or not. Their own storage is offered only
  *  when it's saved, or when they can set it up on the Files tab. */
 async function learnPlacesInfo(c: C, k: Kdb, access: KnowledgeAccess) {
   const allowed = KN_REMOTE_PLACES.filter((p) => access.learnPlaces[p]);
   if (!allowed.length) return {};
-  const [conn, made] = await Promise.all([placeConnections(c.get('db'), c.get('user').id), roots(k, c.get('user').id)]);
-  return Object.fromEntries(allowed.filter((p) => p !== 's3' || conn.s3?.connected || access.s3).map((p) => [p, { ...conn[p], root: made[p] ?? null }]));
+  const [conn, made] = await Promise.all([placeConnections(c.get('db'), c.get('user').id), rootsMade(k, c.get('user').id)]);
+  return Object.fromEntries(allowed.filter((p) => (p !== 's3' && p !== 'obsidian') || conn[p]?.connected || access[p]).map((p) => [p, { ...conn[p], root: made[p]?.name ?? null, picked: made[p]?.made === false }]));
 }
 /** Their chosen place, signed in, for copying; a plain problem when it can't be used. */
 async function placeFor(c: C, s: { access: KnowledgeAccess; prefs: KnowledgePrefs }, place?: KnRemotePlace) {
   const p = place ?? knRemoteOf(s.prefs, s.access);
   if (!p || !s.access[p]) return { error: c.json({ error: NOT_ON_ACCOUNT }, 403) };
   const remote = await remoteFor(c.env, c.get('db'), c.get('user').id, p);
-  if (!remote) return { error: c.json({ error: (p === 's3' ? 'Add your storage first.' : `Connect ${KN_PLACE_NAMES[p]} first.`), connect: p }, 409) };
+  if (!remote) return { error: c.json({ error: (p === 's3' ? 'Add your storage first.' : p === 'obsidian' ? 'Set up Obsidian first.' : `Connect ${KN_PLACE_NAMES[p]} first.`), connect: p }, 409) };
   return { remote };
 }
 const placeFail = (c: C, e: unknown) => (e instanceof PlaceError ? c.json({ error: e.message }, e.status === 401 || e.status === 403 ? 409 : 502) : fail(c, e));
@@ -124,7 +142,8 @@ knowledge.put('/prefs', async (c) => {
   // With learning but not files, only the learning settings can change.
   const asked = access.files ? b : Object.fromEntries(Object.entries(b).filter(([key]) => key === 'learn' || key === 'situations' || key === 'learnPlace'));
   // The file count is kept by the server, never taken from the request.
-  const prefs = { ...cleanKnowledgePrefs({ ...before, ...asked }), files: before.files, notes: before.notes, habits: before.habits };
+  // Where in each app changes only through Where in … (which copies things there), never here.
+  const prefs = { ...cleanKnowledgePrefs({ ...before, ...asked }), files: before.files, notes: before.notes, habits: before.habits, folders: before.folders };
   // Where what Niko learns is kept: Niko, or a place their plan allows. A copy in their own app needs it connected and
   // Niko's page or folder made there now, so a connection problem shows straight away.
   const learnTo = prefs.learnPlace, learnFrom = knLearnPlaceOf(before, access);
@@ -134,7 +153,7 @@ knowledge.put('/prefs', async (c) => {
     if (!k && learnTo !== 'device') return c.json({ error: NOT_HERE }, 503);
     if (isRemotePlace(learnTo)) {
       const remote = await remoteFor(c.env, c.get('db'), u.id, learnTo);
-      if (!remote) return c.json({ error: (learnTo === 's3' ? 'Add your storage first, on the Files tab.' : `Connect ${KN_PLACE_NAMES[learnTo]} first.`), connect: learnTo }, 409);
+      if (!remote) return c.json({ error: (learnTo === 's3' ? 'Add your storage first, on the Files tab.' : learnTo === 'obsidian' ? 'Set up Obsidian first, on the Files tab.' : `Connect ${KN_PLACE_NAMES[learnTo]} first.`), connect: learnTo }, 409);
       try { await placeRoot(k!, remote, u.id); } catch (e) { return placeFail(c, e); }
     }
     if (k) {
@@ -156,7 +175,7 @@ knowledge.put('/prefs', async (c) => {
     const k = accountKnowledge(c.env, c.get('user').id);
     if (!k) return c.json({ error: NOT_HERE }, 503);
     const remote = await remoteFor(c.env, c.get('db'), u.id, prefs.place);
-    if (!remote) return c.json({ error: (prefs.place === 's3' ? 'Add your storage first.' : `Connect ${KN_PLACE_NAMES[prefs.place]} first.`), connect: prefs.place }, 409);
+    if (!remote) return c.json({ error: (prefs.place === 's3' ? 'Add your storage first.' : prefs.place === 'obsidian' ? 'Set up Obsidian first.' : `Connect ${KN_PLACE_NAMES[prefs.place]} first.`), connect: prefs.place }, 409);
     try { await placeRoot(k, remote, u.id); } catch (e) { return placeFail(c, e); }
   }
   if (prefs.place === 'niko' && isRemotePlace(before.place)) { const k = accountKnowledge(c.env, c.get('user').id); if (k) await leavePlaces(k, u.id); }
@@ -317,27 +336,47 @@ knowledge.post('/check', async (c) => {
 });
 // Notion: the pages Niko can see, to pick one for the copies; or Niko's own page (made the first time it's needed).
 knowledge.get('/places/notion/pages', async (c) => {
-  const s = await store(c); if (s instanceof Response) return s;
-  if (!s.access.notion) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  const s = await placeStore(c, 'notion'); if (s instanceof Response) return s;
   const cred = await credentials(c.env, c.get('db'), c.get('user').id, 'notion').catch(() => null);
   if (!cred?.accessToken) return c.json({ error: 'Connect Notion first.', connect: 'notion' }, 409);
   // Niko's own copies aren't offered as the page to keep Knowledge on.
   const ids = await knowledgeNotionIds(s.k, c.get('user').id).catch(() => new Set<string>());
   try { return c.json({ pages: await notionPages(cred.accessToken, (p) => isKnowledgeNotion(p, ids)) }); } catch (e) { return placeFail(c, e); }
 });
+// Where in Notion: a page Niko makes (with the name they choose), or one of their own pages. Either way, files and what
+// Niko learned are copied to the new page; copies on the old one stay there.
 knowledge.put('/places/notion', async (c) => {
-  const s = await store(c); if (s instanceof Response) return s;
-  if (!s.access.notion) return c.json({ error: NOT_ON_ACCOUNT }, 403);
-  const b = await c.req.json<{ page?: unknown }>().catch(() => ({} as { page?: unknown }));
+  const s = await placeStore(c, 'notion'); if (s instanceof Response) return s;
+  const b = await c.req.json<{ page?: unknown; name?: unknown }>().catch(() => ({} as { page?: unknown; name?: unknown }));
   const u = c.get('user');
-  if (b.page === null) { await setRoot(s.k, u.id, 'notion', null); return c.json({ ok: true, root: null }); }
+  if (b.page === null) {
+    const name = b.name === undefined ? KN_DEFAULT_FOLDER.notion : cleanFolder('notion', b.name);
+    if (!name) return c.json({ error: 'Give the page a name.' }, 400);
+    await saveFolder(c, 'notion', name);
+    await setRoot(s.k, u.id, 'notion', null);
+    return c.json({ ok: true, root: null, relocated: await relocate(s.k, u.id, 'notion') });
+  }
   const cred = await credentials(c.env, c.get('db'), u.id, 'notion').catch(() => null);
   if (!cred?.accessToken) return c.json({ error: 'Connect Notion first.', connect: 'notion' }, 409);
   try {
     const p = await notionPage(cred.accessToken, typeof b.page === 'string' ? b.page : '');
+    const relocated = await relocate(s.k, u.id, 'notion');
     await setRoot(s.k, u.id, 'notion', { id: p.id, name: p.title });
-    return c.json({ ok: true, root: p.title });
+    return c.json({ ok: true, root: p.title, relocated });
   } catch (e) { return placeFail(c, e); }
+});
+// Where in Google Drive, OneDrive, their storage or their vault: the name of Niko's folder (with the narrow access
+// chosen, Drive and OneDrive only let Niko see the folder it makes), or a folder path in the bucket or vault.
+knowledge.put('/places/:place/folder', async (c) => {
+  const place = c.req.param('place');
+  if (!isRemotePlace(place) || place === 'notion') return c.json({ error: 'Not found.' }, 404);
+  const s = await placeStore(c, place); if (s instanceof Response) return s;
+  const b = await c.req.json<{ name?: unknown }>().catch(() => ({} as { name?: unknown }));
+  const name = cleanFolder(place, b.name);
+  if (!name) return c.json({ error: knFolderIsPath(place) ? 'Enter a folder, such as Areas/Niko Knowledge.' : 'Give the folder a name.' }, 400);
+  const before = knFolder(s.prefs, place);
+  await saveFolder(c, place, name);
+  return c.json({ ok: true, folder: name, relocated: name === before ? { files: 0, learned: false } : await relocate(s.k, c.get('user').id, place) });
 });
 
 // Their own S3 storage: tried before it's saved, keys never sent back. A new address needs its keys again.
@@ -368,6 +407,39 @@ knowledge.delete('/places/storage', async (c) => {
   await saveStorage(c.env, c.get('db'), c.get('user').id, null);
   await setRoot(s.k, c.get('user').id, 's3', null);
   await audit(c, 'knowledge.storage-removed', {}, c.get('user').id);
+  return c.json({ ok: true });
+});
+
+// Obsidian: set up like their own storage, the vault reached through S3 storage it syncs with or the Local REST API.
+// Test tries it without saving; Save tries it and keeps it (keys are never shown again).
+async function obsidianInput(c: C) {
+  const s = await store(c); if (s instanceof Response) return { error: s };
+  if (!s.access.obsidian) return { error: c.json({ error: NOT_ON_ACCOUNT }, 403) };
+  const u = c.get('user');
+  if (await tooMany(c, 'kn-obsidian:' + u.id, 30, 3600)) return { error: c.json({ error: 'That’s a lot of tries. Try again in a little while.' }, 429) };
+  const saved = await loadObsidian(c.env, c.get('db'), u.id);
+  const cfg = cleanObsidian(await c.req.json().catch(() => ({})), saved);
+  if ('problem' in cfg) return { error: c.json({ error: cfg.problem }, 400) };
+  return { s, cfg };
+}
+knowledge.post('/places/obsidian/test', async (c) => {
+  const r = await obsidianInput(c); if (r.error) return r.error;
+  try { await testObsidian(r.cfg); return c.json({ ok: true }); } catch (e) { return placeFail(c, e); }
+});
+knowledge.put('/places/obsidian', async (c) => {
+  const r = await obsidianInput(c); if (r.error) return r.error;
+  try { await testObsidian(r.cfg); } catch (e) { return placeFail(c, e); }
+  await saveObsidian(c.env, c.get('db'), c.get('user').id, r.cfg);
+  await audit(c, 'knowledge.obsidian-saved', { way: r.cfg.mode, host: new URL(r.cfg.mode === 's3' ? r.cfg.endpoint : r.cfg.address).hostname }, c.get('user').id);
+  return c.json({ ok: true, obsidian: shownObsidian(r.cfg) });
+});
+knowledge.delete('/places/obsidian', async (c) => {
+  const s = await store(c); if (s instanceof Response) return s;
+  if (knRemoteOf(s.prefs, s.access) === 'obsidian') return c.json({ error: 'Your files are kept in Obsidian. Move them to another place first.' }, 409);
+  if (knLearnPlaceOf(s.prefs, s.access) === 'obsidian') return c.json({ error: 'What Niko learned is kept in Obsidian. Choose another place for it first.' }, 409);
+  await saveObsidian(c.env, c.get('db'), c.get('user').id, null);
+  await setRoot(s.k, c.get('user').id, 'obsidian', null);
+  await audit(c, 'knowledge.obsidian-removed', {}, c.get('user').id);
   return c.json({ ok: true });
 });
 
@@ -478,7 +550,7 @@ knowledge.post('/learned/copy', async (c) => {
   if (!isRemotePlace(lp)) return c.json({ error: 'What Niko learns isn’t copied anywhere.' }, 409);
   if (await tooMany(c, 'kn-lcopy:' + u.id, 60, 3600)) return c.json({ error: 'That’s a lot of updates. Niko will catch up in a little while.' }, 429);
   const remote = await remoteFor(c.env, c.get('db'), u.id, lp);
-  if (!remote) return c.json({ error: (lp === 's3' ? 'Add your storage first, on the Files tab.' : `Connect ${KN_PLACE_NAMES[lp]} again.`), connect: lp }, 409);
+  if (!remote) return c.json({ error: (lp === 's3' ? 'Add your storage first, on the Files tab.' : lp === 'obsidian' ? 'Set up Obsidian again, on the Files tab.' : `Connect ${KN_PLACE_NAMES[lp]} again.`), connect: lp }, 409);
   try { return c.json({ ok: true, copy: await syncLearnedCopy(s.k, remote, u.id) }); }
   catch (e) { return placeFail(c, e); }
 });

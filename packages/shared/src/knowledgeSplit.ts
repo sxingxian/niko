@@ -126,7 +126,8 @@ export const sheetSummary = (s: Sheet): Piece => ({ heading: s.name, body: `Spre
 export function markdownTables(md: string): { name: string; rows: string[][] }[] {
   const out: { name: string; rows: string[][] }[] = [];
   let name = '', cur: string[][] | null = null;
-  const cells = (line: string) => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim().replace(/\\\|/g, '|'));
+  // Cells split on | but not on an escaped \| (which stands for a | inside a cell).
+  const cells = (line: string) => line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|'));
   for (const line of clean(md).split('\n')) {
     const h = /^#{1,6}\s+(.+)$/.exec(line.trim());
     if (h) { name = h[1]!.trim(); cur = null; continue; }
@@ -195,6 +196,13 @@ const csvCell = (v: string) => {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 /** A sheet as CSV, with its column names as the first row. */
+/** A sheet as a Markdown table under its title, for places that show notes (Obsidian). A | inside a cell is escaped
+ *  and line breaks become spaces, so markdownTables reads it back exactly. */
+export function sheetMarkdown(title: string, columns: { name: string }[], rows: string[][]): string {
+  const cell = (c: string) => (c ?? '').replace(/\r?\n/g, ' ').replace(/\\(?=\|)/g, '').replace(/\|/g, '\\|').trim() || ' ';
+  const line = (r: string[]) => `| ${r.map(cell).join(' | ')} |`;
+  return [`# ${title.replace(/\s+/g, ' ').trim()}`, '', line(columns.map((c) => c.name)), `|${columns.map(() => ' --- ').join('|')}|`, ...rows.map((r) => line(columns.map((_, i) => r[i] ?? '')))].join('\n') + '\n';
+}
 export const sheetCsv = (columns: { name: string }[], rows: string[][]) => [columns.map((c) => c.name), ...rows].map((r) => r.map((c) => csvCell(c ?? '')).join(',')).join('\r\n') + '\r\n';
 
 // ---------------------------------------------------------------- reading safely
