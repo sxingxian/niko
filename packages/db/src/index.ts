@@ -298,6 +298,12 @@ export const dataSources = pgTable('data_sources', {
   authName: text('auth_name').notNull().default(''),
   keyMode: text('key_mode').notNull().default('one'),
   keyEnc: text('key_enc'),
+  /** Other headers: plain ones with their value, secret ones by name (migration 0019). */
+  headers: jsonb('headers').notNull().default([]).$type<unknown[]>(),
+  /** Signing in for a token: where and how, never the ID or secret (migration 0019). */
+  token: jsonb('token').$type<unknown>(),
+  /** Sealed: secret header values and the token's ID and secret (migration 0019). */
+  secretsEnc: text('secrets_enc'),
   actions: jsonb('actions').notNull().default([]).$type<unknown[]>(),
   termsOk: boolean('terms_ok').notNull().default(false),
   termsNote: text('terms_note').notNull().default(''),

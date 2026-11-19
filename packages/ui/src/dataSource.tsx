@@ -2,21 +2,34 @@
 // sources: address and sign-in, what Niko can ask (read-only actions, typed in or found in an OpenAPI file), and test
 // results. Every check here is repeated on the server; these only show problems early.
 import { useRef, useState } from 'react';
-import { actionLine, DATA_USE_NAMES, type DataRefresh, cleanAction, cleanBaseUrl, fromExampleLink, openApiActions, type DataAction, type DataAuth, type DataKeyMode, type DataOffer, type DataParam, type DataParamType, type DataSourceInfo, type DataUse } from '@niko/shared';
+import { actionLine, DATA_USE_NAMES, DATA_HEADERS_MAX, type DataRefresh, cleanAction, cleanBaseUrl, cleanHeaders, cleanToken, fromCurl, fromExampleLink, openApiActions, type DataToken, type DataAction, type DataAuth, type DataKeyMode, type DataOffer, type DataParam, type DataParamType, type DataSourceInfo, type DataUse } from '@niko/shared';
 
+/** Another header as typed: a secret one's value is only sent when typed (saved: one is kept already). */
+export interface DraftHeader { name: string; value: string; secret: boolean; saved?: boolean }
 export interface SourceDraft {
   name: string; use: DataUse; baseUrl: string; auth: DataAuth; authName: string; keyMode: DataKeyMode; key: string;
   actions: DataAction[]; termsOk: boolean; termsNote: string; attribution: string; offer: DataOffer;
+  headers: DraftHeader[]; token: DataToken; tokenId: string; tokenSecret: string; tokenSaved: boolean;
 }
-export const emptyDraft = (): SourceDraft => ({ name: '', use: 'general', baseUrl: 'https://', auth: 'header', authName: '', keyMode: 'one', key: '', actions: [], termsOk: false, termsNote: '', attribution: '', offer: 'everyone' });
-export const draftOf = (s: DataSourceInfo): SourceDraft => ({ name: s.name, use: s.use, baseUrl: s.baseUrl, auth: s.auth, authName: s.authName, keyMode: s.keyMode, key: '', actions: s.actions, termsOk: s.termsOk, termsNote: s.termsNote, attribution: s.attribution, offer: s.offer });
+export const blankToken = (): DataToken => ({ url: 'https://', style: 'client', idName: 'client_id', secretName: 'client_secret', scope: '', basic: false, tokenPath: 'access_token', header: 'Authorization', prefix: 'Bearer ' });
+export const emptyDraft = (): SourceDraft => ({ name: '', use: 'general', baseUrl: 'https://', auth: 'header', authName: '', keyMode: 'one', key: '', actions: [], termsOk: false, termsNote: '', attribution: '', offer: 'everyone', headers: [], token: blankToken(), tokenId: '', tokenSecret: '', tokenSaved: false });
+export const draftOf = (s: DataSourceInfo): SourceDraft => ({ name: s.name, use: s.use, baseUrl: s.baseUrl, auth: s.auth, authName: s.authName, keyMode: s.keyMode, key: '', actions: s.actions, termsOk: s.termsOk, termsNote: s.termsNote, attribution: s.attribution, offer: s.offer,
+  headers: (s.headers ?? []).map((h) => ({ name: h.name, value: h.secret ? '' : h.value ?? '', secret: h.secret, saved: !!h.saved })), token: s.token ?? blankToken(), tokenId: '', tokenSecret: '', tokenSaved: !!s.tokenSaved });
 /** What step 1 still needs, or null. */
 export function addressProblem(d: SourceDraft, hasKey: boolean): string | null {
   if (!d.name.trim()) return 'Give it a name.';
   const b = cleanBaseUrl(d.baseUrl);
   if ('problem' in b) return b.problem;
-  if (d.auth !== 'none' && !/^[A-Za-z0-9_.-]{1,60}$/.test(d.authName.trim())) return d.auth === 'header' ? 'Enter the header’s name, such as X-Api-Key.' : 'Enter the name the key goes by in the address, such as api_key.';
-  if (d.auth !== 'none' && d.keyMode === 'one' && !d.key.trim() && !hasKey) return 'Enter the key.';
+  if ((d.auth === 'header' || d.auth === 'query') && !/^[A-Za-z0-9_.-]{1,60}$/.test(d.authName.trim())) return d.auth === 'header' ? 'Enter the header’s name, such as X-Api-Key.' : 'Enter the name the key goes by in the address, such as api_key.';
+  if ((d.auth === 'header' || d.auth === 'query') && d.keyMode === 'one' && !d.key.trim() && !hasKey) return 'Enter the key.';
+  if (d.auth === 'token') {
+    const t = cleanToken(d.token);
+    if ('problem' in t) return t.problem;
+    if ((!d.tokenId.trim() || !d.tokenSecret) && !d.tokenSaved) return d.token.style === 'client' ? 'Enter the client ID and secret.' : 'Enter the email and password.';
+  }
+  const hs = cleanHeaders(d.headers, d.auth === 'header' ? [d.authName] : []);
+  if ('problem' in hs) return hs.problem;
+  for (const h of d.headers) if (h.name.trim() && h.secret && !h.value.trim() && !h.saved) return `Enter the value for ${h.name}.`;
   return null;
 }
 
@@ -29,16 +42,72 @@ export function AddressStep({ d, set, admin, hasKey }: { d: SourceDraft; set: (p
         <label className="fld"><span className="k">Use as</span><select className="in" value={d.use} onChange={(e) => set({ use: e.target.value as DataUse })}>{(Object.keys(DATA_USE_NAMES) as DataUse[]).map((u) => <option key={u} value={u}>{DATA_USE_NAMES[u]}</option>)}</select></label>
       </div>
       <label className="fld"><span className="k">Address</span><input className="in" value={d.baseUrl} inputMode="url" autoComplete="off" spellCheck={false} onChange={(e) => set({ baseUrl: e.target.value })} placeholder="https://api.example.com" /><span className="ds-hint">https and a public address only.</span></label>
-      <div className="ds-two">
-        <label className="fld"><span className="k">Sign-in</span><select className="in" value={d.auth} onChange={(e) => set({ auth: e.target.value as DataAuth })}><option value="header">Key in a header</option><option value="query">Key in the address</option><option value="none">None</option></select></label>
-        {d.auth !== 'none' && <label className="fld"><span className="k">{d.auth === 'header' ? 'Header name' : 'Name in the address'}</span><input className="in" value={d.authName} maxLength={60} spellCheck={false} onChange={(e) => set({ authName: e.target.value })} placeholder={d.auth === 'header' ? 'X-Api-Key' : 'api_key'} /></label>}
-      </div>
-      {d.auth !== 'none' && <div className="ds-two">
-        {admin && <label className="fld"><span className="k">Key</span><select className="in" value={d.keyMode} onChange={(e) => set({ keyMode: e.target.value as DataKeyMode })}><option value="one">One key for everyone (yours)</option><option value="own">Each person adds their own</option></select></label>}
-        {d.keyMode === 'one' && <label className="fld"><span className="k">{admin ? 'Your key' : 'Key'}</span><input className="in" type="password" autoComplete="off" value={d.key} maxLength={500} onChange={(e) => set({ key: e.target.value })} placeholder={hasKey ? 'Saved · leave empty to keep it' : ''} /></label>}
-      </div>}
-      {d.auth !== 'none' && <span className="ds-hint">{d.keyMode === 'own' && admin ? 'People enter their own key when they turn it on.' : 'Kept encrypted on Niko’s server and never shown again. Changing the address to another site drops it.'}</span>}
+      <KeyFields d={d} set={set} admin={admin} hasKey={hasKey} />
     </div>
+  );
+}
+
+/** Signing in, the same everywhere: no key, a key in a header or the link, or a token Niko gets with a client ID and
+ *  secret (or an email and password); then any other headers, each secret or plain. */
+export function KeyFields({ d, set, admin, hasKey }: { d: SourceDraft; set: (p: Partial<SourceDraft>) => void; admin: boolean; hasKey: boolean }) {
+  const t = d.token, setT = (p: Partial<DataToken>) => set({ token: { ...t, ...p } });
+  const setH = (i: number, p: Partial<DraftHeader>) => set({ headers: d.headers.map((h, j) => (j === i ? { ...h, ...p } : h)) });
+  const keep = 'Saved · leave empty to keep it';
+  return (
+    <>
+      <div className="fld"><span className="k">Does it need a key?</span>
+        <span className="ds-seg" role="radiogroup" aria-label="Does it need a key?">
+          {([['none', 'No key'], ['header', 'Key in a header'], ['query', 'Key in the link'], ['token', 'Sign in for a token']] as [DataAuth, string][]).map(([v, n]) => <button key={v} type="button" role="radio" aria-checked={d.auth === v} onClick={() => set({ auth: v })}>{n}</button>)}
+        </span>
+      </div>
+      {(d.auth === 'header' || d.auth === 'query') && <div className="ds-two">
+        <label className="fld"><span className="k">{d.auth === 'header' ? 'Header name' : 'Name in the link'}</span><input className="in" value={d.authName} maxLength={60} spellCheck={false} onChange={(e) => set({ authName: e.target.value })} placeholder={d.auth === 'header' ? 'AccountKey' : 'api_key'} /></label>
+        {admin && <label className="fld"><span className="k">Key</span><select className="in" value={d.keyMode} onChange={(e) => set({ keyMode: e.target.value as DataKeyMode })}><option value="one">One key for everyone (yours)</option><option value="own">Each person adds their own</option></select></label>}
+        {d.keyMode === 'one' && <label className="fld"><span className="k">{admin ? 'Your key' : 'Key'}</span><input className="in" type="password" autoComplete="off" value={d.key} maxLength={500} onChange={(e) => set({ key: e.target.value })} placeholder={hasKey ? keep : ''} /></label>}
+      </div>}
+      {(d.auth === 'header' || d.auth === 'query') && <span className="ds-hint">The service’s docs say what it’s called (LTA DataMall: a header named AccountKey; a Bearer token: header Authorization, key “Bearer …”). {d.keyMode === 'own' && admin ? 'People enter their own key when they turn it on.' : 'Kept encrypted on Niko’s server and never shown again.'}</span>}
+      {d.auth === 'token' && <div className="ds-token">
+        <label className="fld"><span className="k">Token address</span><input className="in" value={t.url} inputMode="url" spellCheck={false} onChange={(e) => setT({ url: e.target.value })} placeholder="https://login.example.com/oauth2/token" /></label>
+        <div className="fld"><span className="k">Signs in with</span>
+          <span className="ds-seg" role="radiogroup" aria-label="Signs in with">
+            <button type="button" role="radio" aria-checked={t.style === 'client'} onClick={() => setT({ style: 'client', idName: 'client_id', secretName: 'client_secret' })}>Client ID and secret</button>
+            <button type="button" role="radio" aria-checked={t.style === 'login'} onClick={() => setT({ style: 'login', idName: 'email', secretName: 'password', basic: false })}>Email and password</button>
+          </span>
+        </div>
+        <div className="ds-two">
+          <label className="fld"><span className="k">{t.style === 'client' ? 'Client ID' : 'Email or user name'}</span><input className="in" autoComplete="off" value={d.tokenId} maxLength={500} spellCheck={false} onChange={(e) => set({ tokenId: e.target.value })} placeholder={d.tokenSaved ? keep : ''} /></label>
+          <label className="fld"><span className="k">{t.style === 'client' ? 'Client secret' : 'Password'}</span><input className="in" type="password" autoComplete="off" value={d.tokenSecret} maxLength={500} onChange={(e) => set({ tokenSecret: e.target.value })} placeholder={d.tokenSaved ? keep : ''} /></label>
+        </div>
+        <details className="ds-more">
+          <summary>More: scope, field names, where the token goes</summary>
+          {t.style === 'client' && <label className="fld"><span className="k">Scope (if the docs ask for one)</span><input className="in" value={t.scope} maxLength={200} spellCheck={false} onChange={(e) => setT({ scope: e.target.value })} /></label>}
+          {t.style === 'client' && <label className="ds-check"><input type="checkbox" checked={t.basic} onChange={(e) => setT({ basic: e.target.checked })} />Send the ID and secret as a Basic header</label>}
+          <div className="ds-two">
+            <label className="fld"><span className="k">Sent as</span><input className="in" value={t.idName} maxLength={60} spellCheck={false} onChange={(e) => setT({ idName: e.target.value })} /></label>
+            <label className="fld"><span className="k">and</span><input className="in" value={t.secretName} maxLength={60} spellCheck={false} onChange={(e) => setT({ secretName: e.target.value })} /></label>
+          </div>
+          <div className="ds-two">
+            <label className="fld"><span className="k">Token is at</span><input className="in" value={t.tokenPath} maxLength={60} spellCheck={false} onChange={(e) => setT({ tokenPath: e.target.value })} placeholder="access_token" /></label>
+            <label className="fld"><span className="k">Goes in header</span><input className="in" value={t.header} maxLength={60} spellCheck={false} onChange={(e) => setT({ header: e.target.value })} placeholder="Authorization" /></label>
+          </div>
+          <label className="fld"><span className="k">Before the token</span><input className="in" value={t.prefix} maxLength={20} spellCheck={false} onChange={(e) => setT({ prefix: e.target.value })} placeholder="Bearer " /></label>
+        </details>
+        <span className="ds-hint">Niko asks for a token when it needs one and keeps it until just before it runs out. The ID and secret go only to the token address, and are kept encrypted.</span>
+      </div>}
+      <div className="ds-heads">
+        <span className="k">Other headers</span>
+        {d.headers.map((h, i) => (
+          <div key={i} className="ds-head">
+            <input className="in" aria-label="Header name" value={h.name} maxLength={60} spellCheck={false} placeholder="Notion-Version" onChange={(e) => setH(i, { name: e.target.value })} />
+            <input className="in" aria-label={`${h.name || 'Header'} value`} type={h.secret ? 'password' : 'text'} autoComplete="off" value={h.value} maxLength={1000} spellCheck={false} placeholder={h.secret && h.saved ? keep : 'value'} onChange={(e) => setH(i, { value: e.target.value })} />
+            <label className="ds-check sm"><input type="checkbox" checked={h.secret} onChange={(e) => setH(i, { secret: e.target.checked, value: '', saved: false })} />Secret</label>
+            <button type="button" className="ds-x" aria-label={`Remove ${h.name || 'header'}`} onClick={() => set({ headers: d.headers.filter((_, j) => j !== i) })}>×</button>
+          </div>
+        ))}
+        {d.headers.length < DATA_HEADERS_MAX && <button type="button" className="ds-lnk" onClick={() => set({ headers: [...d.headers, { name: '', value: '', secret: false }] })}>+ Add a header</button>}
+        <span className="ds-hint">Up to {DATA_HEADERS_MAX}. Secret ones are kept encrypted and never shown again; plain ones (like an API version) can be read here.</span>
+      </div>
+    </>
   );
 }
 
@@ -174,6 +243,14 @@ export function LinkStep({ d, set, admin, hasKey, onManual }: { d: SourceDraft; 
   const read = (raw: string) => {
     setLink(raw);
     if (!raw.trim()) { setNote(null); return; }
+    if (/^\s*curl\b/.test(raw)) {
+      const r = fromCurl(raw);
+      if ('problem' in r) { setNote(r.problem); return; }
+      setNote(null);
+      set({ baseUrl: r.baseUrl, actions: [r.action], ...(d.name.trim() ? {} : { name: r.name }), headers: r.headers.map((h) => ({ ...h })),
+        ...(r.auth ? { auth: r.auth.mode as DataAuth, authName: r.auth.name, key: r.auth.value } : { auth: 'none' as DataAuth }) });
+      return;
+    }
     const r = fromExampleLink(raw);
     if ('problem' in r) { setNote(r.problem); return; }
     setNote(null);
@@ -184,31 +261,23 @@ export function LinkStep({ d, set, admin, hasKey, onManual }: { d: SourceDraft; 
   const host = (() => { try { return new URL(d.baseUrl).hostname; } catch { return ''; } })();
   return (
     <div className="ds-step">
-      <label className="fld"><span className="k">A link that works</span>
-        <input className="in ds-link" value={link} inputMode="url" autoComplete="off" spellCheck={false} onChange={(e) => read(e.target.value)} placeholder="https://api.example.com/arrivals?stop=83139" autoFocus />
-        <span className="ds-hint">From the service’s docs: an example request you could open yourself. A key in the link is kept as the key, never as an example.</span>
+      <label className="fld"><span className="k">A link, or a curl command</span>
+        <textarea className="in ds-link" rows={3} value={link} autoComplete="off" spellCheck={false} onChange={(e) => read(e.target.value)} placeholder={'https://api.example.com/arrivals?stop=83139\nor  curl -H "X-Api-Key: …" https://api.example.com/…'} autoFocus />
+        <span className="ds-hint">From the service’s docs: an example request, as a link or a curl command. Keys in it are kept as the key, never as examples.</span>
       </label>
       {note && <p className="ds-err" role="alert">{note}</p>}
       {a && !note && <div className="ds-found" role="status">
         <span className="ds-found-t">Niko found</span>
         <span className="ds-hint">{a.name}{host ? ` on ${host}` : ''}</span>
         <span className="ds-hint">{asks.length ? <>It asks for {asks.map((p, i) => <span key={p.name}>{i ? ', ' : ''}<b>{p.name}</b>{p.sample ? ` (e.g. ${p.sample})` : ''}</span>)}</> : 'It needs no values.'}</span>
+        {a.method === 'POST' && <span className="ds-hint">It asks with POST: confirm it only reads data on the next step.</span>}
+        {(d.headers.length > 0 || d.auth === 'header') && <span className="ds-hint">Headers: {[...(d.auth === 'header' && d.authName ? [`${d.authName} (the key)`] : []), ...d.headers.map((h) => `${h.name}${h.secret ? ' (kept secret)' : ''}`)].join(', ')}</span>}
       </div>}
       <div className="ds-two">
         <label className="fld"><span className="k">{admin ? 'Name people see' : 'Name'}</span><input className="in" value={d.name} maxLength={60} onChange={(e) => set({ name: e.target.value })} placeholder="Bus arrivals" /></label>
         <label className="fld"><span className="k">Use as</span><select className="in" value={d.use} onChange={(e) => set({ use: e.target.value as DataUse })}>{(Object.keys(DATA_USE_NAMES) as DataUse[]).map((u) => <option key={u} value={u}>{DATA_USE_NAMES[u]}</option>)}</select></label>
       </div>
-      <div className="fld"><span className="k">Does it need a key?</span>
-        <span className="ds-seg" role="radiogroup" aria-label="Does it need a key?">
-          {([['none', 'No key'], ['header', 'Key in a header'], ['query', 'Key in the link']] as [DataAuth, string][]).map(([v, t]) => <button key={v} type="button" role="radio" aria-checked={d.auth === v} onClick={() => set({ auth: v })}>{t}</button>)}
-        </span>
-      </div>
-      {d.auth !== 'none' && <div className="ds-two">
-        <label className="fld"><span className="k">{d.auth === 'header' ? 'Header name' : 'Name in the link'}</span><input className="in" value={d.authName} maxLength={60} spellCheck={false} onChange={(e) => set({ authName: e.target.value })} placeholder={d.auth === 'header' ? 'AccountKey' : 'api_key'} /></label>
-        {admin && <label className="fld"><span className="k">Key</span><select className="in" value={d.keyMode} onChange={(e) => set({ keyMode: e.target.value as DataKeyMode })}><option value="one">One key for everyone (yours)</option><option value="own">Each person adds their own</option></select></label>}
-        {d.keyMode === 'one' && <label className="fld"><span className="k">{admin ? 'Your key' : 'Key'}</span><input className="in" type="password" autoComplete="off" value={d.key} maxLength={500} onChange={(e) => set({ key: e.target.value })} placeholder={hasKey ? 'Saved · leave empty to keep it' : ''} /></label>}
-      </div>}
-      {d.auth !== 'none' && <span className="ds-hint">The service’s docs say what it’s called (LTA DataMall: a header named AccountKey). {d.keyMode === 'own' && admin ? 'People enter their own key when they turn it on.' : 'Kept encrypted on Niko’s server and never shown again.'}</span>}
+      <KeyFields d={d} set={set} admin={admin} hasKey={hasKey} />
       <button type="button" className="ds-lnk" onClick={onManual}>More ways: set up by hand, or import an OpenAPI file</button>
     </div>
   );
@@ -243,7 +312,9 @@ export function AnswersStep({ d, set, datasets = true, onManual }: { d: SourceDr
             {!a.params.length && <span className="ds-hint">Nothing: it’s always asked the same way.</span>}
             {a.params.map((p, k) => (
               <div key={k} className="ds-val">
-                <span className="ds-val-n"><input className="in" aria-label="Value name" value={p.name} maxLength={40} spellCheck={false} placeholder="name" readOnly={p.in === 'path'} onChange={(e) => setP(i, k, { name: e.target.value })} />{p.sample && p.fixed === undefined && <span className="ds-hint">e.g. {p.sample}</span>}</span>
+                <span className="ds-val-n"><input className="in" aria-label="Value name" value={p.name} maxLength={40} spellCheck={false} placeholder="name" readOnly={p.in === 'path'} onChange={(e) => setP(i, k, { name: e.target.value })} />
+                  {a.method === 'POST' && p.in !== 'path' && <select className="in ds-in" aria-label={`Where ${p.name || 'this value'} goes`} value={p.in} onChange={(e) => setP(i, k, { in: e.target.value as 'query' | 'body' })}><option value="body">in the body</option><option value="query">in the link</option></select>}
+                  {p.sample && p.fixed === undefined && <span className="ds-hint">e.g. {p.sample}</span>}</span>
                 <span className="ds-val-w">
                   <select className="in" aria-label={`Who decides ${p.name || 'this value'}`} value={p.fixed !== undefined ? 'fixed' : 'ai'} disabled={p.in === 'path'} onChange={(e) => setP(i, k, e.target.value === 'fixed' ? { fixed: p.fixed ?? p.sample ?? '', required: true } : { fixed: undefined, sample: p.sample ?? p.fixed })}>
                     <option value="ai">Niko picks it from the question</option>
@@ -258,7 +329,18 @@ export function AnswersStep({ d, set, datasets = true, onManual }: { d: SourceDr
             {a.params.length < 12 && <button type="button" className="ds-lnk" onClick={() => setA(i, { params: [...a.params, blankParam()] })}>+ Add a value the link didn’t have</button>}
           </div>
           <details className="ds-more">
-            <summary>More options: live or reused, kinds of values, path</summary>
+            <summary>More options: GET or POST, live or reused, kinds of values, path</summary>
+            <div className="fld"><span className="k">Asks with</span>
+              <span className="ds-seg" role="radiogroup" aria-label="Asks with">
+                <button type="button" role="radio" aria-checked={a.method !== 'POST'} onClick={() => setA(i, { method: undefined, body: undefined, bodyType: undefined, readOnly: undefined, params: a.params.filter((p) => p.in !== 'body') })}>GET · reads</button>
+                <button type="button" role="radio" aria-checked={a.method === 'POST'} onClick={() => setA(i, { method: 'POST', body: a.body ?? '{}', bodyType: a.bodyType ?? 'json' })}>POST · search or GraphQL</button>
+              </span>
+            </div>
+            {a.method === 'POST' && <>
+              <label className="fld"><span className="k">Body ({a.bodyType === 'form' ? 'form' : 'JSON'})</span><textarea className="in ds-link" rows={5} value={a.body ?? ''} maxLength={4000} spellCheck={false} onChange={(e) => setA(i, { body: e.target.value })} />
+                <span className="ds-hint">{a.bodyType === 'form' ? 'name={{value}} pairs joined by &.' : 'Put "{{name}}" (in quotes) where Niko fills in a value; everything else is sent as it is.'} Add the value under What Niko fills in, and pick “in the body” for it.</span></label>
+              <label className="fld"><span className="k">Body is</span><select className="in" value={a.bodyType ?? 'json'} onChange={(e) => setA(i, { bodyType: e.target.value as 'json' | 'form' })}><option value="json">JSON</option><option value="form">A form (name=value&…)</option></select></label>
+            </>}
             <label className="fld"><span className="k">How Niko uses it</span><select className="in" value={a.dataset ? `ds-${a.dataset}` : a.live ? 'live' : 'recent'} onChange={(e) => { const v = e.target.value; setA(i, v.startsWith('ds-') ? { dataset: v.slice(3) as DataRefresh, live: false } : { dataset: undefined, live: v === 'live' }); }}>
               <option value="live">Live answer: asked every time</option>
               <option value="recent">Answer: asked when needed, reused for a few minutes</option>
@@ -269,6 +351,10 @@ export function AnswersStep({ d, set, datasets = true, onManual }: { d: SourceDr
               <label key={k} className="fld"><span className="k">{p.name || 'Value'} · kind</span><select className="in" value={p.type} onChange={(e) => setP(i, k, { type: e.target.value as DataParamType })}>{TYPES.map(([v, n]) => <option key={v} value={v}>{n}</option>)}</select></label>
             ); })}
           </details>
+          {a.method === 'POST' && <div className="ds-ro">
+            <label className="ds-check"><input type="checkbox" checked={a.readOnly === true} onChange={(e) => setA(i, { readOnly: e.target.checked || undefined })} />This only reads data: it changes nothing there.</label>
+            <span className="ds-hint ds-warn">GraphQL changes (mutations) are always refused. Niko can’t check other APIs, so only tick this for searches and look-ups.</span>
+          </div>}
           {d.actions.length > 1 && <div className="ds-row-b">
             <button type="button" className={'ds-tag' + (a.on ? ' keep' : '')} aria-pressed={a.on} onClick={() => setA(i, { on: !a.on })}>{a.on ? 'Keep' : 'Left out'}</button>
             <button type="button" className="ds-lnk" onClick={() => set({ actions: d.actions.filter((_, j) => j !== i) })}>Remove</button>

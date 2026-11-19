@@ -5,7 +5,29 @@
 
 export type DataUse = 'general' | 'live' | 'weather';
 export const DATA_USE_NAMES: Record<DataUse, string> = { general: 'General data', live: 'Live information', weather: 'Weather' };
-export type DataAuth = 'none' | 'header' | 'query';
+/** How a source signs in: no key, a key in a header or the address, or a token Niko gets (and renews) from a token
+ *  address with a client ID and secret, or an email and password. */
+export type DataAuth = 'none' | 'header' | 'query' | 'token';
+/** A header sent with every call: secret ones (kept encrypted, never shown again) or plain ones (such as an API
+ *  version). Plain values are shown; for a secret, only whether it's saved. */
+export interface DataHeader { name: string; secret: boolean; value?: string; saved?: boolean }
+/** Getting a token: where, how, and where it goes. The ID and secret themselves are kept encrypted, apart. */
+export interface DataToken {
+  url: string;
+  /** client: OAuth client credentials (form); login: a JSON body with an email (or user name) and a password. */
+  style: 'client' | 'login';
+  /** The names the ID and secret are sent as (client_id / client_secret, email / password). */
+  idName: string; secretName: string;
+  scope: string;
+  /** Client: send the ID and secret as a Basic header instead of in the body. */
+  basic: boolean;
+  /** Where the token is in the answer (access_token, data.token). */
+  tokenPath: string;
+  /** Where the token goes on each call: Authorization: Bearer <token>. */
+  header: string; prefix: string;
+}
+export const DATA_HEADERS_MAX = 6;
+export const DATA_BODY_MAX = 4000;
 /** Admin sources: one key for everyone (the admin's), or each person adds their own. */
 export type DataKeyMode = 'one' | 'own';
 /** Who an admin source is offered to by default: everyone, only people chosen on Who can use them, or nobody yet. */
@@ -14,7 +36,8 @@ export type DataParamType = 'text' | 'number' | 'integer' | 'enum' | 'date' | 'b
 
 export interface DataParam {
   name: string;
-  in: 'path' | 'query';
+  /** In the path, the address, or (POST) the body. */
+  in: 'path' | 'query' | 'body';
   type: DataParamType;
   required: boolean;
   /** Text: longest length. Numbers: highest value. */
@@ -42,6 +65,13 @@ export interface DataAction {
   on: boolean;
   /** A dataset: imported into Knowledge as a table and refreshed when used, if older than this. Never asked live. */
   dataset?: DataRefresh;
+  /** POST, for searches and GraphQL queries that only take a posted body; GET when left out. */
+  method?: 'GET' | 'POST';
+  /** POST: the body, with "{{name}}" where Niko fills in a value (JSON), or name={{name}} pairs (form). */
+  body?: string;
+  bodyType?: 'json' | 'form';
+  /** POST: confirmed by the person to only read data. */
+  readOnly?: boolean;
 }
 export type DataRefresh = 'day' | 'week' | 'month';
 export const DATA_REFRESH_NAMES: Record<DataRefresh, string> = { day: 'daily', week: 'weekly', month: 'monthly' };
@@ -64,6 +94,11 @@ export interface DataSourceInfo {
   own: boolean;
   /** A key is saved: the admin's (one key for everyone) or this person's own. Never the key itself. */
   hasKey: boolean;
+  /** Other headers (secret values never sent back). */
+  headers: DataHeader[];
+  /** Signing in for a token (auth 'token'), and whether its ID and secret are saved. */
+  token: DataToken | null;
+  tokenSaved: boolean;
 }
 
 export const DATA_LIMITS = { sources: 20, actions: 30, params: 12, values: 40, name: 60, path: 200, text: 200, note: 300 } as const;
@@ -138,13 +173,13 @@ function cleanParam(v: unknown): DataParam | null {
   const num = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : typeof x === 'string' && x.trim() && Number.isFinite(Number(x)) ? Number(x) : undefined);
   const values = type === 'enum' && Array.isArray(p.values) ? [...new Set(p.values.map((x) => s(x, 60)).filter(Boolean))].slice(0, DATA_LIMITS.values) : undefined;
   if (type === 'enum' && !values?.length) return null;
-  const out: DataParam = { name, in: p.in === 'path' ? 'path' : 'query', type, required: p.in === 'path' || p.required === true };
+  const out: DataParam = { name, in: p.in === 'path' ? 'path' : p.in === 'body' ? 'body' : 'query', type, required: p.in === 'path' || p.required === true };
   const max = num(p.max), min = num(p.min);
   if (max !== undefined) out.max = type === 'text' ? Math.max(1, Math.min(DATA_LIMITS.text, Math.round(max))) : max;
   if (min !== undefined && type !== 'text') out.min = min;
   if (values) out.values = values;
   const fixed = s(p.fixed, 200);
-  if (fixed && out.in === 'query') { out.fixed = fixed; out.required = false; }
+  if (fixed && out.in !== 'path') { out.fixed = fixed; out.required = false; }
   const sample = s(p.sample, 100); if (sample) out.sample = sample;
   const about = s(p.about, 120); if (about) out.about = about;
   return out;
@@ -169,7 +204,21 @@ export function cleanAction(v: unknown, taken: Set<string> = new Set()): DataAct
   taken.add(id);
   const dataset = (['day', 'week', 'month'] as const).find((x) => x === a.dataset);
   if (dataset && params.some((p) => p.required && p.fixed === undefined && !p.sample)) return { problem: `“${name}”: a dataset is fetched without a question, so give each needed value a fixed or test value.` };
-  return { id, name, path, params, live: dataset ? false : a.live !== false, example: s(a.example, 120), on: a.on !== false, ...(dataset ? { dataset } : {}) };
+  let post: Pick<DataAction, 'method' | 'body' | 'bodyType' | 'readOnly'> = {};
+  if (a.method === 'POST') {
+    if (a.readOnly !== true) return { problem: `“${name}”: confirm it only reads data, or ask with GET.` };
+    const bodyType = a.bodyType === 'form' ? 'form' : 'json';
+    const body = typeof a.body === 'string' ? a.body.replace(/\r\n/g, '\n').trim().slice(0, DATA_BODY_MAX + 1) : '';
+    if (body.length > DATA_BODY_MAX) return { problem: `“${name}”: the body can be at most ${DATA_BODY_MAX.toLocaleString('en')} characters.` };
+    const holes = [...body.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_.\-]{0,39})\}\}/g)].map((m) => m[1]!);
+    for (const h of holes) if (!params.some((p) => p.in === 'body' && p.name === h)) return { problem: `“${name}”: the body uses {{${h}}}, which isn’t one of its values.` };
+    for (const p of params) if (p.in === 'body' && !holes.includes(p.name)) return { problem: `“${name}”: ${p.name} is a body value but isn’t in the body.` };
+    if (bodyType === 'json' && /\{\{[A-Za-z_][^{}]*\}\}/.test(body.replace(/"\{\{[^{}]+\}\}"/g, '""'))) return { problem: `“${name}”: in a JSON body, put each value in quotes: "{{name}}".` };
+    post = { method: 'POST', body, bodyType, readOnly: true };
+    const tried = actionBody({ id, name, path, params, live: true, example: '', on: true, ...post }, Object.fromEntries(params.map((p) => [p.name, p.fixed ?? p.sample ?? (p.type === 'number' || p.type === 'integer' ? '1' : p.type === 'boolean' ? 'true' : 'x')])));
+    if ('problem' in tried) return { problem: `“${name}”: ${tried.problem}` };
+  } else if (params.some((p) => p.in === 'body')) return { problem: `“${name}”: body values need POST.` };
+  return { id, name, path, params, live: dataset ? false : a.live !== false, example: s(a.example, 120), on: a.on !== false, ...(dataset ? { dataset } : {}), ...post };
 }
 export function cleanActions(v: unknown): DataAction[] | { problem: string } {
   const list = Array.isArray(v) ? v.slice(0, DATA_LIMITS.actions) : [];
@@ -221,6 +270,74 @@ export function actionUrl(baseUrl: string, action: DataAction, values: Record<st
   if (u.origin !== base.origin || !u.pathname.startsWith(base.pathname)) throw new Error('bad-address');
   return u.toString();
 }
+/** GraphQL that changes data: refused, whatever the person ticked. */
+const GQL_CHANGE = /(^|[\s{,;])(mutation|subscription)\b/i;
+/** The body for a POST action: each "{{name}}" replaced by its checked value (a JSON string, number or true/false;
+ *  null when an optional value isn't given), or form pairs encoded. A GraphQL query that would change data is refused,
+ *  so neither the person nor the AI can turn a search into a change. */
+export function actionBody(action: DataAction, values: Record<string, string>): { body: string; type: string } | { problem: string } {
+  const kind = (n: string) => action.params.find((p) => p.name === n)?.type ?? 'text';
+  let body: string, query: unknown;
+  if (action.bodyType === 'form') {
+    body = (action.body ?? '').split('&').filter(Boolean).map((pair) => {
+      const [k = '', v = ''] = pair.split('=');
+      return `${encodeURIComponent(decodeURIComponent(k))}=${v.replace(/\{\{([^}]+)\}\}/g, (_, n: string) => encodeURIComponent(values[n] ?? ''))}`;
+    }).join('&');
+    query = new URLSearchParams(body).get('query');
+  } else {
+    body = (action.body ?? '').replace(/"\{\{([^}]+)\}\}"/g, (_, n: string) => {
+      const v = values[n];
+      if (v === undefined || v === '') return 'null';
+      const t = kind(n);
+      return t === 'number' || t === 'integer' ? String(Number(v)) : t === 'boolean' ? (v === 'true' ? 'true' : 'false') : JSON.stringify(v);
+    });
+    let parsed: unknown;
+    try { parsed = body ? JSON.parse(body) : {}; } catch { return { problem: 'the body isn’t valid JSON.' }; }
+    query = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>).query : undefined;
+  }
+  if (typeof query === 'string' && GQL_CHANGE.test(query)) return { problem: 'it would change data (a GraphQL mutation), so Niko won’t send it.' };
+  return { body, type: action.bodyType === 'form' ? 'application/x-www-form-urlencoded' : 'application/json' };
+}
+
+const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,60}$/;
+/** Headers Niko sets itself, or that would change how the call travels: not allowed. */
+const HEADER_BLOCKED = /^(host|content-length|content-type|connection|keep-alive|transfer-encoding|te|trailer|upgrade|expect|accept-encoding|proxy-.*|sec-.*|via|forwarded|x-forwarded-.*|cf-.*)$/i;
+/** Checks the other headers: at most 6, each named once, values on one line. Secret values aren't kept here. */
+export function cleanHeaders(v: unknown, taken: string[] = []): DataHeader[] | { problem: string } {
+  const out: DataHeader[] = [], names = new Set(taken.map((t) => t.toLowerCase()));
+  for (const x of (Array.isArray(v) ? v : []).slice(0, DATA_HEADERS_MAX + 1)) {
+    const h = (x ?? {}) as Record<string, unknown>;
+    const name = s(h.name, 60);
+    if (!name && !s(h.value, 10)) continue;
+    if (!HEADER_NAME.test(name)) return { problem: `“${name || 'A header'}” isn’t a header name.` };
+    if (HEADER_BLOCKED.test(name)) return { problem: `Niko sets ${name} itself.` };
+    if (names.has(name.toLowerCase())) return { problem: `${name} is listed twice.` };
+    names.add(name.toLowerCase());
+    const secret = h.secret === true;
+    if (!secret && typeof h.value === 'string' && /[\r\n]/.test(h.value)) return { problem: `${name}’s value must be on one line.` };
+    out.push(secret ? { name, secret } : { name, secret, value: s(h.value, 1000) });
+  }
+  if (out.length > DATA_HEADERS_MAX) return { problem: `A source can send up to ${DATA_HEADERS_MAX} other headers.` };
+  return out;
+}
+/** Checks how to get a token. The token address must be https and public, like any source. */
+export function cleanToken(v: unknown): DataToken | { problem: string } {
+  const t = (v ?? {}) as Record<string, unknown>;
+  let u: URL;
+  try { u = new URL(s(t.url, 300)); } catch { return { problem: 'Enter the token address, starting with https://.' }; }
+  if (u.protocol !== 'https:' || u.username || u.password || (u.port && u.port !== '443') || u.hash) return { problem: 'The token address must be a plain https address.' };
+  const host = hostProblem(u.hostname);
+  if (host) return { problem: host };
+  const style = t.style === 'login' ? 'login' : 'client';
+  const field = (x: unknown, d: string) => { const n = s(x, 60); return /^[A-Za-z_][A-Za-z0-9_.-]{0,59}$/.test(n) ? n : d; };
+  const header = s(t.header, 60) || 'Authorization';
+  if (!HEADER_NAME.test(header) || HEADER_BLOCKED.test(header)) return { problem: `The token can’t go in “${header}”.` };
+  const path = s(t.tokenPath, 60) || 'access_token';
+  if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,4}$/.test(path)) return { problem: 'Say where the token is in the answer, such as access_token or data.token.' };
+  return { url: u.toString(), style, idName: field(t.idName, style === 'client' ? 'client_id' : 'email'), secretName: field(t.secretName, style === 'client' ? 'client_secret' : 'password'),
+    scope: s(t.scope, 200), basic: style === 'client' && t.basic === true, tokenPath: path, header, prefix: typeof t.prefix === 'string' ? t.prefix.replace(/[\r\n]/g, '').slice(0, 20) : 'Bearer ' };
+}
+
 /** Sample values for Test: each param's sample, else its first allowed value, else nothing. */
 export function sampleValues(action: DataAction): Record<string, string> {
   const out: Record<string, string> = {};
@@ -296,7 +413,8 @@ export const DATA_RULE = 'DATA SOURCES lists data sites the user connected. When
 
 /** Shortens an answer for the AI's prompt: long lists cut to their first 30 items, long text cut, at most 4,000
  *  characters. CSV keeps its header and first 30 rows. */
-export function resultText(body: string, kind: 'json' | 'csv'): string {
+export function resultText(body: string, kind: 'json' | 'csv' | 'xml'): string {
+  if (kind === 'xml') { const t = xmlText(body); return t.length > DATA_RESULT_CHARS ? `${t.slice(0, DATA_RESULT_CHARS)}…` : t; }
   if (kind === 'csv') {
     const lines = body.split(/\r?\n/).filter((l) => l.trim());
     const more = lines.length > 31 ? `\n… ${lines.length - 31} more rows` : '';
@@ -444,9 +562,14 @@ function jsonRecords(v: unknown, depth = 0): Record<string, unknown>[] | null {
 }
 /** A dataset answer as a table: CSV or TSV with a header row, or the first list of records in JSON. Column kinds are
  *  guessed from the values (numbers, dates, yes/no, else text). At most 40 columns and 20,000 rows. */
-export function datasetTable(body: string, kind: 'json' | 'csv'): DatasetTable | { problem: string } {
+export function datasetTable(body: string, kind: 'json' | 'csv' | 'xml'): DatasetTable | { problem: string } {
   let header: string[], rows: string[][];
-  if (kind === 'csv') {
+  if (kind === 'xml') {
+    const recs = xmlRecords(body);
+    if (!recs) return { problem: 'The dataset has no list of records Niko can keep as a table.' };
+    header = [...new Set(recs.slice(0, 200).flatMap((r) => Object.keys(r)))];
+    rows = recs.map((r) => header.map((h) => r[h] ?? ''));
+  } else if (kind === 'csv') {
     const all = csvRows(body);
     if (all.length < 2) return { problem: 'The dataset had no rows.' };
     header = all[0]!; rows = all.slice(1);
@@ -522,4 +645,196 @@ export function fromExampleLink(raw: unknown, taken: Set<string> = new Set()): F
   let id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'ask', n = 2;
   while (taken.has(id)) id = `${id.slice(0, 36)}-${n++}`;
   return { baseUrl: base.url, name, key, action: { id, name, path: path.slice(0, 200), params, live: true, example: '', on: true } };
+}
+
+// ---------------------------------------------------------------- XML answers
+/** One element of an XML answer. */
+export interface XmlNode { name: string; attrs: Record<string, string>; kids: XmlNode[]; text: string }
+/** Only the five named entities and numeric ones are read; anything else (including entities a DOCTYPE defines) is left
+ *  as written, and the DOCTYPE itself is dropped, so nothing outside the answer is ever loaded or expanded. */
+const xmlDecode = (t: string) => t.replace(/&(lt|gt|amp|quot|apos|#\d{1,7}|#x[0-9a-f]{1,6});/gi, (m, e: string) => {
+  const k = e.toLowerCase();
+  if (k === 'lt') return '<'; if (k === 'gt') return '>'; if (k === 'amp') return '&'; if (k === 'quot') return '"'; if (k === 'apos') return "'";
+  const n = k.startsWith('#x') ? parseInt(k.slice(2), 16) : parseInt(k.slice(1), 10);
+  return n > 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : m;
+});
+/** Reads an XML answer into elements: at most 20,000 of them, 64 deep. Not a validating parser, just enough to read data. */
+export function parseXml(body: string): XmlNode | null {
+  const src = body.replace(/^\uFEFF/, '').replace(/<\?[\s\S]*?\?>/g, '').replace(/<!--[\s\S]*?-->/g, '').replace(/<!DOCTYPE(?:[^\[>]|\[[\s\S]*?\])*>/gi, '');
+  const root: XmlNode = { name: '#root', attrs: {}, kids: [], text: '' };
+  const stack = [root];
+  let count = 0;
+  const re = /<!\[CDATA\[([\s\S]*?)\]\]>|<(\/?)([A-Za-z_][\w.:-]*)((?:\s+[\w.:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>|([^<]+)|(<)/g;
+  for (let m: RegExpExecArray | null; (m = re.exec(src));) {
+    const top = stack[stack.length - 1]!;
+    if (m[1] !== undefined) { top.text += m[1]; continue; }
+    if (m[6] !== undefined) { top.text += xmlDecode(m[6]); continue; }
+    if (m[7] !== undefined) return null; // a stray "<": not XML
+    const name = m[3]!.replace(/^[\w.-]+:/, '');
+    if (m[2]) { if (stack.length > 1 && top.name === name) stack.pop(); continue; }
+    if (++count > 20_000 || stack.length > 64) return null;
+    const attrs: Record<string, string> = {};
+    for (const a of m[4]!.matchAll(/([\w.:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) if (!/^xmlns(:|$)/.test(a[1]!)) attrs[a[1]!.replace(/^[\w.-]+:/, '')] = xmlDecode(a[2] ?? a[3] ?? '');
+    const node: XmlNode = { name, attrs, kids: [], text: '' };
+    top.kids.push(node);
+    if (!m[5]) stack.push(node);
+  }
+  return root.kids.length ? root : null;
+}
+/** An XML answer as short lines for the AI: "parent.name: text (attribute=value)", lists cut to their first 30. */
+export function xmlText(body: string): string {
+  const root = parseXml(body);
+  if (!root) return body.slice(0, DATA_RESULT_CHARS);
+  const lines: string[] = [];
+  const walk = (n: XmlNode, parent: string, depth: number) => {
+    if (lines.length > 400) return;
+    const text = n.text.replace(/\s+/g, ' ').trim();
+    const attrs = Object.entries(n.attrs).map(([k, v]) => `${k}=${v.slice(0, 100)}`).join(', ');
+    if (n.kids.length === 0) { if (text || attrs) lines.push(`${'  '.repeat(Math.min(depth, 6))}${parent ? `${parent}.` : ''}${n.name}: ${text.slice(0, 300)}${attrs ? ` (${attrs})` : ''}`); return; }
+    if (attrs || text) lines.push(`${'  '.repeat(Math.min(depth, 6))}${n.name}${attrs ? ` (${attrs})` : ''}${text ? `: ${text.slice(0, 300)}` : ''}`);
+    const seen: Record<string, number> = {};
+    for (const k of n.kids) {
+      seen[k.name] = (seen[k.name] ?? 0) + 1;
+      if (seen[k.name] === 31) lines.push(`${'  '.repeat(Math.min(depth + 1, 6))}… more ${k.name}`);
+      if (seen[k.name]! > 30) continue;
+      walk(k, n.name === '#root' ? '' : n.name, depth + 1);
+    }
+  };
+  walk(root, '', -1);
+  return lines.join('\n');
+}
+/** The records in an XML answer, for a dataset: the longest list of same-named elements whose own children are plain
+ *  values (and attributes). */
+export function xmlRecords(body: string): Record<string, string>[] | null {
+  const root = parseXml(body);
+  if (!root) return null;
+  let best: XmlNode[] = [];
+  const look = (n: XmlNode) => {
+    const by: Record<string, XmlNode[]> = {};
+    for (const k of n.kids) (by[k.name] ??= []).push(k);
+    for (const list of Object.values(by)) if (list.length >= 2 && list.length > best.length && list.every((k) => k.kids.every((g) => g.kids.length === 0))) best = list;
+    for (const k of n.kids) look(k);
+  };
+  look(root);
+  if (!best.length) return null;
+  return best.map((r) => ({ ...Object.fromEntries(Object.entries(r.attrs).map(([k, v]) => [`@${k}`, v])), ...Object.fromEntries(r.kids.map((g) => [g.name, g.text.trim()])) }));
+}
+
+// ---------------------------------------------------------------- from a curl command
+/** Header names that carry a secret: kept encrypted, never shown again, never an example. */
+const SECRET_HEADER = /authorization|api[-_]?key|token|secret|password|passwd|cookie|signature|session|^x-.*-key$|^x-auth/i;
+export interface FromRequest extends FromLink {
+  headers: { name: string; value: string; secret: boolean }[];
+  /** The key: the first secret header, or a key in the link. */
+  auth: { mode: 'header' | 'query'; name: string; value: string } | null;
+}
+/** Splits a shell command into words: 'single' and "double" quotes, backslashes, and lines ending in \ joined. */
+function shellWords(text: string): string[] | null {
+  const src = text.replace(/\\\r?\n/g, ' ').replace(/\^\r?\n/g, ' ');
+  const out: string[] = [];
+  let cur = '', inWord = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === "'") { const end = src.indexOf("'", i + 1); if (end < 0) return null; cur += src.slice(i + 1, end); i = end; inWord = true; continue; }
+    if (c === '"') {
+      let j = i + 1;
+      for (; j < src.length && src[j] !== '"'; j++) { if (src[j] === '\\' && j + 1 < src.length) { j++; cur += src[j]; } else cur += src[j]; }
+      if (j >= src.length) return null;
+      i = j; inWord = true; continue;
+    }
+    if (c === '\\' && i + 1 < src.length) { cur += src[++i]; inWord = true; continue; }
+    if (/\s/.test(c)) { if (inWord) { out.push(cur); cur = ''; inWord = false; } continue; }
+    cur += c; inWord = true;
+  }
+  if (inWord) out.push(cur);
+  return out;
+}
+const b64 = (t: string) => { const bytes = new TextEncoder().encode(t); let bin = ''; for (const b of bytes) bin += String.fromCharCode(b); return btoa(bin); };
+/** Reads a curl command from an API's docs into a source: the link (as fromExampleLink), GET or POST, its headers (a
+ *  secret one becomes the key, others are kept secret or plain), and a body whose text values become values Niko fills
+ *  in (numbers and true/false stay as they are; a GraphQL query stays exactly as written). PUT, PATCH and DELETE change
+ *  data, so they're refused. */
+export function fromCurl(raw: unknown, taken: Set<string> = new Set()): FromRequest | { problem: string } {
+  const words = shellWords(s(raw, 8000).replace(/[\u0000-\u0008\u000b-\u001f]/g, ' '));
+  if (!words || !words.length) return { problem: 'Niko couldn’t read that command (check its quotes).' };
+  if (words[0] === 'curl') words.shift();
+  let url = '', method = '', get = false, json = false;
+  const headers: { name: string; value: string }[] = [], data: string[] = [];
+  const takesValue = new Set(['-o', '--output', '-m', '--max-time', '--connect-timeout', '-w', '--write-out', '-e', '--referer', '-A', '--user-agent', '-x', '--proxy', '--retry', '-r', '--range', '-c', '--cookie-jar', '--cacert', '--cert', '--key', '-T', '--upload-file', '-F', '--form']);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!, next = () => words[++i] ?? '';
+    if (w === '-X' || w === '--request') method = next().toUpperCase();
+    else if (/^-X[A-Z]+$/.test(w)) method = w.slice(2);
+    else if (w === '-H' || w === '--header') { const h = next(), at = h.indexOf(':'); if (at > 0) headers.push({ name: h.slice(0, at).trim(), value: h.slice(at + 1).trim() }); }
+    else if (['-d', '--data', '--data-raw', '--data-binary', '--data-ascii', '--data-urlencode'].includes(w)) data.push(next());
+    else if (w === '--json') { data.push(next()); json = true; }
+    else if (w === '-u' || w === '--user') headers.push({ name: 'Authorization', value: `Basic ${b64(next())}` });
+    else if (w === '-b' || w === '--cookie') headers.push({ name: 'Cookie', value: next() });
+    else if (w === '-G' || w === '--get') get = true;
+    else if (w === '--url') url = next();
+    else if (w === '-F' || w === '--form' || w === '-T' || w === '--upload-file') return { problem: 'That command uploads files; Niko only reads.' };
+    else if (takesValue.has(w)) next();
+    else if (!w.startsWith('-') && !url) url = w;
+  }
+  if (!url) return { problem: 'Niko couldn’t find the link in that command.' };
+  if (!method) method = data.length && !get ? 'POST' : 'GET';
+  if (method !== 'GET' && method !== 'POST') return { problem: `${method} changes data, so Niko won’t use it. Niko only reads.` };
+  let link = url;
+  if (method === 'GET' && data.length) { try { const u = new URL(url); for (const pair of data.join('&').split('&')) { const [k, v = ''] = pair.split('='); if (k) u.searchParams.append(decodeURIComponent(k), decodeURIComponent(v)); } link = u.toString(); } catch { /* checked below */ } }
+  const base = fromExampleLink(link, taken);
+  if ('problem' in base) return base;
+  let auth: FromRequest['auth'] = base.key ? { mode: 'query', name: base.key.name, value: base.key.value } : null;
+  const kept: FromRequest['headers'] = [];
+  let bodyType: 'json' | 'form' = json || /^\s*[[{]/.test(data.join('')) ? 'json' : 'form';
+  for (const h of headers) {
+    const n = h.name.toLowerCase();
+    if (n === 'content-type') { bodyType = /urlencoded/.test(h.value) ? 'form' : 'json'; continue; }
+    if (n === 'content-length' || n === 'host' || n === 'accept-encoding' || n === 'connection') continue;
+    if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,60}$/.test(h.name)) continue;
+    const secret = SECRET_HEADER.test(h.name);
+    if (secret && !auth) { auth = { mode: 'header', name: h.name, value: h.value.slice(0, 500) }; continue; }
+    if (kept.length < DATA_HEADERS_MAX) kept.push({ name: h.name, value: h.value.slice(0, 1000), secret });
+  }
+  const action: DataAction = { ...base.action };
+  if (method === 'POST') {
+    const text = data.join(json || bodyType === 'json' ? '' : '&').trim();
+    const params = [...action.params];
+    const fresh = (k: string) => { const b = k.replace(/[^A-Za-z0-9_]/g, '_').replace(/^[^A-Za-z_]/, '_$&').slice(0, 36) || 'value'; let n = b, i = 2; while (params.some((p) => p.name === n)) n = `${b}${i++}`; return n; };
+    let parsed: unknown, isJson = false;
+    try { parsed = JSON.parse(text || '{}'); isJson = !!parsed && typeof parsed === 'object'; } catch { /* a form, or plain text */ }
+    if (isJson && bodyType !== 'form') {
+      const holes: [string, string][] = [];
+      let problem = '';
+      const walk = (v: unknown, key: string, depth: number): unknown => {
+        if (depth > 6) return v;
+        if (Array.isArray(v)) return v.map((x) => walk(x, key, depth + 1));
+        if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, walk(x, k, depth + 1)]));
+        if (typeof v !== 'string') return v;
+        if (KEY_NAMES.test(key) || /^pass(word)?$/i.test(key)) { problem = `The body holds a key or password (${key}). Put it under Does it need a key? instead.`; return v; }
+        if (key === 'query' && /[{}]/.test(v)) return v; // a GraphQL query: sent exactly as written
+        if (params.length >= DATA_LIMITS.params) return v;
+        const name = fresh(key);
+        params.push({ name, in: 'body', type: kindOf(v), required: true, ...(kindOf(v) === 'text' ? { max: Math.max(40, Math.min(DATA_LIMITS.text, v.length * 3)) } : {}), ...(v ? { sample: v.slice(0, 100) } : {}) });
+        const mark = `__niko_hole_${holes.length}__`;
+        holes.push([mark, name]);
+        return mark;
+      };
+      const tpl = walk(parsed, '', 0);
+      if (problem) return { problem };
+      let body = JSON.stringify(tpl, null, 2);
+      for (const [mark, name] of holes) body = body.replace(`"${mark}"`, `"{{${name}}}"`);
+      Object.assign(action, { params, method: 'POST', body, bodyType: 'json' });
+    } else {
+      const pairs = text.split('&').filter(Boolean).map((pair) => { const [k = '', v = ''] = pair.split('='); let key = k, val = v; try { key = decodeURIComponent(k); val = decodeURIComponent(v.replace(/\+/g, ' ')); } catch { /* as written */ } return [key, val] as const; });
+      for (const [k] of pairs) if (KEY_NAMES.test(k) || /^pass(word)?$/i.test(k)) return { problem: `The body holds a key or password (${k}). Put it under Does it need a key? instead.` };
+      const body = pairs.map(([k, v]) => {
+        if (FIXED_NAMES.test(k) || params.length >= DATA_LIMITS.params) return `${encodeURIComponent(k)}=${encodeURIComponent(v)}`;
+        const name = fresh(k);
+        params.push({ name, in: 'body', type: kindOf(v), required: true, ...(kindOf(v) === 'text' ? { max: Math.max(40, Math.min(DATA_LIMITS.text, v.length * 3)) } : {}), ...(v ? { sample: v.slice(0, 100) } : {}) });
+        return `${encodeURIComponent(k)}={{${name}}}`;
+      }).join('&');
+      Object.assign(action, { params, method: 'POST', body, bodyType: 'form' });
+    }
+  }
+  return { ...base, action, headers: kept, auth };
 }
