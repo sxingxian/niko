@@ -100,7 +100,7 @@ export function PlanGate({ children }: { children: ReactNode }) {
           <Icon name="lock" size={18} />{busy ? 'Opening Stripe…' : `Subscribe · ${money(offer!.cents)} ${per(offer!.plan)}`}
         </button>
         <p className="sub small">Renews every {offer!.plan === 'monthly' ? 'month' : 'year'} until you cancel in Account. You keep access to the end of the paid {offer!.plan === 'monthly' ? 'month' : 'year'}. You’ll pay on Stripe’s secure page.</p>
-      </> : <p className="sub">Plans aren’t available right now. Ask your admin to set them up, or to unlock your account.</p>}
+      </> : <p className="sub">Plans aren’t available right now. Try again later.</p>}
       <button type="button" className="lnk" style={{ alignSelf: 'flex-start' }} onClick={signOut}>Sign out</button>
     </Shell></>
   );
@@ -123,7 +123,7 @@ export function BillingCard() {
     : a.kind === 'life' ? 'Lifetime. There’s nothing to pay.'
     : sub ? `${sub.plan === 'yearly' ? 'Yearly' : 'Monthly'} plan · ${sub.status === 'trialing' ? `billing starts ${fmtDate(sub.periodEnd)}` : sub.cancelAtEnd ? `ends ${fmtDate(sub.periodEnd)}` : sub.status === 'active' ? `renews ${fmtDate(sub.periodEnd)}` : `payment failed: update your card by ${fmtDate(a.until)}`}`
     : a.kind === 'free' ? `Free until ${fmtDate(a.until)}.`
-    : a.kind === 'unlocked' ? `Unlocked by your admin until ${fmtDate(a.until)}.`
+    : a.kind === 'unlocked' ? `Unlocked until ${fmtDate(a.until)}.`
     : a.kind === 'paid' ? `Paid until ${fmtDate(a.until)}.` : 'No time left.';
   const offer = a.plans.find((p) => p.plan === pick) ?? a.plans[0];
   const canChoose = !sub && !a.lifetime && a.kind !== 'admin' && a.payments && a.plans.length > 0;

@@ -1716,7 +1716,7 @@ export function Appearance() {
                 </select>
               </label>
               {checks && cleanGlancePrefs(me?.appearance.glance).on && <span className="hint glance-last">Last checked: {GLANCE_PARTS.map((p) => `${GLANCE_PART_NAMES[p]} ${!checks.every[p] ? 'off' : checks.checked[p] ? clockOf(checks.checked[p]!) : 'not yet'}`).join(' · ')}. Checks run while Home is open; the first one only learns what is already there.</span>}
-              <span className="hint">Niko checks only while Home is open and on screen, and pauses after 30 minutes without use. Messages from Telegram and Slack arrive straight away; less often is kinder to your email provider. {GLANCE_PARTS.some((p) => limits[p] > 1) ? 'Your administrator sets how often checks may run.' : ''} Changes to notes you make yourself in Notion aren’t shown; OneNote doesn’t say who changed a page, so all its changes are.</span>
+              <span className="hint">Niko checks only while Home is open and on screen, and pauses after 30 minutes without use. Messages from Telegram and Slack arrive straight away; less often is kinder to your email provider. {GLANCE_PARTS.some((p) => limits[p] > 1) ? 'Your plan sets how often checks may run.' : ''} Changes to notes you make yourself in Notion aren’t shown; OneNote doesn’t say who changed a page, so all its changes are.</span>
             </>}
           </div>}
         </section>

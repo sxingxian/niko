@@ -47,7 +47,7 @@ const meaning = (n: KnLearnedItem) => n.kind === 'remembered' ? 'Kept as you sai
 const used = (n: KnLearnedItem) => (n.suggested ? `Fades in ${n.fadesIn ?? 60} ${n.fadesIn === 1 ? 'day' : 'days'}` : n.kind === 'habit' ? 'Kept' : n.uses ? `Used ${n.uses === 1 ? 'once' : `${n.uses} times`}` : 'Not used yet');
 
 /** The What Niko learned tab. */
-export function LearnedTab({ account, place, learn, onLearn, situations, onSituations }: { account: string; place: Place; learn: boolean; onLearn: (v: boolean) => void; situations: boolean; onSituations: (v: boolean) => void }) {
+export function LearnedTab({ account, place, files, learn, onLearn, situations, onSituations }: { account: string; place: Place; files: boolean; learn: boolean; onLearn: (v: boolean) => void; situations: boolean; onSituations: (v: boolean) => void }) {
   const { items, err, setErr, forget, edit, forgetAll, answer } = useNotes(account, place);
   const [kind, setKind] = useState<'all' | KnLearnedKind>('all');
   const [q, setQ] = useState('');
@@ -79,7 +79,8 @@ export function LearnedTab({ account, place, learn, onLearn, situations, onSitua
       <section className="g kn-card" aria-label="Everything Niko learned">
         <div className="kn-learn-bar">
           <div className="kn-tabs" role="tablist" aria-label="Kinds">
-            {(['all', ...KN_LEARNED_KINDS_NOW] as const).map((k) => (
+            {/* File matches only with Knowledge files (or when some are still kept from before). */}
+            {(['all', ...KN_LEARNED_KINDS_NOW.filter((k) => k !== 'file-match' || files || list.some((n) => n.kind === k))] as const).map((k) => (
               <button key={k} type="button" role="tab" className="ptab" aria-selected={kind === k} onClick={() => setKind(k)}>
                 {k === 'all' ? 'All' : KN_LEARNED_KIND_NAMES[k]}<span className="n">{k === 'all' ? list.length : list.filter((n) => n.kind === k).length}</span>
               </button>
@@ -140,15 +141,15 @@ export function LearnedTab({ account, place, learn, onLearn, situations, onSitua
 }
 
 /** The aside beside What Niko learned. */
-export function LearnedAside() {
+export function LearnedAside({ files }: { files: boolean }) {
   return (
     <aside className="kn-aside" aria-label="About what Niko learns">
       <span className="k">How Niko learns</span>
-      <p>Each thing Niko learns is a short note it looks up when you ask something, like your files. No AI is trained on it.</p>
+      <p>Each thing Niko learns is a short note it looks up when you ask something{files ? ', like your files' : ''}. No AI is trained on it.</p>
       <p>Your answers and corrections count most. A correction replaces the old note straight away.</p>
       <p>Things you do often are only suggested, and kept once you say yes.</p>
-      <p>Playbooks are how you handle situations. They’re used before your files, and Niko mentions when a file says otherwise.</p>
-      <p>Say “that’s the one” to something similar from your files, and Niko uses it for questions like that from then on.</p>
+      <p>Playbooks are how you handle situations.{files ? ' They’re used before your files, and Niko mentions when a file says otherwise.' : ''}</p>
+      {files && <p>Say “that’s the one” to something similar from your files, and Niko uses it for questions like that from then on.</p>}
       <span className="k">Never learned</span>
       <p>Anything from emails, messages, files or pages others wrote: a message saying “remember that…” changes nothing.</p>
       <p>Passwords, codes, card or account numbers.</p>
