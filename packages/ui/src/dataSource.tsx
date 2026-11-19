@@ -2,7 +2,7 @@
 // sources: address and sign-in, what Niko can ask (read-only actions, typed in or found in an OpenAPI file), and test
 // results. Every check here is repeated on the server; these only show problems early.
 import { useRef, useState } from 'react';
-import { actionLine, DATA_USE_NAMES, type DataRefresh, cleanAction, cleanBaseUrl, openApiActions, type DataAction, type DataAuth, type DataKeyMode, type DataOffer, type DataParam, type DataParamType, type DataSourceInfo, type DataUse } from '@niko/shared';
+import { actionLine, DATA_USE_NAMES, type DataRefresh, cleanAction, cleanBaseUrl, fromExampleLink, openApiActions, type DataAction, type DataAuth, type DataKeyMode, type DataOffer, type DataParam, type DataParamType, type DataSourceInfo, type DataUse } from '@niko/shared';
 
 export interface SourceDraft {
   name: string; use: DataUse; baseUrl: string; auth: DataAuth; authName: string; keyMode: DataKeyMode; key: string;
@@ -147,14 +147,152 @@ export function ActionsStep({ d, set, onBase, datasets = true }: { d: SourceDraf
   );
 }
 
-export type TestResult = { action: string; name: string; ok: boolean; ms?: number; problem?: string };
-/** Test results, one line per action. */
+export type TestResult = { action: string; name: string; ok: boolean; ms?: number; problem?: string; peek?: string };
+/** Test results, one line per action, with the start of what came back when it's shown. */
 export function TestLines({ results }: { results: TestResult[] | null }) {
   if (!results) return null;
   if (!results.length) return null;
   return (
     <div className="ds-tests" role="status">
       {results.map((r) => <span key={r.action} className={r.ok ? 'is-ok' : 'is-bad'}><i aria-hidden="true" />{r.name} · {r.ok ? `test passed in ${((r.ms ?? 0) / 1000).toFixed(1)} s` : r.problem}</span>)}
+      {results.filter((r) => r.ok && r.peek).map((r) => <details key={`p${r.action}`} className="ds-peek" open={results.length === 1}><summary>What {r.name} gave back</summary><pre>{r.peek}{(r.peek?.length ?? 0) >= 600 ? '\n…' : ''}</pre></details>)}
     </div>
   );
+}
+
+/** What step 1 still needs when starting from a link. */
+export function linkProblem(d: SourceDraft, hasKey: boolean): string | null {
+  if (!d.actions.length) return 'Paste a link that works, starting with https://.';
+  return addressProblem(d, hasKey);
+}
+
+/** Step 1, the simple way · Paste a link that works: Niko reads the address, the path and each value (with its example)
+ *  from it, and a key in the link becomes the key. Then the name and the key. */
+export function LinkStep({ d, set, admin, hasKey, onManual }: { d: SourceDraft; set: (p: Partial<SourceDraft>) => void; admin: boolean; hasKey: boolean; onManual: () => void }) {
+  const [link, setLink] = useState('');
+  const [note, setNote] = useState<string | null>(null);
+  const read = (raw: string) => {
+    setLink(raw);
+    if (!raw.trim()) { setNote(null); return; }
+    const r = fromExampleLink(raw);
+    if ('problem' in r) { setNote(r.problem); return; }
+    setNote(null);
+    set({ baseUrl: r.baseUrl, actions: [r.action], ...(d.name.trim() ? {} : { name: r.name }), ...(r.key ? { auth: 'query' as DataAuth, authName: r.key.name, key: r.key.value } : {}) });
+  };
+  const a = d.actions[0];
+  const asks = a?.params.filter((p) => p.fixed === undefined) ?? [];
+  const host = (() => { try { return new URL(d.baseUrl).hostname; } catch { return ''; } })();
+  return (
+    <div className="ds-step">
+      <label className="fld"><span className="k">A link that works</span>
+        <input className="in ds-link" value={link} inputMode="url" autoComplete="off" spellCheck={false} onChange={(e) => read(e.target.value)} placeholder="https://api.example.com/arrivals?stop=83139" autoFocus />
+        <span className="ds-hint">From the service’s docs: an example request you could open yourself. A key in the link is kept as the key, never as an example.</span>
+      </label>
+      {note && <p className="ds-err" role="alert">{note}</p>}
+      {a && !note && <div className="ds-found" role="status">
+        <span className="ds-found-t">Niko found</span>
+        <span className="ds-hint">{a.name}{host ? ` on ${host}` : ''}</span>
+        <span className="ds-hint">{asks.length ? <>It asks for {asks.map((p, i) => <span key={p.name}>{i ? ', ' : ''}<b>{p.name}</b>{p.sample ? ` (e.g. ${p.sample})` : ''}</span>)}</> : 'It needs no values.'}</span>
+      </div>}
+      <div className="ds-two">
+        <label className="fld"><span className="k">{admin ? 'Name people see' : 'Name'}</span><input className="in" value={d.name} maxLength={60} onChange={(e) => set({ name: e.target.value })} placeholder="Bus arrivals" /></label>
+        <label className="fld"><span className="k">Use as</span><select className="in" value={d.use} onChange={(e) => set({ use: e.target.value as DataUse })}>{(Object.keys(DATA_USE_NAMES) as DataUse[]).map((u) => <option key={u} value={u}>{DATA_USE_NAMES[u]}</option>)}</select></label>
+      </div>
+      <div className="fld"><span className="k">Does it need a key?</span>
+        <span className="ds-seg" role="radiogroup" aria-label="Does it need a key?">
+          {([['none', 'No key'], ['header', 'Key in a header'], ['query', 'Key in the link']] as [DataAuth, string][]).map(([v, t]) => <button key={v} type="button" role="radio" aria-checked={d.auth === v} onClick={() => set({ auth: v })}>{t}</button>)}
+        </span>
+      </div>
+      {d.auth !== 'none' && <div className="ds-two">
+        <label className="fld"><span className="k">{d.auth === 'header' ? 'Header name' : 'Name in the link'}</span><input className="in" value={d.authName} maxLength={60} spellCheck={false} onChange={(e) => set({ authName: e.target.value })} placeholder={d.auth === 'header' ? 'AccountKey' : 'api_key'} /></label>
+        {admin && <label className="fld"><span className="k">Key</span><select className="in" value={d.keyMode} onChange={(e) => set({ keyMode: e.target.value as DataKeyMode })}><option value="one">One key for everyone (yours)</option><option value="own">Each person adds their own</option></select></label>}
+        {d.keyMode === 'one' && <label className="fld"><span className="k">{admin ? 'Your key' : 'Key'}</span><input className="in" type="password" autoComplete="off" value={d.key} maxLength={500} onChange={(e) => set({ key: e.target.value })} placeholder={hasKey ? 'Saved · leave empty to keep it' : ''} /></label>}
+      </div>}
+      {d.auth !== 'none' && <span className="ds-hint">The service’s docs say what it’s called (LTA DataMall: a header named AccountKey). {d.keyMode === 'own' && admin ? 'People enter their own key when they turn it on.' : 'Kept encrypted on Niko’s server and never shown again.'}</span>}
+      <button type="button" className="ds-lnk" onClick={onManual}>More ways: set up by hand, or import an OpenAPI file</button>
+    </div>
+  );
+}
+
+/** Step 2, the simple way · What it answers: one card per thing Niko can ask, with a question it answers and, for each
+ *  value, who decides it (Niko from the question, or always the same). Kinds, limits and the path are under More options. */
+export function AnswersStep({ d, set, datasets = true, onManual }: { d: SourceDraft; set: (p: Partial<SourceDraft>) => void; datasets?: boolean; onManual: () => void }) {
+  const [adding, setAdding] = useState<string | null>(null);
+  const [err, setErr] = useState('');
+  const setA = (i: number, p: Partial<DataAction>) => set({ actions: d.actions.map((x, j) => (j === i ? { ...x, ...p } : x)) });
+  const setP = (i: number, k: number, p: Partial<DataParam>) => setA(i, { params: d.actions[i]!.params.map((x, j) => (j === k ? { ...x, ...p } : x)) });
+  const addLink = () => {
+    const r = fromExampleLink(adding ?? '', new Set(d.actions.map((a) => a.id)));
+    if ('problem' in r) return setErr(r.problem);
+    const site = (u: string) => { try { return new URL(u).origin; } catch { return ''; } };
+    if (site(r.baseUrl) !== site(d.baseUrl)) return setErr('That link is on another site. Add it as a separate data source.');
+    if (d.actions.length >= 30) return setErr('A source can have up to 30 things Niko can ask.');
+    set({ actions: [...d.actions, r.action], ...(r.key && d.auth === 'none' ? { auth: 'query' as DataAuth, authName: r.key.name, key: r.key.value } : {}) });
+    setAdding(null); setErr('');
+  };
+  return (
+    <div className="ds-step">
+      {d.actions.map((a, i) => (
+        <div key={a.id || i} className={'ds-card' + (a.on ? '' : ' off')}>
+          <div className="ds-two">
+            <label className="fld"><span className="k">Name</span><input className="in" value={a.name} maxLength={60} onChange={(e) => setA(i, { name: e.target.value })} /></label>
+            <label className="fld"><span className="k">A question it answers</span><input className="in" value={a.example} maxLength={120} onChange={(e) => setA(i, { example: e.target.value })} placeholder="When’s bus 269 coming to my stop?" /></label>
+          </div>
+          <div className="ds-vals">
+            <span className="k">What Niko fills in</span>
+            {!a.params.length && <span className="ds-hint">Nothing: it’s always asked the same way.</span>}
+            {a.params.map((p, k) => (
+              <div key={k} className="ds-val">
+                <span className="ds-val-n"><input className="in" aria-label="Value name" value={p.name} maxLength={40} spellCheck={false} placeholder="name" readOnly={p.in === 'path'} onChange={(e) => setP(i, k, { name: e.target.value })} />{p.sample && p.fixed === undefined && <span className="ds-hint">e.g. {p.sample}</span>}</span>
+                <span className="ds-val-w">
+                  <select className="in" aria-label={`Who decides ${p.name || 'this value'}`} value={p.fixed !== undefined ? 'fixed' : 'ai'} disabled={p.in === 'path'} onChange={(e) => setP(i, k, e.target.value === 'fixed' ? { fixed: p.fixed ?? p.sample ?? '', required: true } : { fixed: undefined, sample: p.sample ?? p.fixed })}>
+                    <option value="ai">Niko picks it from the question</option>
+                    <option value="fixed">Always the same</option>
+                  </select>
+                  {p.fixed !== undefined && <input className="in" aria-label={`${p.name} is always`} value={p.fixed} maxLength={100} onChange={(e) => setP(i, k, { fixed: e.target.value })} />}
+                </span>
+                <label className="ds-check sm"><input type="checkbox" checked={p.required || p.in === 'path' || p.fixed !== undefined} disabled={p.in === 'path' || p.fixed !== undefined} onChange={(e) => setP(i, k, { required: e.target.checked })} />Needed</label>
+                <button type="button" className="ds-x" aria-label={`Remove ${p.name || 'value'}`} disabled={p.in === 'path'} onClick={() => setA(i, { params: a.params.filter((_, j) => j !== k) })}>×</button>
+              </div>
+            ))}
+            {a.params.length < 12 && <button type="button" className="ds-lnk" onClick={() => setA(i, { params: [...a.params, blankParam()] })}>+ Add a value the link didn’t have</button>}
+          </div>
+          <details className="ds-more">
+            <summary>More options: live or reused, kinds of values, path</summary>
+            <label className="fld"><span className="k">How Niko uses it</span><select className="in" value={a.dataset ? `ds-${a.dataset}` : a.live ? 'live' : 'recent'} onChange={(e) => { const v = e.target.value; setA(i, v.startsWith('ds-') ? { dataset: v.slice(3) as DataRefresh, live: false } : { dataset: undefined, live: v === 'live' }); }}>
+              <option value="live">Live answer: asked every time</option>
+              <option value="recent">Answer: asked when needed, reused for a few minutes</option>
+              {(datasets || a.dataset) && <><option value="ds-day">Dataset in Knowledge, refreshed daily when used</option><option value="ds-week">Dataset in Knowledge, refreshed weekly when used</option><option value="ds-month">Dataset in Knowledge, refreshed monthly when used</option></>}
+            </select></label>
+            <label className="fld"><span className="k">Path</span><input className="in" value={a.path} maxLength={200} spellCheck={false} onChange={(e) => setA(i, { path: e.target.value })} /></label>
+            {a.params.filter((p) => p.fixed === undefined).map((p) => { const k = a.params.indexOf(p); return (
+              <label key={k} className="fld"><span className="k">{p.name || 'Value'} · kind</span><select className="in" value={p.type} onChange={(e) => setP(i, k, { type: e.target.value as DataParamType })}>{TYPES.map(([v, n]) => <option key={v} value={v}>{n}</option>)}</select></label>
+            ); })}
+          </details>
+          {d.actions.length > 1 && <div className="ds-row-b">
+            <button type="button" className={'ds-tag' + (a.on ? ' keep' : '')} aria-pressed={a.on} onClick={() => setA(i, { on: !a.on })}>{a.on ? 'Keep' : 'Left out'}</button>
+            <button type="button" className="ds-lnk" onClick={() => set({ actions: d.actions.filter((_, j) => j !== i) })}>Remove</button>
+          </div>}
+        </div>
+      ))}
+      {adding === null
+        ? <button type="button" className="ds-lnk" onClick={() => { setAdding(''); setErr(''); }}>+ Add another link from this site</button>
+        : <div className="ds-row-b ds-addlink">
+            <input className="in ds-link" value={adding} inputMode="url" spellCheck={false} autoFocus onChange={(e) => { setAdding(e.target.value); setErr(''); }} placeholder="https://… another example from the same site" />
+            <button type="button" className="sec sm" onClick={() => { setAdding(null); setErr(''); }}>Cancel</button>
+            <button type="button" className="pri sm" onClick={addLink}>Add</button>
+          </div>}
+      {err && <p className="ds-err" role="alert">{err}</p>}
+      <span className="ds-hint">Niko only reads: it never changes anything there. <button type="button" className="ds-lnk inline" onClick={onManual}>More ways: by hand, or an OpenAPI file</button></span>
+    </div>
+  );
+}
+
+/** Before testing: each kept action checked the way the server will, so problems show here first. */
+export function answersProblem(d: SourceDraft): string | null {
+  const kept = d.actions.filter((a) => a.on);
+  if (!kept.length) return 'Keep at least one thing Niko can ask.';
+  const taken = new Set<string>();
+  for (const a of kept) { const r = cleanAction(a, taken); if ('problem' in r) return `${a.name || 'One of them'}: ${r.problem}`; taken.add(r.id); }
+  return null;
 }

@@ -118,11 +118,16 @@ data.delete('/sources/:id', async (c) => {
 });
 
 /** Tests each action with its sample values: a saved source (`id`, admin sources included in their plan or their
- *  own), or a draft of their own before it is saved. The answers themselves aren't sent back, only whether it worked. */
-export async function testActions(run: (a: DataAction) => Promise<unknown>, actions: DataAction[]) {
+ *  own), or a draft of their own before it is saved. Only whether it worked comes back, and with peek (only for a source
+ *  the person is setting up themselves) the start of each answer, so they can see it's the right thing. */
+export async function testActions(run: (a: DataAction) => Promise<unknown>, actions: DataAction[], opts: { peek?: boolean } = {}) {
   return Promise.all(actions.slice(0, 10).map(async (a) => {
     const t0 = Date.now();
-    try { await run(a); return { action: a.id, name: a.name, ok: true, ms: Date.now() - t0 }; }
+    try {
+      const r = await run(a) as { text?: unknown } | undefined;
+      const peek = opts.peek && typeof r?.text === 'string' ? r.text.slice(0, 600) : undefined;
+      return { action: a.id, name: a.name, ok: true, ms: Date.now() - t0, ...(peek ? { peek } : {}) };
+    }
     catch (e) { return { action: a.id, name: a.name, ok: false, problem: e instanceof DataProblem ? e.message : 'The test didn’t work.' }; }
   }));
 }
@@ -137,12 +142,12 @@ data.post('/test', async (c) => {
       const v = await cleanInput(c.env, { ...b.draft, termsOk: true }, { admin: false, before });
       const row = { ...(before ?? {}), ...v, id: before?.id ?? crypto.randomUUID(), ownerId: u.id, updatedAt: new Date() } as SourceRow;
       const acts = cleanActions(v.actions) as DataAction[];
-      return c.json({ results: await testActions((a) => runAction(c.env, db, u.id, row, a, sampleValues(a), 0, { test: true }), acts) });
+      return c.json({ results: await testActions((a) => runAction(c.env, db, u.id, row, a, sampleValues(a), 0, { test: true }), acts, { peek: true }) });
     }
     const s = await sourcesFor(db, u);
     const src = [...s.offered, ...s.mine].find((x) => x.row.id === b.id);
     if (!src) return c.json({ error: 'No such source.' }, 404);
-    return c.json({ results: await testActions((a) => runAction(c.env, db, u.id, src.row, a, sampleValues(a), 0, { test: true }), src.info.actions) });
+    return c.json({ results: await testActions((a) => runAction(c.env, db, u.id, src.row, a, sampleValues(a), 0, { test: true }), src.info.actions, { peek: s.mine.includes(src) }) });
   } catch (e) { return fail(c, e); }
 });
 

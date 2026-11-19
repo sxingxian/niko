@@ -73,7 +73,7 @@ adminData.post('/test', async (c) => {
     const row = b.draft ? { ...(before ?? {}), ...(await cleanInput(c.env, b.draft, { admin: true, before })), id: before?.id ?? crypto.randomUUID(), ownerId: null, updatedAt: new Date() } as SourceRow : before!;
     if (row.keyMode === 'own' && row.auth !== 'none') return c.json({ results: [], note: 'Each person adds their own key, so Niko tests it when they turn it on.' });
     const acts = cleanActions(row.actions) as DataAction[];
-    return c.json({ results: await testActions((a) => runAction(c.env, db, u.id, row, a, sampleValues(a), 0, { test: true }), acts) });
+    return c.json({ results: await testActions((a) => runAction(c.env, db, u.id, row, a, sampleValues(a), 0, { test: true }), acts, { peek: true }) });
   } catch (e) { return fail(c, e); }
 });
 

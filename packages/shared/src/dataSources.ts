@@ -469,3 +469,57 @@ export function datasetTable(body: string, kind: 'json' | 'csv'): DatasetTable |
   };
   return { columns: header.map((name, i) => ({ name, type: kindOf(i) })), rows };
 }
+
+// ---------------------------------------------------------------- from a link that works
+/** Value names that carry a key, so a key in a pasted link becomes the source's key, never an example value. */
+const KEY_NAMES = /^(api[_-]?key|apikey|key|token|access[_-]?token|account[_-]?key|auth|authorization|app[_-]?id|app[_-]?key|appid|subscription[_-]?key|client[_-]?secret|secret|signature|sig|x-api-key)$/i;
+/** Values that are the same on every call (the answer's format, units, language), kept as they are. */
+const FIXED_NAMES = /^(\$?format|output|output[_-]?format|units?|lang|language|locale|v|version|api[_-]?version)$/i;
+/** "BusArrival" → "Bus arrival", "train_service-alerts" → "Train service alerts". */
+const humanize = (raw: string) => {
+  const t = raw.replace(/\.(json|csv|xml)$/i, '').replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/\s+/g, ' ').trim().toLowerCase();
+  return t ? t[0]!.toUpperCase() + t.slice(1) : '';
+};
+/** What a value looks like, from its example: decimals are numbers, true/false yes or no, dates dates; anything else
+ *  (codes such as 03229 keep their zeros) is text. */
+const kindOf = (v: string): DataParamType => (/^-?\d+\.\d+$/.test(v) ? 'number' : /^(true|false)$/i.test(v) ? 'boolean' : /^\d{4}-\d{2}-\d{2}$/.test(v) ? 'date' : 'text');
+export interface FromLink { baseUrl: string; action: DataAction; name: string; key: { name: string; value: string } | null }
+/** Reads a link that works (an example request from the service's docs) into a source: the address (the site), one
+ *  action with the link's path, a value for each part of the link (its example as the test value), and a key in the
+ *  link, if there is one. Ids in the path (numbers, long codes) become values too. Everything is checked again when
+ *  the source is saved. */
+export function fromExampleLink(raw: unknown, taken: Set<string> = new Set()): FromLink | { problem: string } {
+  const text = s(raw, 1000).trim();
+  if (!text) return { problem: 'Paste a link that works, starting with https://.' };
+  let u: URL;
+  try { u = new URL(text); } catch { return { problem: 'That isn’t a whole link. It starts with https://.' }; }
+  if (u.protocol !== 'https:') return { problem: 'The link must start with https://.' };
+  if (u.username || u.password) return { problem: 'Take the sign-in out of the link; enter the key below instead.' };
+  const base = cleanBaseUrl(u.origin);
+  if ('problem' in base) return base;
+  const params: DataParam[] = [];
+  let key: FromLink['key'] = null;
+  // Path: an id-like part (digits, or a long code) becomes a value named after the part before it.
+  const parts = u.pathname.split('/').filter(Boolean).map((p) => { try { return decodeURIComponent(p); } catch { return p; } });
+  const path = '/' + parts.map((p, i) => {
+    if (!(/^\d{3,}$/.test(p) || /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(p) || /^[A-Za-z0-9]{20,}$/.test(p)) || params.length >= 4) return encodeURIComponent(p);
+    const before = (parts[i - 1] ?? 'id').replace(/[^A-Za-z0-9_]/g, '').replace(/ies$/, 'y').replace(/s$/, '') || 'id';
+    let name = before.slice(0, 30), n = 2;
+    while (params.some((x) => x.name === name)) name = `${before.slice(0, 28)}${n++}`;
+    params.push({ name, in: 'path', type: 'text', required: true, max: Math.max(40, p.length * 2), sample: p });
+    return `{${name}}`;
+  }).join('/');
+  for (const [name, value] of u.searchParams) {
+    if (!/^[A-Za-z_$][A-Za-z0-9_.$-]{0,39}$/.test(name) || params.some((p) => p.name === name)) continue;
+    if (KEY_NAMES.test(name)) { if (!key && value) key = { name, value: value.slice(0, 500) }; continue; }
+    if (params.length >= 12) break;
+    if (FIXED_NAMES.test(name) && value) { params.push({ name, in: 'query', type: 'text', required: true, max: 100, fixed: value.slice(0, 100) }); continue; }
+    const type = kindOf(value);
+    params.push({ name, in: 'query', type, required: true, ...(type === 'text' ? { max: Math.max(40, Math.min(100, value.length * 3)) } : {}), ...(value ? { sample: value.slice(0, 100) } : {}) });
+  }
+  const last = [...parts].reverse().find((p) => !/^\d+$/.test(p) && !/^v\d+$/i.test(p)) ?? u.hostname;
+  const name = humanize(last).slice(0, 60) || u.hostname;
+  let id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'ask', n = 2;
+  while (taken.has(id)) id = `${id.slice(0, 36)}-${n++}`;
+  return { baseUrl: base.url, name, key, action: { id, name, path: path.slice(0, 200), params, live: true, example: '', on: true } };
+}
