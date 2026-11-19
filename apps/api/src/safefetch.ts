@@ -35,9 +35,16 @@ export async function publicHost(host: string): Promise<boolean> {
 }
 export const forgetDns = () => dnsKept.clear();
 
-export interface Fetched { body: string; kind: 'json' | 'csv'; status: number; ms: number }
+export interface Fetched { body: string; kind: 'json' | 'csv' | 'xml'; status: number; ms: number }
 /** One GET with the checks above. `headers` go only to the first site; a redirect elsewhere drops them. */
-export async function safeGet(url: string, headers: Record<string, string> = {}, opts: { timeoutMs?: number; maxBytes?: number } = {}): Promise<Fetched> {
+export function safeGet(url: string, headers: Record<string, string> = {}, opts: { timeoutMs?: number; maxBytes?: number; json?: boolean } = {}): Promise<Fetched> {
+  return safeFetch(url, { headers, ...opts });
+}
+/** One call with the checks above: GET (redirects followed, each checked, headers only to the first site) or POST (a
+ *  search or a token request: sent once, never redirected, as a redirected POST could land somewhere else). Answers
+ *  in JSON, CSV or XML (json: JSON only). */
+export async function safeFetch(url: string, req: { method?: 'GET' | 'POST'; headers?: Record<string, string>; body?: string; timeoutMs?: number; maxBytes?: number; json?: boolean } = {}): Promise<Fetched> {
+  const headers = req.headers ?? {}, opts = req, post = req.method === 'POST';
   const t0 = Date.now();
   const signal = AbortSignal.timeout(opts.timeoutMs ?? DATA_TIMEOUT_MS);
   const max = opts.maxBytes ?? DATA_MAX_BYTES;
@@ -48,19 +55,21 @@ export async function safeGet(url: string, headers: Record<string, string> = {},
     if (!(await publicHost(at.hostname))) throw new FetchProblem('That address isn’t on the public internet, so Niko won’t call it.');
     let res: Response;
     try {
-      res = await fetch(at.toString(), { method: 'GET', redirect: 'manual', signal, headers: { accept: 'application/json, text/csv;q=0.9', 'user-agent': 'Niko data sources', ...(at.origin === origin ? headers : {}) } });
+      res = await fetch(at.toString(), { method: post ? 'POST' : 'GET', redirect: 'manual', signal, ...(post ? { body: req.body ?? '' } : {}),
+        headers: { accept: opts.json ? 'application/json' : 'application/json, text/csv;q=0.9, application/xml;q=0.8, text/xml;q=0.8', 'user-agent': 'Niko data sources', ...(at.origin === origin ? headers : {}) } });
     } catch (e) {
       throw new FetchProblem((e as Error)?.name === 'TimeoutError' || (e as Error)?.name === 'AbortError' ? 'The source didn’t answer within 10 seconds.' : 'The source couldn’t be reached.');
     }
     if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+      if (post) throw new FetchProblem('The source sent Niko to another address; Niko doesn’t follow that for a POST.');
       if (hop >= 3) throw new FetchProblem('The source sent Niko to too many other addresses.');
       at = new URL(res.headers.get('location')!, at);
       continue;
     }
     if (!res.ok) throw new FetchProblem(res.status === 401 || res.status === 403 ? 'The source refused the key.' : res.status === 404 ? 'The source says that doesn’t exist.' : res.status === 429 ? 'The source says it’s had too many requests; try again later.' : `The source answered ${res.status}.`, res.status);
     const type = (res.headers.get('content-type') ?? '').toLowerCase();
-    const kind = /json/.test(type) ? 'json' : /csv/.test(type) ? 'csv' : null;
-    if (!kind) throw new FetchProblem('The source didn’t send JSON or CSV.');
+    const kind = /json/.test(type) ? 'json' : opts.json ? null : /csv/.test(type) ? 'csv' : /xml/.test(type) ? 'xml' : null;
+    if (!kind) throw new FetchProblem(opts.json ? 'The answer wasn’t JSON.' : 'The source didn’t send JSON, CSV or XML.');
     if (Number(res.headers.get('content-length')) > max) throw new FetchProblem('The answer was larger than 1 MB.');
     const reader = res.body?.getReader();
     const parts: Uint8Array[] = [];

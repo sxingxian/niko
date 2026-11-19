@@ -7,7 +7,8 @@ import {
   actionUrl, checkValues, cleanAction, cleanActions, cleanBaseUrl, cleanDataAccess, cleanDataPrefs, dataAllowed, dataBlock, dataTags, hostProblem,
   openApiActions, privateIp, resultText, sampleValues, stripDataTags, cleanWeatherPrefs, weatherOrder, cleanDataDefaults, cleanLivePrefs, liveOrder, placesBlock, datasetTable, actionLine, noteSeen, liveSuggestions, LIVE_SUGGEST_AT,
 } from '../packages/shared/src/dataSources.ts';
-import { fromExampleLink } from '../packages/shared/src/dataSources.ts';
+import { fromExampleLink, fromCurl, actionBody, cleanHeaders, cleanToken, parseXml, xmlText, xmlRecords } from '../packages/shared/src/dataSources.ts';
+import { cleanInput, infoOf } from '../apps/api/src/datasources.ts';
 import { testActions } from '../apps/api/src/routes/data.ts';
 import { dns, forgetDns, safeGet } from '../apps/api/src/safefetch.ts';
 import { DataProblem, runAction } from '../apps/api/src/datasources.ts';
@@ -168,10 +169,23 @@ await ok('datasets: kept as tables (CSV, TSV, records in JSON), never asked live
 const PUBLIC = { 'api.example.com': '93.184.216.34', 'other.example.org': '93.184.216.35', 'evil.example.org': '10.0.0.5', 'rebind.example.org': '169.254.169.254' };
 dns.lookup = async (host, type) => (type === 'A' && PUBLIC[host] ? [PUBLIC[host]] : []);
 const seen = [];
+let tokenAsks = 0; const revoked = new Set();
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, init = {}) => {
   const u = new URL(String(url));
-  seen.push({ url: u.toString(), headers: { ...(init.headers ?? {}) } });
+  seen.push({ url: u.toString(), headers: { ...(init.headers ?? {}) }, method: init.method ?? 'GET', body: init.body });
+  if (u.pathname === '/xml') return new Response('<?xml version="1.0"?><!DOCTYPE r [<!ENTITY a "aaaaaaaaaa"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;"><!ENTITY s SYSTEM "file:///etc/passwd">]><forecasts><item area="Ang Mo Kio"><text>Showers &amp; wind</text><b>&b;&s;</b></item><item area="Bedok"><text>Fair</text><b>x</b></item></forecasts>', { headers: { 'content-type': 'application/xml' } });
+  if (u.pathname === '/oauth/token') {
+    tokenAsks++;
+    const f = new URLSearchParams(String(init.body ?? ''));
+    const basic = (init.headers ?? {}).authorization;
+    const ok = (f.get('client_id') === 'id-1' && f.get('client_secret') === 'sec-1') || basic === `Basic ${btoa('id-1:sec-1')}`;
+    return ok ? Response.json({ access_token: `tok-${tokenAsks}`, expires_in: 3600 }) : new Response('{"error":"invalid_client"}', { status: 401, headers: { 'content-type': 'application/json' } });
+  }
+  if (u.pathname === '/login') { tokenAsks++; const b = JSON.parse(String(init.body ?? '{}')); return b.email === 'me@x.com' && b.password === 'pw' ? Response.json({ data: { token: `tok-${tokenAsks}` } }) : new Response('no', { status: 401 }); }
+  if (u.pathname === '/v1/needs-token') { const a = (init.headers ?? {}).Authorization; return a === `Bearer tok-${tokenAsks}` && !revoked.has(a) ? Response.json({ ok: true, who: a }) : new Response('no', { status: 401 }); }
+  if (u.pathname === '/v1/search') return init.method === 'POST' ? Response.json({ got: JSON.parse(String(init.body)), type: (init.headers ?? {})['content-type'] }) : new Response('no', { status: 405 });
+  if (u.pathname === '/v1/post-away') return new Response(null, { status: 307, headers: { location: 'https://other.example.org/x' } });
   if (u.pathname === '/to-evil') return new Response(null, { status: 302, headers: { location: 'https://evil.example.org/x' } });
   if (u.pathname === '/to-other') return new Response(null, { status: 302, headers: { location: 'https://other.example.org/data' } });
   if (u.pathname === '/big') return new Response('x'.repeat(1024 * 1024 + 10), { headers: { 'content-type': 'application/json' } });
@@ -194,7 +208,7 @@ await ok('fetching: public hosts only, at every redirect; keys never follow to a
   assert.equal(seen[0].headers['X-Api-Key'], 'secret');
   assert.equal(seen[1].headers['X-Api-Key'], undefined, 'the key isn’t sent on to another site');
   await assert.rejects(safeGet('https://api.example.com/big'), /1 MB/);
-  await assert.rejects(safeGet('https://api.example.com/html'), /JSON or CSV/);
+  await assert.rejects(safeGet('https://api.example.com/html'), /JSON, CSV or XML/);
   assert.equal((await safeGet('https://api.example.com/csv')).kind, 'csv');
   await assert.rejects(safeGet('https://api.example.com/denied'), /refused the key/);
   await assert.rejects(safeGet('http://api.example.com/x'), /https/);
@@ -234,6 +248,127 @@ await ok('running an action: key in a header or the address, shared cache only w
   await assert.rejects(runAction(env, db, 'u3', await row(), act, { number: '99' }, 5), (e) => e instanceof DataProblem && e.status === 429);
   // Each person's own key for an admin source: none saved, so it asks for it.
   await assert.rejects(runAction(env, db, 'u3', await row({ keyMode: 'own', keyEnc: null }), act, { number: '1' }, 0), /needs your key/);
+});
+
+await ok('other headers, token sign-in, POST and XML: secrets sent only where they belong', async () => {
+  store.clear();
+  const sealed = async (o) => seal(env.ENCRYPTION_KEY, o);
+  // Other headers: plain ones as written, secret ones from the sealed values, with the key.
+  const hdr = await row({ headers: [{ name: 'Notion-Version', secret: false, value: '2022-06-28' }, { name: 'X-Client', secret: true }], secretsEnc: await sealed({ h: { 'X-Client': 'c-9' } }) });
+  seen.length = 0; await runAction(env, db, 'u1', hdr, act, { number: '1' }, 0, { test: true });
+  assert.deepEqual([seen[0].headers['Notion-Version'], seen[0].headers['X-Client'], seen[0].headers['X-Api-Key']], ['2022-06-28', 'c-9', 'k-123']);
+  assert.equal(infoOf(hdr).headers[1].value, undefined, 'a secret value is never sent back'); assert.equal(infoOf(hdr).headers[1].saved, true);
+  // Token sign-in (client credentials): asked once, reused, asked again when refused; the secret only goes to the token address.
+  const tokenRow = await row({ id: '33333333-3333-4333-8333-333333333333', auth: 'token', authName: '', keyEnc: null, token: { url: 'https://api.example.com/oauth/token', style: 'client', idName: 'client_id', secretName: 'client_secret', scope: '', basic: false, tokenPath: 'access_token', header: 'Authorization', prefix: 'Bearer ' }, secretsEnc: await sealed({ id: 'id-1', secret: 'sec-1' }) });
+  const tAct = cleanAction({ name: 'Mine', path: '/needs-token', params: [] });
+  tokenAsks = 0; seen.length = 0;
+  let r = await runAction(env, db, 'u1', tokenRow, tAct, {}, 0, { test: true });
+  assert.match(r.text, /tok-1/); assert.equal(tokenAsks, 1);
+  await runAction(env, db, 'u1', tokenRow, tAct, {}, 0, { test: true });
+  assert.equal(tokenAsks, 1, 'the token is reused until it runs out');
+  assert.ok(seen.filter((x) => x.url.includes('/needs-token')).every((x) => !String(x.body ?? '').includes('sec-1') && !JSON.stringify(x.headers).includes('sec-1')), 'the secret never goes to the data address');
+  revoked.add('Bearer tok-1');
+  r = await runAction(env, db, 'u1', tokenRow, tAct, {}, 0, { test: true });
+  assert.match(r.text, /tok-2/, 'refused: a new token, tried once more');
+  // Basic, and email and password with the token deeper in the answer; a wrong secret says so plainly.
+  const basicRow = { ...tokenRow, id: '44444444-4444-4444-8444-444444444444', token: { ...tokenRow.token, basic: true } };
+  assert.match((await runAction(env, db, 'u1', basicRow, tAct, {}, 0, { test: true })).text, /tok-/);
+  const loginRow = { ...tokenRow, id: '55555555-5555-4555-8555-555555555555', token: { ...tokenRow.token, url: 'https://api.example.com/login', style: 'login', idName: 'email', secretName: 'password', tokenPath: 'data.token' }, secretsEnc: await sealed({ id: 'me@x.com', secret: 'pw' }) };
+  assert.match((await runAction(env, db, 'u1', loginRow, tAct, {}, 0, { test: true })).text, /tok-/);
+  const wrong = { ...tokenRow, id: '66666666-6666-4666-8666-666666666666', secretsEnc: await sealed({ id: 'id-1', secret: 'nope' }) };
+  await assert.rejects(runAction(env, db, 'u1', wrong, tAct, {}, 0, { test: true }), /refused the sign-in/);
+  // POST: the body with checked values; no redirects followed; a GraphQL change refused before any call.
+  const search = cleanAction({ name: 'Search', path: '/search', method: 'POST', readOnly: true, body: '{"query":"{{q}}","page_size":{{n}}}'.replace('{{n}}', '10'), params: [{ name: 'q', in: 'body', type: 'text', required: true, sample: 'plan' }] });
+  assert.equal(search.method, 'POST');
+  r = await runAction(env, db, 'u1', await row(), search, { q: 'Q3 "plan"' }, 0, { test: true });
+  assert.deepEqual(JSON.parse(r.text).got, { query: 'Q3 "plan"', page_size: 10 }); assert.match(r.text, /application\/json/);
+  const away = cleanAction({ name: 'Away', path: '/post-away', method: 'POST', readOnly: true, body: '{}', params: [] });
+  await assert.rejects(runAction(env, db, 'u1', await row(), away, {}, 0, { test: true }), /doesn’t follow that for a POST/);
+  const gql = cleanAction({ name: 'GraphQL', path: '/search', method: 'POST', readOnly: true, body: '{"query":"{{doc}}"}', params: [{ name: 'doc', in: 'body', type: 'text', required: true, max: 200 }] });
+  const n0 = seen.length;
+  await assert.rejects(runAction(env, db, 'u1', await row(), gql, { doc: 'mutation { deleteAll }' }, 0, { test: true }), /mutation/);
+  assert.equal(seen.length, n0, 'nothing was sent');
+  // XML: read safely (entities a DOCTYPE defines aren't expanded, nothing outside is loaded) and kept short.
+  const xAct = cleanAction({ name: 'Forecast', path: '/../xml'.replace('/..', ''), params: [] });
+  r = await runAction(env, db, 'u1', await row({ baseUrl: 'https://api.example.com' }), xAct, {}, 0, { test: true });
+  assert.match(r.text, /item\.text: Showers & wind/); assert.match(r.text, /area=Ang Mo Kio/);
+  assert.ok(!/aaaaaaaaaa|passwd/.test(r.text), 'no entity expanded, no file read');
+});
+
+await ok('saving: secret headers and the sign-in are kept unless replaced, needed, and dropped when the site moves', async () => {
+  const base = { name: 'Acme', baseUrl: 'https://api.example.com/v1', auth: 'header', authName: 'X-Api-Key', key: 'k-1', actions: [order], termsOk: true };
+  const v1 = await cleanInput(env, { ...base, headers: [{ name: 'X-Client', secret: true, value: 'c-1' }, { name: 'Notion-Version', secret: false, value: '2022-06-28' }] }, { admin: false });
+  assert.deepEqual(v1.headers, [{ name: 'X-Client', secret: true }, { name: 'Notion-Version', secret: false, value: '2022-06-28' }]);
+  assert.ok(v1.secretsEnc && !JSON.stringify(v1.headers).includes('c-1'));
+  const before = { ...(await row()), ...v1 };
+  const v2 = await cleanInput(env, { ...base, key: '', headers: [{ name: 'X-Client', secret: true, value: '' }] }, { admin: false, before });
+  assert.ok(v2.secretsEnc, 'kept when left empty');
+  await assert.rejects(cleanInput(env, { ...base, baseUrl: 'https://other.example.org', headers: [{ name: 'X-Client', secret: true, value: '' }] }, { admin: false, before }), /Enter the value for X-Client/, 'dropped when the site moves');
+  await assert.rejects(cleanInput(env, { ...base, headers: [{ name: 'Host', value: 'x' }] }, { admin: false }), /sets Host itself/);
+  await assert.rejects(cleanInput(env, { ...base, headers: [{ name: 'X-Api-Key', value: 'x' }] }, { admin: false }), /listed twice/);
+  const tok = { ...base, auth: 'token', token: { url: 'https://api.example.com/oauth/token', style: 'client' } };
+  await assert.rejects(cleanInput(env, tok, { admin: true }), /client ID and secret/);
+  const t1 = await cleanInput(env, { ...tok, tokenId: 'id-1', tokenSecret: 'sec-1', keyMode: 'own' }, { admin: true });
+  assert.equal(t1.keyMode, 'one', 'one sign-in for everyone it’s offered to'); assert.equal(t1.keyEnc, null); assert.equal(t1.token.idName, 'client_id');
+  const tBefore = { ...(await row()), ...t1 };
+  assert.ok((await cleanInput(env, tok, { admin: true, before: tBefore })).secretsEnc, 'the sign-in is kept');
+  await assert.rejects(cleanInput(env, { ...tok, token: { url: 'https://other.example.org/token', style: 'client' } }, { admin: true, before: tBefore }), /client ID and secret/, 'another token address: entered again');
+  await assert.rejects(cleanInput(env, { ...tok, token: { url: 'https://10.0.0.1/token' }, tokenId: 'a', tokenSecret: 'b' }, { admin: true }), /./);
+});
+
+await ok('rules: POST must be read-only, values in quotes, GraphQL changes refused; headers and token checked', () => {
+  const p = (o) => cleanAction({ name: 'S', path: '/s', method: 'POST', readOnly: true, body: '{"q":"{{q}}"}', params: [{ name: 'q', in: 'body', type: 'text', required: true }], ...o });
+  assert.equal(p({}).method, 'POST');
+  assert.match(p({ readOnly: false }).problem, /only reads data/);
+  assert.match(p({ body: '{"q":{{q}}}' }).problem, /in quotes/);
+  assert.match(p({ body: '{"q":"{{other}}"}' }).problem, /isn’t one of its values/);
+  assert.match(p({ body: '{"q":"x"}' }).problem, /isn’t in the body/);
+  assert.match(p({ body: '{"query":"mutation { drop }"}', params: [] }).problem, /mutation/);
+  assert.ok(!('problem' in p({ body: '{"query":"query { a { b } }","variables":{"x":"{{q}}"}}' })), 'a GraphQL query with variables');
+  assert.ok(!('problem' in p({ body: '{"a":{"b":{"c":"{{q}}"}}}' })), 'nested JSON is fine');
+  assert.match(cleanAction({ name: 'G', path: '/g', params: [{ name: 'q', in: 'body', type: 'text' }] }).problem, /need POST/);
+  const form = p({ bodyType: 'form', body: 'query={{q}}&limit=5' });
+  assert.deepEqual(actionBody(form, { q: 'a b&c' }), { body: 'query=a%20b%26c&limit=5', type: 'application/x-www-form-urlencoded' });
+  assert.match(actionBody(form, { q: 'mutation { x }' }).problem, /mutation/);
+  const typed = p({ body: '{"n":"{{n}}","on":"{{on}}","q":"{{q}}"}', params: [{ name: 'n', in: 'body', type: 'integer' }, { name: 'on', in: 'body', type: 'boolean' }, { name: 'q', in: 'body', type: 'text' }] });
+  assert.deepEqual(JSON.parse(actionBody(typed, { n: '3', on: 'true' }).body), { n: 3, on: true, q: null });
+  assert.equal(cleanHeaders([{ name: 'A' }, { name: 'B' }, { name: 'C' }, { name: 'D' }, { name: 'E' }, { name: 'F' }, { name: 'G' }]).problem?.includes('up to 6'), true);
+  assert.match(cleanHeaders([{ name: 'X', value: 'a\nb' }]).problem, /one line/);
+  assert.match(cleanHeaders([{ name: 'Content-Type', value: 'x' }]).problem, /sets Content-Type/);
+  assert.match(cleanToken({ url: 'http://x.example.com/t' }).problem, /https/);
+  assert.equal(cleanToken({ url: 'https://login.example.com/t', style: 'login' }).idName, 'email');
+  assert.match(cleanToken({ url: 'https://login.example.com/t', tokenPath: '../x' }).problem, /where the token is/);
+});
+
+await ok('a curl command becomes a source: method, headers (secret or plain), body values, Basic sign-in', () => {
+  let r = fromCurl(`curl -X POST https://api.notion.com/v1/search \\\n  -H "Authorization: Bearer secret_1" \\\n  -H 'Notion-Version: 2022-06-28' -H "Content-Type: application/json" \\\n  --data '{"query": "Q3 plan", "page_size": 10, "filter": {"value": "page"}}'`);
+  assert.equal(r.baseUrl, 'https://api.notion.com'); assert.equal(r.action.method, 'POST'); assert.equal(r.action.path, '/v1/search');
+  assert.deepEqual(r.auth, { mode: 'header', name: 'Authorization', value: 'Bearer secret_1' });
+  assert.deepEqual(r.headers, [{ name: 'Notion-Version', value: '2022-06-28', secret: false }]);
+  assert.deepEqual(r.action.params.map((p) => [p.name, p.in, p.sample]), [['query', 'body', 'Q3 plan'], ['value', 'body', 'page']]);
+  assert.deepEqual(JSON.parse(r.action.body.replace(/"\{\{(\w+)\}\}"/g, '"<$1>"')), { query: '<query>', page_size: 10, filter: { value: '<value>' } });
+  assert.ok(!('problem' in cleanAction({ ...r.action, readOnly: true })), 'it passes the saved check once confirmed');
+  // GraphQL: the query stays as written; variables become values.
+  r = fromCurl(`curl https://api.example.com/graphql --json '{"query":"query($id: ID!) { stop(id: $id) { name } }","variables":{"id":"83139"}}'`);
+  assert.match(r.action.body, /query\(\$id: ID!\)/); assert.deepEqual(r.action.params.map((p) => p.name), ['id']);
+  // GET with -G data, -u Basic, a key in a custom header, a cookie kept secret.
+  r = fromCurl(`curl -G https://api.example.com/v2/stops -d stop=03229 -d lang=en -u user:pa55 -H "X-Trace: 1" -b "sid=abc"`);
+  assert.equal(r.action.method, undefined); assert.deepEqual(r.action.params.map((p) => [p.name, p.fixed ?? p.sample]), [['stop', '03229'], ['lang', 'en']]);
+  assert.deepEqual(r.auth, { mode: 'header', name: 'Authorization', value: `Basic ${btoa('user:pa55')}` });
+  assert.deepEqual(r.headers.map((h) => [h.name, h.secret]), [['X-Trace', false], ['Cookie', true]]);
+  // A form body; changes and uploads refused; a password in the body sent to the key field instead.
+  r = fromCurl(`curl -d "q=bus+15&limit=5" https://api.example.com/find`);
+  assert.equal(r.action.bodyType, 'form', 'curl sends -d as a form unless told otherwise'); assert.equal(r.action.body, 'q={{q}}&limit={{limit}}');
+  for (const [bad, why] of [['curl -X DELETE https://api.example.com/x', /changes data/], ['curl -X PUT https://api.example.com/x -d a=1', /changes data/], ['curl -F f=@a.txt https://api.example.com/x', /uploads/], [`curl https://api.example.com/login --json '{"user":"a","password":"b"}'`, /key or password/], ['curl -H "A: b', /quotes/], ['curl -s', /find the link/]]) assert.match(fromCurl(bad).problem ?? '', why, bad);
+});
+
+await ok('XML: elements, attributes and text read; DOCTYPE dropped and entities left alone; lists cut; records for datasets', () => {
+  const x = parseXml('<?xml version="1.0"?><!-- c --><a xmlns:n="u"><n:b id="1">one &lt;1&gt; &#65;</n:b><![CDATA[<raw>]]></a>');
+  assert.equal(x.kids[0].name, 'a'); assert.equal(x.kids[0].kids[0].name, 'b'); assert.equal(x.kids[0].kids[0].text, 'one <1> A'); assert.equal(x.kids[0].text, '<raw>');
+  assert.equal(parseXml('<a><b></a> < x'), null, 'not XML');
+  const many = `<list>${Array.from({ length: 40 }, (_, i) => `<row><n>${i}</n></row>`).join('')}</list>`;
+  assert.match(xmlText(many), /… more row/);
+  assert.equal(xmlRecords(many).length, 40); assert.deepEqual(xmlRecords('<r><s c="1"><v>a</v></s><s c="2"><v>b</v></s></r>'), [{ '@c': '1', v: 'a' }, { '@c': '2', v: 'b' }]);
 });
 
 globalThis.fetch = realFetch;
