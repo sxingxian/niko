@@ -197,7 +197,7 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
 type KnAdminUser = { id: string; name: string; email: string; role: string; status: string; knowledgeLimits: Partial<KnowledgeLimits>; used: { files: number; bytes: number; notes?: number } };
 type KnAdmin = { ready: boolean; usage: { bytes: number; files: number; people: number } | null; split: 'browser' | 'server'; defaults: KnowledgeLimits; users: KnAdminUser[] };
 /** The Knowledge switches built so far, in their groups (the others in AI_OPTION_GROUPS arrive with their stages). */
-const KN_GROUPS: [string, string[]][] = [['Files', ['kn:files']], ['Where they keep files', ['kn:place:niko', 'kn:place:device', 'kn:place:notion', 'kn:place:gdrive', 'kn:place:onedrive', 'kn:place:s3']], ['Cloudflare', ['kn:cf-read', 'kn:cf-search']], ['Other search sources', ['kn:search-key', 'kn:search-server']], ['Learning', ['kn:learning']]];
+const KN_GROUPS: [string, string[]][] = [['Files', ['kn:files']], ['Where they keep files', ['kn:place:niko', 'kn:place:device', 'kn:place:notion', 'kn:place:gdrive', 'kn:place:onedrive', 'kn:place:s3']], ['Cloudflare', ['kn:cf-read', 'kn:cf-search']], ['Other search sources', ['kn:search-key', 'kn:search-server']], ['Learning', ['kn:learning']], ['Where they keep what Niko learns', ['kn:learn:device', 'kn:learn:notion', 'kn:learn:gdrive', 'kn:learn:onedrive', 'kn:learn:s3']]];
 const KN_SHOWN = KN_GROUPS.flatMap(([, keys]) => keys);
 const KN_REMOTE_KEYS = ['kn:place:notion', 'kn:place:gdrive', 'kn:place:onedrive', 'kn:place:s3'];
 const KN_LIMIT_ROWS: [keyof KnowledgeLimits, string, string, number[], (n: number) => string][] = [
@@ -307,12 +307,19 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
         </div>}
         {KN_GROUPS.map(([title, keys]) => <div key={title} className="kn-group">
           <span className="k kn-group-h">{title}</span>
+          {title === 'Where they keep what Niko learns' && <div className={'kn-krow' + (on('kn:learning') ? '' : ' dim')}>
+            <span className="kn-krow-t"><b>Kept in Niko</b><span className="sub">The Knowledge database · the default</span></span>
+            <span className="kn-krow-m" />
+            <span className="kn-krow-c"><span className="pill">Always</span></span>
+          </div>}
           {keys.map((k) => {
             // Learning is its own permission (names, corrections, "remember that…" need no files), as on the server.
             // Notion, Drive, OneDrive and own storage also need Kept in Niko, because Niko keeps their search pieces.
             const it = item(k), remote = KN_REMOTE_KEYS.includes(k);
             const needsNiko = remote && filesOn && !on('kn:place:niko');
-            const gated = k !== 'kn:files' && k !== 'kn:learning' && (!filesOn || needsNiko);
+            // Where learned notes may be kept follows Learning, not Knowledge files.
+            const learnPlace = k.startsWith('kn:learn:');
+            const gated = learnPlace ? !on('kn:learning') : k !== 'kn:files' && k !== 'kn:learning' && (!filesOn || needsNiko);
             return <div key={k} className={'kn-krow' + (gated ? ' dim' : '')}>
               <span className="kn-krow-t"><b>{it.name}</b><span className="sub">{changed(k) ? `Default is ${defOn(k) ? 'on' : 'off'}` : needsNiko ? 'Needs Kept in Niko · Niko keeps the pieces' : it.sub}</span></span>
               <span className="kn-krow-m">{changedMark(changed(k), () => resetOn(k))}</span>
@@ -342,7 +349,7 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
           {split === 'server' && <div className="kn-adm-warn">Needs Workers Paid ($5 a month): on the free plan, big files stop part-way. Files already added aren’t changed.</div>}
           <p className="sub" style={{ fontSize: 12, margin: '8px 0 0' }}>Off: each person’s browser splits their files, as now (free plan). On: the browser sends the text and Niko splits it, which is quicker on phones and older computers. Files kept on This device are always read on the device.</p>
         </div>}
-        <p className="sub kn-foot">Knowledge files start off: people get them only when you turn them on, for everyone or for them. Learning is separate: it works with or without files. Lowering a limit never deletes anything; it only stops more files being added. Answering Telegram from Knowledge is each person’s own Settings switch. People see these as part of their plan, with no mention of an admin. Every change is written to the audit log.</p>
+        <p className="sub kn-foot">Knowledge files start off: people get them only when you turn them on, for everyone or for them. Learning is separate: it works with or without files. Turning off a place for what Niko learns moves nobody’s notes: a copy in their own app stops being updated and Niko keeps the notes; notes already on a device stay there, unused, until it’s back on. Lowering a limit never deletes anything; it only stops more files being added. Answering Telegram from Knowledge is each person’s own Settings switch. People see these as part of their plan, with no mention of an admin. Every change is written to the audit log.</p>
       </section>
     </div>
   </>;

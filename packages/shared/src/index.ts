@@ -406,7 +406,13 @@ export const AI_OPTION_GROUPS: AiOptionGroup[] = [
     { key: 'kn:cf-search', name: 'Cloudflare search', sub: 'Search numbers for their files · keeps nothing' },
     { key: 'kn:search-key', name: 'Search with their AI key', sub: 'An embedding model on one of their own AI keys · their key' },
     { key: 'kn:search-server', name: 'Search with their own model server', sub: 'An embedding model on their own server, such as Ollama' },
-    { key: 'kn:learning', name: 'Learning from each person', sub: 'Names, corrections and what they ask Niko to remember · with or without files', offByDefault: true, feature: true } ] },
+    { key: 'kn:learning', name: 'Learning from each person', sub: 'Names, corrections and what they ask Niko to remember · with or without files', offByDefault: true, feature: true },
+    // Where what Niko learns may be kept, besides Niko itself.
+    { key: 'kn:learn:device', name: 'Kept on their device', sub: 'Stays in that browser · never on Niko’s server' },
+    { key: 'kn:learn:notion', name: 'Notion', sub: 'A copy to read in their Notion · Niko keeps the notes' },
+    { key: 'kn:learn:gdrive', name: 'Google Drive', sub: 'A copy to read in their Drive · Niko keeps the notes' },
+    { key: 'kn:learn:onedrive', name: 'OneDrive', sub: 'A copy to read in their OneDrive · Niko keeps the notes' },
+    { key: 'kn:learn:s3', name: 'Their own storage', sub: 'A copy to read in their storage · Niko keeps the notes' } ] },
 ];
 const OFF_BY_DEFAULT = new Set(AI_OPTION_GROUPS.flatMap((g) => g.items.filter((i) => i.offByDefault).map((i) => i.key)));
 /** Whether an option is on in the default for everyone: what the admin saved, else the option's own starting value. */
@@ -465,6 +471,8 @@ export interface Me {
   background?: string;
   /** Where this person keeps Knowledge and how it is searched, when their plan includes Knowledge files. */
   knowledge?: { place: 'niko' | 'device'; search: 'cloudflare' | 'device';
+    /** Where what Niko learns is kept (with a copy in their own app for the last four). */
+    learnPlace?: 'niko' | 'device' | 'notion' | 'gdrive' | 'onedrive' | 's3';
     /** Learning is in the plan and not paused; situations may use the calendar and time; habits said yes to. */
     learn?: boolean; situations?: boolean; habits?: string[] };
 }

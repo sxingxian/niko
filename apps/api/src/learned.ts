@@ -95,6 +95,14 @@ export async function forgetNote(k: Kdb, account: string, id: string): Promise<b
 export async function forgetAll(k: Kdb, account: string): Promise<number> {
   return (await k.q(`delete from kn_learned where account_id = $1 returning id`, [account])).length;
 }
+/** Every note but the matches taught for files: those stay with the files when only the notes move. */
+export async function forgetNotesOnly(k: Kdb, account: string): Promise<number> {
+  return (await k.q(`delete from kn_learned where account_id = $1 and kind <> 'file-match' returning id`, [account])).length;
+}
+/** All matches taught for files (their files moved, so they point at copies that are gone). */
+export async function forgetAllFileMatches(k: Kdb, account: string): Promise<number> {
+  return (await k.q(`delete from kn_learned where account_id = $1 and kind = 'file-match' returning id`, [account])).length;
+}
 /** Taught matches that point at a file go with it. */
 export async function forgetFileMatches(k: Kdb, account: string, fileId: string): Promise<void> {
   await k.q(`delete from kn_learned where account_id = $1 and kind = 'file-match' and target->>'fileId' = $2`, [account, fileId]);
@@ -125,6 +133,16 @@ export async function noticeHabit(k: Kdb, account: string, habit: KnHabit, key: 
   }
   await k.q(`update kn_learned set uses = $3, sure = $4, target = $5::jsonb, updated_at = now() where id = $1 and account_id = $2`, [row.id, account, seen, habitSure(seen), JSON.stringify(st)]);
   return { suggest, id: row.id };
+}
+/** A habit already said yes to, brought over when notes move here from the person's device. */
+export async function keepHabit(k: Kdb, account: string, habit: KnHabit): Promise<void> {
+  const h = KN_HABITS[habit];
+  const [row] = await k.q<{ id: string }>(`select id from kn_learned where account_id = $1 and kind = 'habit' and target->>'habit' = $2 limit 1`, [account, habit]);
+  if (row) { await k.q(`update kn_learned set confirmed = true, sure = 1, updated_at = now() where id = $1 and account_id = $2`, [row.id, account]); return; }
+  const [c] = await k.q<{ n: number }>(`select count(*)::int as n from kn_learned where account_id = $1`, [account]);
+  if ((c?.n ?? 0) >= KN_LEARNED_MAX) throw new KnError(`Niko keeps up to ${KN_LEARNED_MAX.toLocaleString()} notes. Forget some in What Niko learned.`, 413);
+  await k.q(`insert into kn_learned (account_id, kind, subject, body, source, sure, uses, confirmed, target) values ($1, 'habit', $2, $3, 'suggested', 1, $4, true, $5::jsonb)`,
+    [account, h.said, h.means, KN_HABIT_AFTER, JSON.stringify({ habit, keys: [], offered: true })]);
 }
 /** "Yes, keep" on a suggested habit. */
 export async function confirmHabit(k: Kdb, account: string, id: string): Promise<KnLearnedItem> {

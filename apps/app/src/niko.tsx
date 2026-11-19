@@ -23,7 +23,7 @@ import { captureSupported, captureUtterance, startRing, transcribe, wavSamples, 
 import { trimSilence } from './voiceFeatures';
 import { voiceCheck, voiceLearn, voiceSupported as voiceCheckSupported } from './voiceMatch';
 import { useVoiceHere } from './pages/VoiceMatch';
-import { chatWithTables, keepDeviceNotes, knowledgeAccount, knowledgeFor } from './knowledgeChat';
+import { chatWithTables, keepDeviceNotes, knowledgeAccount, knowledgeFor, syncLearnedCopySoon } from './knowledgeChat';
 import { declineHabitHere, forgetNoteHere, habitsHere, keepHabitHere, noticeHere, teachHere } from './knowledgeDevice';
 import { kokoroLoaded, kokoroReady, kokoroSpeak, kokoroTooSlow, kokoroWarm, type Speech } from './kokoro';
 import { api, ApiError, lockedSignal, setAppearance, type CoreMode } from '@niko/ui';
@@ -264,9 +264,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const habitRef = useRef(habitAsk); habitRef.current = habitAsk;
   // Habits said yes to: from the account (Knowledge in Niko) or this device (Knowledge kept here).
   const [localHabits, setLocalHabits] = useState<string[]>([]);
-  useEffect(() => { if (me?.knowledge?.place === 'device') void habitsHere(me.id).then(setLocalHabits).catch(() => setLocalHabits([])); else setLocalHabits([]); }, [me?.id, me?.knowledge?.place]);
+  useEffect(() => { if (me?.knowledge?.learnPlace === 'device') void habitsHere(me.id).then(setLocalHabits).catch(() => setLocalHabits([])); else setLocalHabits([]); }, [me?.id, me?.knowledge?.learnPlace]);
   // Habits kept on the device apply only while the plan includes learning, as the server does for habits kept in Niko.
-  const habitsNow = (m = meRef.current) => (!aiAllowed(m?.aiOff ?? [], 'kn:learning') ? [] : m?.knowledge?.place === 'device' ? localHabitsRef.current : m?.knowledge?.habits ?? []);
+  const habitsNow = (m = meRef.current) => (!aiAllowed(m?.aiOff ?? [], 'kn:learning') ? [] : m?.knowledge?.learnPlace === 'device' ? localHabitsRef.current : m?.knowledge?.habits ?? []);
   const localHabitsRef = useRef(localHabits); localHabitsRef.current = localHabits;
   const [brief, setBrief] = useState<Brief | null>(null);
   const [micOn, setMicOn] = useState(false);
@@ -760,7 +760,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // Roughly where the user is, for a situation, only when they shared it for a map in the last few minutes.
       const mh = mapHere.current, near = mh && Date.now() - mh.at < 5 * 60_000 ? { lat: Math.round(mh.lat * 100) / 100, lon: Math.round(mh.lng * 100) / 100 } : undefined;
       const body = { message: text, tz: new Date().getTimezoneOffset(), ...(where ? { where } : {}), ...(screen ? { screen } : {}), ...(knowledge ? { knowledge } : {}), ...(opts.pin ? { pin: opts.pin } : {}), ...(quietRef.current ? { quiet: true } : {}), ...(near && meRef.current?.knowledge?.situations ? { near } : {}), ...(meRef.current?.live ? { ...(/^[A-Z]{2}$/.test(mapCountryRef.current) ? { country: mapCountryRef.current } : {}), ...(near ? { here: near } : {}) } : {}) };
-      const r = await chatWithTables<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer; learned?: { id: string; kind: string; said: string; means: string }[]; learn?: unknown; choices?: string[]; judge?: boolean; data?: DataUsed[] }>(meRef.current, body).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
+      const r = await chatWithTables<{ reply: string; brief: Brief; weather?: WeatherCard; knowledge?: KnowledgeAnswer; learned?: { id: string; kind: string; said: string; means: string }[]; learn?: unknown; learnedCopy?: boolean; choices?: string[]; judge?: boolean; data?: DataUsed[] }>(meRef.current, body).finally(() => { if (inFlight.current === mine) inFlight.current = 0; });
       const kept = await keepDeviceNotes(meRef.current, r.learn);
       // The AI can also ask for a screen ([[open:calendar]]), for phrasings the list above doesn't know.
       // …or an item to open ([[item:notes:Testing 123]]): Niko goes to that screen and the workspace opens it.
@@ -796,7 +796,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
         paintPicture(image.prompt, image.shape, false, text);
         return;
       }
-      const device = meRef.current?.knowledge?.place === 'device';
+      const device = meRef.current?.knowledge?.learnPlace === 'device';
       const learnedNow = [...(r.learned ?? []), ...kept];
       setNextStep(opts.taught && r.knowledge?.taught ? { for: answer, question: text, kind: 'taught', ...opts.taught }
         : learnedNow.length ? { for: answer, question: text, kind: 'learned', items: learnedNow, device: device && kept.length > 0 }
@@ -805,6 +805,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       setPictureId(null); setWeather(r.weather ? { for: answer, card: r.weather } : null); setKnowledge(r.knowledge ? { for: answer, k: r.knowledge } : null); setVoiceNote(vmNext.current ? { for: answer, learned: vmNext.current.learned } : null); vmNext.current = null; setDataUsed(r.data?.length ? { for: answer, items: r.data, question: text } : null); setReply(answer); if (!opts.silent) say(answer, 0);
       // Files kept in their own Notion, Drive or OneDrive: their copies are checked for changes after the answer is shown.
       if (r.knowledge?.check?.length) void api('/knowledge/check', { method: 'POST', body: { files: r.knowledge.check } }).catch(() => undefined);
+      // A copy of what Niko learned in their own app: rewritten once the answer is shown.
+      if (r.learnedCopy) syncLearnedCopySoon();
       if (item) { setPendingOpen({ ...item, at: Date.now() }); if (here.current !== '/' + item.view) goSelf('/' + item.view); }
       else if (asked) goSelf(asked);
       else if (page && handler.current?.(page, true)) { /* the list on screen turned its page, quietly: Niko is speaking */ }
@@ -1171,7 +1173,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const noticeFn = (habit: KnHabit, key: string) => {
     const me = meRef.current;
     if (!me?.knowledge?.learn || habitsNow(me).includes(habit)) return;
-    const device = me.knowledge.place === 'device';
+    const device = me.knowledge.learnPlace === 'device';
     void (async () => {
       try {
         const r = device ? await noticeHere(me.id, habit, key) : await api<{ suggest: boolean; id: string | null; ask?: string }>('/knowledge/notice', { body: { habit, key } });

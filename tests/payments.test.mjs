@@ -1564,11 +1564,13 @@ await ok('notes sent from a device are used only when the plan includes learning
   // Files on, kept on the device, learning not in the plan: the device's notes are ignored.
   assert.equal((await admin.put(`/admin/ai/users/${nurU.id}`, { access: { ...base, 'kn:files': true, 'kn:place:device': true, 'kn:learning': false } })).status, 200);
   assert.equal((await nur.put('/knowledge/prefs', { place: 'device' })).status, 200);
+  assert.equal((await nur.put('/knowledge/prefs', { learnPlace: 'device' })).status, 403, 'can’t keep notes on the device without learning');
   assert.ok(!(await prompt()).includes('Design team zq7'), 'not used without learning');
   // With learning, they are.
   assert.equal((await admin.put(`/admin/ai/users/${nurU.id}`, { access: { ...base, 'kn:files': true, 'kn:place:device': true, 'kn:learning': true } })).status, 200);
-  assert.ok((await prompt()).includes('Design team zq7'), 'used with learning');
-  await nur.put('/knowledge/prefs', { place: 'niko' });
+  assert.equal((await nur.put('/knowledge/prefs', { learnPlace: 'device' })).status, 200);
+  assert.ok((await prompt()).includes('Design team zq7'), 'used with learning, when notes are kept on the device');
+  await nur.put('/knowledge/prefs', { place: 'niko', learnPlace: 'niko' });
   assert.equal((await admin.put(`/admin/ai/users/${nurU.id}`, { access: base })).status, 200);
 });
 

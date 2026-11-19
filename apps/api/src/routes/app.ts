@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, sessions, users, type Db } from '@niko/db';
-import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, type MapAskMode, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource, type WeatherCard, plainText, stripTags, cleanKnowledgePrefs, knowledgeAccess, stripTableTags, tableTags, knPlaceOf, knRemoteOf, knSearchOf, cleanDeviceKnowledge, cleanTableResults, cleanTarget, learnTags, learnAllowed, stripLearnTags, choicesTag, stripChoicesTag, situationOf, judgeTag, stripJudgeTag, type KnHow, type KnLearnAsk, dataBlock, dataTags, stripDataTags, DATA_RULE, LIVE_RULE, liveOrder, placesBlock } from '@niko/shared';
+import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, MAP_ENTRY, MAP_MODES, type MapAskMode, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource, type WeatherCard, plainText, stripTags, cleanKnowledgePrefs, knowledgeAccess, stripTableTags, tableTags, isRemotePlace, knLearnPlaceOf, knPlaceOf, knRemoteOf, knSearchOf, cleanDeviceKnowledge, cleanTableResults, cleanTarget, learnTags, learnAllowed, stripLearnTags, choicesTag, stripChoicesTag, situationOf, judgeTag, stripJudgeTag, type KnHow, type KnLearnAsk, dataBlock, dataTags, stripDataTags, DATA_RULE, LIVE_RULE, liveOrder, placesBlock } from '@niko/shared';
 import { accessState, APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -77,7 +77,7 @@ app.get('/me', async (c) => {
   // Where Knowledge is kept and how it is searched, so answering knows whether to search this device's files first.
   const kn = knowledgeAccess((k) => aiAllowed(off, k)), knp = cleanKnowledgePrefs((u as { knowledge?: unknown }).knowledge);
   const knPlace = knPlaceOf(knp, kn);
-  const knowledgeMe = (kn.files || kn.learning) && !hide ? { knowledge: { place: knPlace, search: knSearchOf(knp, kn, knPlace),
+  const knowledgeMe = (kn.files || kn.learning) && !hide ? { knowledge: { place: knPlace, learnPlace: kn.learning ? knLearnPlaceOf(knp, kn) : 'niko', search: knSearchOf(knp, kn, knPlace),
     learn: kn.learning && knp.learn, situations: kn.learning && knp.situations, habits: kn.learning ? knp.habits : [] } } : {};
   // Engine · Data sources is shown only when the plan includes a source or lets them add their own.
   const ds = hide ? null : await sourcesFor(c.get('db'), u).catch(() => null);
@@ -946,6 +946,9 @@ app.post('/chat', async (c) => {
   const knPrefs = cleanKnowledgePrefs((u as { knowledge?: unknown }).knowledge);
   const knAccess = knowledgeAccess((x) => aiAllowed(off, x));
   const knPlace = knPlaceOf(knPrefs, knAccess);
+  // Where what Niko learned is kept: on this device (the browser sends the notes that fit), else in Niko. Matches taught
+  // for files stay with the files.
+  const learnPlace = knLearnPlaceOf(knPrefs, knAccess), notesHere = knAccess.learning && learnPlace === 'device';
   // Telegram replies never use files kept on a device (the screen says so).
   const knDraftOk = /^telegram/.test(String(b.provider ?? '')) ? knPrefs.telegram && knPlace === 'niko' : knPrefs.drafts;
   const knOk = knAccess.files && (!oneOff || knDraftOk);
@@ -959,19 +962,19 @@ app.post('/chat', async (c) => {
   const quiet = b.quiet === true && !oneOff;
   const knCf = knSearchOf(knPrefs, knAccess, 'niko') === 'cloudflare';
   // Files kept on the person's device: the browser searched them (and its notes) and sent its best matches.
-  const knDevice = knPlace === 'device' && (knOk || knAccess.learning) ? cleanDeviceKnowledge(b.knowledge) : null;
+  const knDevice = (knPlace === 'device' && knOk) || notesHere ? cleanDeviceKnowledge(b.knowledge) : null;
   const kdb = knOk && knPlace === 'niko' && knAccess.niko && knPrefs.files > 0 ? accountKnowledge(c.env, u.id) : null;
-  const ndb = knAccess.learning && knPlace === 'niko' && knPrefs.notes > 0 ? accountKnowledge(c.env, u.id) : null;
+  const ndb = knAccess.learning && (!notesHere || knPlace === 'niko') && knPrefs.notes > 0 ? accountKnowledge(c.env, u.id) : null;
   // Cloudflare's search numbers for the question, made once for files and notes.
   const cfVector = (kdb || ndb) && knCf ? await embed(c.env, [text]).then((v) => v[0] ?? null).catch(() => null) : null;
   // Their own search service (one of their AI keys or their model server): the question's numbers, or words only.
   const ownVector = kdb && knSearchOf(knPrefs, knAccess, 'niko') === 'own' ? await ownEmbedder(c.env, db, u, knPrefs.own!).then((e) => e([text])).then((v) => v[0] ?? null).catch((e) => { console.warn(`own search: ${String((e as Error)?.message ?? e).slice(0, 160)}`); return null; }) : null;
   // Notes the device sends are used only when the plan includes learning, like notes kept in Niko.
   const notes = !knAccess.learning ? []
-    : knDevice ? knDevice.learned
+    : notesHere ? knDevice?.learned ?? []
     : ndb ? await notesFor(ndb, u.id, text, { vector: cfVector, situation: situated }).catch((e) => { console.warn(`learned: ${String((e as Error)?.message ?? e).slice(0, 200)}`); return []; }) : [];
   const taught = kdb && ndb ? await taughtFor(ndb, u.id, text, { vector: cfVector }).catch(() => undefined) : undefined;
-  if (knDevice && knOk) kn = deviceKnowledgeFor(knDevice, text, knPrefs, learnSave, situated);
+  if (knDevice && knOk && knPlace === 'device') kn = deviceKnowledgeFor(knDevice, text, knPrefs, learnSave, situated);
   else if (kdb) kn = await knowledgeFor(kdb, c.env, u.id, text, { prefs: knPrefs, cloudflare: knCf, cfVector, ownVector, vector: (b.knowledge as { vector?: unknown } | undefined)?.vector, taught, pin: cleanTarget(b.pin), ask: learnSave && !situated, situation: situated })
     .catch((e) => { console.warn(`knowledge: ${String((e as Error)?.message ?? e).slice(0, 200)}`); return null; });
   const learned = learnedBlock(notes);
@@ -1089,9 +1092,9 @@ app.post('/chat', async (c) => {
     if (lastTwo.length === 2 && lastTwo[1]!.role === 'user' && lastTwo[1]!.content === text) await db.delete(chatTurns).where(inArray(chatTurns.id, lastTwo.map((t) => t.id)));
   }
   if (!oneOff) await db.insert(chatTurns).values([{ userId: u.id, role: 'user', content: text }, { userId: u.id, role: 'assistant', content: reply }]);
-  // New notes: kept in Niko, or handed to the browser to keep when the person's Knowledge is on this device.
+  // New notes: kept in Niko, or handed to the browser to keep when what Niko learns is kept on this device.
   let learnedNow: { id: string; kind: string; said: string; means: string }[] = [];
-  if (toLearn.length && knPlace === 'niko') {
+  if (toLearn.length && !notesHere) {
     const ldb = ndb ?? accountKnowledge(c.env, u.id);
     if (ldb) {
       for (const a of toLearn) {
@@ -1109,7 +1112,7 @@ app.post('/chat', async (c) => {
   const knCheck = kn && !kn.device && kn.fileIds.length && knRemoteOf(knPrefs, knAccess) ? kn.fileIds.slice(0, 10) : [];
   const knowledge = kn && !oneOff && kn.sources.length ? { lead: kn.lead, only: kn.only, taught: kn.taught, ...(kn.ask ? { ask: kn.ask } : {}), ...(knCheck.length ? { check: knCheck } : {}), sources: kn.sources.slice(0, 4).map(({ n, file, heading, collection }) => ({ n, file, heading, collection })) } : null;
   return c.json({ reply, engine: used, switched: used !== first, ...(oneOff ? {} : { brief }), ...(card ? { weather: card } : {}), ...(knowledge ? { knowledge } : {}),
-    ...(learnedNow.length ? { learned: learnedNow } : {}), ...(toLearn.length && knPlace === 'device' ? { learn: toLearn } : {}), ...(choices.length && !oneOff ? { choices } : {}), ...(judge ? { judge: true } : {}), ...(situated ? { situation: { people: sit.people } } : {}), ...(dataUsed.length && !oneOff ? { data: dataUsed } : {}) });
+    ...(learnedNow.length ? { learned: learnedNow } : {}), ...(toLearn.length && notesHere ? { learn: toLearn } : {}), ...(learnedNow.length && isRemotePlace(learnPlace) ? { learnedCopy: true } : {}), ...(choices.length && !oneOff ? { choices } : {}), ...(judge ? { judge: true } : {}), ...(situated ? { situation: { people: sit.people } } : {}), ...(dataUsed.length && !oneOff ? { data: dataUsed } : {}) });
 });
 
 // ---------------------------------------------------------------- sending, with the countdown rule enforced here
