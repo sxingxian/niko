@@ -1,12 +1,14 @@
-// Applies the SQL files in packages/db/migrations to the Neon database, in name order, once each.
+// Applies the SQL files to the Neon databases, in name order, once each:
+//   packages/db/migrations  → DATABASE_URL            (the main database; always)
+//   packages/db/knowledge   → KNOWLEDGE_DATABASE_URL  (Knowledge's own Neon project; only when that is set)
 //
-//   export DATABASE_URL='…'        # Neon connection string; never commit it
+//   export DATABASE_URL='…'        # Neon connection strings; never commit them
 //   npm run migrate                # apply anything not applied yet
 //   npm run migrate -- --dry-run   # only list what would run
 //
-// Run by the deploy workflow (and by Cloudflare's Git build) before the Worker is deployed.
-// Safe to run again and again: applied files are recorded in the table `schema_migrations`.
-// Everything pending is applied in ONE transaction, so a failure leaves the database as it was.
+// Run by Cloudflare's Git build (npm run release) before the Worker is deployed.
+// Safe to run again and again: applied files are recorded in each database's table `schema_migrations`.
+// Everything pending is applied in ONE transaction per database, so a failure leaves that database as it was.
 // A lock makes two runs at the same time wait for each other instead of colliding.
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
@@ -20,12 +22,24 @@ if (!url) {
   console.error('DATABASE_URL is not set. Add it as a secret where this runs (never commit it).');
   process.exit(1);
 }
+const knowledgeUrl = process.env.KNOWLEDGE_DATABASE_URL?.trim() || '';
+if (knowledgeUrl && knowledgeUrl === url.trim()) {
+  console.error('KNOWLEDGE_DATABASE_URL is the same as DATABASE_URL. Knowledge needs its own Neon project, so it can never fill the main database.');
+  process.exit(1);
+}
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'packages', 'db');
 
-const dir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'packages', 'db', 'migrations');
+let failed = !(await migrate('Main database', url, join(root, 'migrations')));
+if (!failed && knowledgeUrl) failed = !(await migrate('Knowledge database', knowledgeUrl, join(root, 'knowledge')));
+else if (!failed) console.log('Knowledge database: KNOWLEDGE_DATABASE_URL is not set, so Knowledge stays off (nothing to update).');
+process.exit(failed ? 1 : 0);
+
+/** Applies one folder of migrations to one database. Returns false if it stopped (the database is left as it was). */
+async function migrate(label, url, dir) {
 const files = (await readdir(dir)).filter((f) => /^\d{4}_[a-z0-9_]+\.sql$/.test(f)).sort();
 if (files.length === 0) {
-  console.error(`No migration files found in ${dir}.`);
-  process.exit(1);
+  console.error(`${label}: no migration files found in ${dir}.`);
+  return false;
 }
 const migrations = await Promise.all(files.map(async (name) => {
   const text = await readFile(join(dir, name), 'utf8');
@@ -34,7 +48,7 @@ const migrations = await Promise.all(files.map(async (name) => {
 
 // Never print the connection string: errors from the driver can include the host, so keep messages short.
 const client = new pg.Client({ connectionString: url, ssl: /localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: true }, application_name: 'niko-migrate' });
-let failed = false;
+let ok = true;
 try {
   await client.connect();
   await client.query('begin');
@@ -50,13 +64,13 @@ try {
     }
   }
   const unknown = [...done.keys()].filter((n) => !migrations.some((m) => m.name === n));
-  if (unknown.length) console.warn(`Note: the database has migrations this code does not know: ${unknown.join(', ')} (is this an older commit?)`);
+  if (unknown.length) console.warn(`Note: ${label.toLowerCase()} has migrations this code does not know: ${unknown.join(', ')} (is this an older commit?)`);
 
   const pending = migrations.filter((m) => !done.has(m.name));
   if (pending.length === 0) {
-    console.log(`Database is up to date (${migrations.length} migration${migrations.length === 1 ? '' : 's'} applied).`);
+    console.log(`${label} is up to date (${migrations.length} migration${migrations.length === 1 ? '' : 's'} applied).`);
   } else if (dryRun) {
-    console.log(`Would apply ${pending.length}: ${pending.map((m) => m.name).join(', ')}`);
+    console.log(`${label}: would apply ${pending.length}: ${pending.map((m) => m.name).join(', ')}`);
   } else {
     for (const m of pending) {
       console.log(`Applying ${m.name} …`);
@@ -67,14 +81,15 @@ try {
       }
       await client.query('insert into schema_migrations (name, checksum) values ($1, $2)', [m.name, m.checksum]);
     }
-    console.log(`Applied ${pending.length} migration${pending.length === 1 ? '' : 's'}.`);
+    console.log(`${label}: applied ${pending.length} migration${pending.length === 1 ? '' : 's'}.`);
   }
   await client.query(dryRun ? 'rollback' : 'commit');
 } catch (e) {
-  failed = true;
+  ok = false;
   await client.query('rollback').catch(() => {});
-  console.error(`Migration stopped: ${e.message}`);
+  console.error(`${label}: migration stopped: ${e.message}`);
 } finally {
   await client.end().catch(() => {});
 }
-process.exit(failed ? 1 : 0);
+return ok;
+}

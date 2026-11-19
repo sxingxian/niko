@@ -1,7 +1,7 @@
 // Admin control of AI options: the default for everyone with one account's changes on top, admins with everything,
 // whole sections switched off, and brains, pictures and speech in skipping what is off (keys go by their service).
 import assert from 'node:assert/strict';
-import { aiAllowed, aiHasBrain, aiOff, brainOption, cleanAiAccess, hearOption, imageOption, voiceOption, AI_OPTION_KEYS } from '../packages/shared/src/index.ts';
+import { aiAllowed, aiHasBrain, aiOff, brainOption, cleanAiAccess, defaultOn, hearOption, imageOption, voiceOption, AI_OPTION_KEYS } from '../packages/shared/src/index.ts';
 import { think } from '../apps/api/src/brains.ts';
 import { paint } from '../apps/api/src/images.ts';
 import { hear } from '../apps/api/src/hears.ts';
@@ -15,10 +15,20 @@ let reply = () => Response.json({});
 
 await ok('the default, then one account’s changes on top; missing means on; admins have everything', () => {
   const defaults = { 'ai:anthropic': false, 'img:fal': false };
-  assert.deepEqual(aiOff(defaults, {}), ['ai:anthropic', 'img:fal']);
-  assert.deepEqual(aiOff(defaults, { 'ai:anthropic': true, 'v:kokoro': false }), ['img:fal', 'v:kokoro']);
+  const startOff = ['h:only-me', 'kn:files', 'kn:learning']; // options that start off until the admin turns them on
+  assert.deepEqual(aiOff(defaults, {}), ['ai:anthropic', 'img:fal', ...startOff]);
+  assert.deepEqual(aiOff(defaults, { 'ai:anthropic': true, 'v:kokoro': false }), ['img:fal', 'v:kokoro', ...startOff]);
   assert.deepEqual(aiOff(defaults, { 'v:kokoro': false }, true), []);
-  assert.deepEqual(aiOff({}, {}), []);
+  assert.deepEqual(aiOff({}, {}), ['h:only-me', 'kn:files', 'kn:learning']);
+});
+await ok('options that start off stay off until the admin turns them on, for everyone or one person', () => {
+  assert.equal(defaultOn({}, 'kn:files'), false);
+  assert.equal(defaultOn({}, 'kn:cf-search'), true);
+  assert.equal(defaultOn({ 'kn:files': true }, 'kn:files'), true);
+  assert.ok(!aiOff({ 'kn:files': true }, {}).includes('kn:files'));
+  assert.ok(aiOff({ 'kn:files': true }, { 'kn:files': false }).includes('kn:files'));
+  assert.ok(!aiOff({}, { 'h:only-me': true }).includes('h:only-me'));
+  assert.deepEqual(aiOff({}, {}, true), []);
 });
 await ok('only known options with true/false are kept', () => {
   assert.deepEqual(cleanAiAccess({ 'ai:openai': false, nope: false, 'v:kokoro': 'no', 'sec:images': true }), { 'ai:openai': false, 'sec:images': true });

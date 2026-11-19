@@ -1,4 +1,5 @@
-// Deploys the Worker and gives it the same DATABASE_URL the build just used to update the database.
+// Deploys the Worker and gives it the same DATABASE_URL (and KNOWLEDGE_DATABASE_URL, when set) the build just used
+// to update the databases.
 //
 //   npm run release            # tests, migrate, then this (deploy + live check, rollback if it fails)
 //
@@ -27,6 +28,12 @@ if (!/^postgres(ql)?:\/\//.test(url)) {
   console.error('DATABASE_URL does not look like a Postgres connection string (it should start with postgresql://). Paste only the URL, without "psql" or quotes.');
   process.exit(1);
 }
+// Knowledge's own Neon project is optional: without it Knowledge stays off. When set, it goes to the Worker the same way.
+const knowledgeUrl = process.env.KNOWLEDGE_DATABASE_URL?.trim() || '';
+if (knowledgeUrl && !/^postgres(ql)?:\/\//.test(knowledgeUrl)) {
+  console.error('KNOWLEDGE_DATABASE_URL does not look like a Postgres connection string (it should start with postgresql://).');
+  process.exit(1);
+}
 
 const apiDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'apps', 'api');
 const dir = mkdtempSync(join(tmpdir(), 'niko-secrets-'));
@@ -34,7 +41,7 @@ const file = join(dir, 'secrets.json');
 const args = process.argv.slice(2);
 let status = 1;
 try {
-  writeFileSync(file, JSON.stringify({ DATABASE_URL: url }), { mode: 0o600 });
+  writeFileSync(file, JSON.stringify({ DATABASE_URL: url, ...(knowledgeUrl ? { KNOWLEDGE_DATABASE_URL: knowledgeUrl } : {}) }), { mode: 0o600 });
   const r = spawnSync('npx', ['wrangler', 'deploy', '--secrets-file', file, ...args], { cwd: apiDir, stdio: 'inherit' });
   status = r.status ?? 1;
 } finally {
