@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { think, testEntry, listModels, providerMessage, customAi } from '../apps/api/src/brains.ts';
 import { store, fakeDb } from './brains-stubs.mjs';
+import { untilDailyReset } from '../apps/api/src/rest.ts';
 
 let pass = 0;
 const ok = async (name, fn) => { try { await fn(); pass++; console.log('PASS', name); } catch (e) { console.log('FAIL', name, e?.message); process.exitCode = 1; } };
@@ -133,7 +134,10 @@ await ok('a used-up daily quota (Gemini says “retry in 31s”) is skipped unti
   const r = await think(workersOk, fakeDb, user({ brains: ['key:aaaa', 'workers-ai'] }), msgs);
   assert.equal(r.used, 'workers-ai');
   const rest = store.engineWrites.at(-1).rest['key:aaaa'];
-  assert.ok(rest.until - Date.now() > 31 * 60_000, 'well past 31 seconds');
+  // Until Google's next reset (midnight Pacific): well past 31 seconds, except in the last moments before midnight.
+  const reset = untilDailyReset(true);
+  assert.ok(Math.abs(rest.until - reset) < 5_000, 'until the next reset');
+  assert.ok(rest.until - Date.now() > Math.min(31 * 60_000, reset - Date.now() - 5_000), 'well past 31 seconds');
   assert.ok(rest.until - Date.now() <= 24 * 3_600_000 + 60_000, 'no later than the next reset');
   // Asked again (with the skip saved), it goes straight to the next one: Gemini isn't called.
   calls = [];

@@ -2,7 +2,7 @@
 // everyone and changes for any person, as on AI options. Nothing is built in. Keys are typed once and never shown again.
 import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import { DATA_CALL_STEPS, type DataAccess, type DataDefaults, type DataOffer, type DataSourceInfo } from '@niko/shared';
-import { ActionsStep, AddressStep, addressProblem, api, ApiError, draftOf, emptyDraft, Switch, TestLines, type SourceDraft, type TestResult } from '@niko/ui';
+import { ActionsStep, AddressStep, addressProblem, AnswersStep, answersProblem, LinkStep, linkProblem, api, ApiError, draftOf, emptyDraft, Switch, TestLines, type SourceDraft, type TestResult } from '@niko/ui';
 
 type Src = DataSourceInfo & { calls: number };
 type Person = { id: string; name: string; email: string; role: string; status: string; dataAccess: DataAccess; calls: number };
@@ -224,19 +224,21 @@ function PersonKeys({ person }: { person: Person }) {
   </>;
 }
 
-/** Add a source (or change one): 1 · Address and sign-in, 2 · What Niko can ask, 3 · Terms, 4 · Who gets it. */
+/** Add a source (or change one): 1 · Paste a link that works, 2 · What it answers, 3 · Terms and test, 4 · Who gets it.
+ *  "More ways" sets it up by hand (address and sign-in, actions, an OpenAPI file). Changing one opens at step 2. */
 function SourceSheet({ src, onClose, onSaved }: { src?: Src; onClose: () => void; onSaved: (text: string) => Promise<void> }) {
   const dlg = useRef<HTMLDialogElement>(null);
   useEffect(() => { dlg.current?.showModal(); }, []);
   const [d, setD] = useState<SourceDraft>(() => (src ? draftOf(src) : emptyDraft()));
-  const [stepN, setStep] = useState(1);
+  const [stepN, setStep] = useState(src ? 2 : 1);
+  const [manual, setManual] = useState(false);
   const [err, setErr] = useState('');
   const [tests, setTests] = useState<TestResult[] | null>(null);
   const [testNote, setTestNote] = useState('');
   const [busy, setBusy] = useState('');
   const set = (p: Partial<SourceDraft>) => { setD((x) => ({ ...x, ...p })); setErr(''); };
-  const p1 = addressProblem(d, !!src?.hasKey), kept = d.actions.filter((a) => a.on).length;
-  const go = (n: number) => { if (n > 1 && p1) return setErr(p1); if (n > 2 && !kept) return setErr('Keep at least one thing Niko can ask.'); setErr(''); setStep(n); };
+  const p1 = src || manual ? addressProblem(d, !!src?.hasKey) : linkProblem(d, false), p2 = answersProblem(d);
+  const go = (n: number) => { if (n > 1 && p1) { setStep(1); return setErr(p1); } if (n > 2 && p2) { setStep(2); return setErr(p2); } setErr(''); setStep(n); };
   const test = async () => {
     setBusy('test'); setErr(''); setTestNote('');
     try { const r = await api<{ results: TestResult[]; note?: string }>('/admin/data/test', { body: { id: src?.id, draft: d } }); setTests(r.results); setTestNote(r.note ?? ''); } catch (e) { setErr((e as Error).message); } finally { setBusy(''); }
@@ -255,10 +257,10 @@ function SourceSheet({ src, onClose, onSaved }: { src?: Src; onClose: () => void
       <div className="ds-sheet-in">
         <div className="ds-sheet-h"><b>{src ? `Change ${src.name}` : 'Add a source'}</b></div>
         <div className="ds-steps" role="group" aria-label="Steps">
-          {['Address and sign-in', 'What Niko can ask', 'Terms', 'Who gets it'].map((t, i) => <button key={t} type="button" aria-current={stepN === i + 1 ? 'step' : undefined} onClick={() => go(i + 1)}>{i + 1} · {t}</button>)}
+          {[src || manual ? 'Address and sign-in' : 'Paste a link', 'What it answers', 'Terms and test', 'Who gets it'].map((t, i) => <button key={t} type="button" aria-current={stepN === i + 1 ? 'step' : undefined} onClick={() => go(i + 1)}>{i + 1} · {t}</button>)}
         </div>
-        {stepN === 1 && <AddressStep d={d} set={set} admin hasKey={!!src?.hasKey} />}
-        {stepN === 2 && <ActionsStep d={d} set={set} onBase={(url) => set({ baseUrl: url })} />}
+        {stepN === 1 && (src || manual ? <AddressStep d={d} set={set} admin hasKey={!!src?.hasKey} /> : <LinkStep d={d} set={set} admin hasKey={false} onManual={() => setManual(true)} />)}
+        {stepN === 2 && (manual ? <ActionsStep d={d} set={set} onBase={(url) => set({ baseUrl: url })} /> : <AnswersStep d={d} set={set} onManual={() => setManual(true)} />)}
         {stepN === 3 && <div className="ds-step">
           <label className="ds-check"><input type="checkbox" checked={d.termsOk} onChange={(e) => set({ termsOk: e.target.checked })} />Its terms allow use in a paid service like Niko.</label>
           <label className="fld"><span className="k">Terms note (people see this)</span><input className="in" value={d.termsNote} maxLength={300} onChange={(e) => set({ termsNote: e.target.value })} placeholder="Open data. Production key added." /></label>
@@ -276,6 +278,7 @@ function SourceSheet({ src, onClose, onSaved }: { src?: Src; onClose: () => void
         {err && <p className="ds-err" role="alert">{err}</p>}
         <div className="ds-end">
           <button type="button" className="sec" onClick={() => close()}>Cancel</button>
+          {stepN > 1 && <button type="button" className="sec" onClick={() => { setErr(''); setStep(stepN - 1); }}>Back</button>}
           {stepN < 4 ? <button type="button" className="pri" onClick={() => go(stepN + 1)}>Next</button>
             : <button type="button" className="pri" disabled={!!busy} onClick={() => void save()}>{busy === 'save' ? 'Saving…' : 'Save'}</button>}
         </div>

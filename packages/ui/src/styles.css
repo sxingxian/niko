@@ -251,3 +251,30 @@ span.ds-tag { cursor: default; }
   .ds-param .ds-x { justify-self: end; }
   .ds-actions li { grid-template-columns: 1fr; }
 }
+
+/* Adding a data source, the simple way: a link that works, what it answers, and what came back. */
+.ds-link { font-family: var(--mono, 'JetBrains Mono', monospace); font-size: 13px; }
+.ds-found { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-radius: 14px; background: rgba(168, 240, 198, .06); border: 1px solid rgba(168, 240, 198, .3); }
+.ds-found-t { font-size: 13px; color: #a8f0c6; }
+.ds-found b { font-weight: 500; color: #fff; }
+.ds-seg { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .2); align-self: flex-start; }
+.ds-seg button { min-height: 38px; padding: 0 16px; border-radius: 999px; border: 0; background: transparent; color: var(--sub, #c3cad6); cursor: pointer; font-size: 14px; }
+.ds-seg button[aria-checked=true] { background: #fff; color: #05060a; }
+.ds-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 18px; border: 1px solid rgba(255, 255, 255, .16); background: rgba(255, 255, 255, .03); }
+.ds-card.off { opacity: .6; }
+.ds-vals { display: flex; flex-direction: column; gap: 6px; }
+.ds-val { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto 32px; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid rgba(255, 255, 255, .08); }
+.ds-val .in { height: 40px; font-size: 13px; padding: 0 10px; }
+.ds-val-n, .ds-val-w { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ds-more summary { cursor: pointer; font-size: 13px; color: var(--sub, #c3cad6); padding: 4px 0; }
+.ds-more[open] { display: flex; flex-direction: column; gap: 10px; }
+.ds-lnk { background: none; border: 0; padding: 0; color: #9fdcf3; cursor: pointer; font-size: 14px; text-align: left; align-self: flex-start; min-height: 32px; }
+.ds-lnk.inline { min-height: 0; font-size: inherit; }
+.ds-addlink { flex-wrap: wrap; }
+.ds-addlink .in { flex: 1 1 260px; }
+.ds-peek summary { cursor: pointer; font-size: 13px; color: var(--sub, #c3cad6); }
+.ds-peek pre { margin: 8px 0 0; padding: 10px 12px; border-radius: 12px; background: rgba(0, 0, 0, .35); border: 1px solid rgba(255, 255, 255, .1); font: 400 12px/1.5 var(--mono, 'JetBrains Mono', monospace); color: var(--sub, #c3cad6); white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+@media (max-width: 640px) {
+  .ds-val { grid-template-columns: 1fr auto 32px; }
+  .ds-val-w { grid-column: 1 / -1; grid-row: 2; }
+}

@@ -7,6 +7,8 @@ import {
   actionUrl, checkValues, cleanAction, cleanActions, cleanBaseUrl, cleanDataAccess, cleanDataPrefs, dataAllowed, dataBlock, dataTags, hostProblem,
   openApiActions, privateIp, resultText, sampleValues, stripDataTags, cleanWeatherPrefs, weatherOrder, cleanDataDefaults, cleanLivePrefs, liveOrder, placesBlock, datasetTable, actionLine, noteSeen, liveSuggestions, LIVE_SUGGEST_AT,
 } from '../packages/shared/src/dataSources.ts';
+import { fromExampleLink } from '../packages/shared/src/dataSources.ts';
+import { testActions } from '../apps/api/src/routes/data.ts';
 import { dns, forgetDns, safeGet } from '../apps/api/src/safefetch.ts';
 import { DataProblem, runAction } from '../apps/api/src/datasources.ts';
 
@@ -235,6 +237,35 @@ await ok('running an action: key in a header or the address, shared cache only w
 });
 
 globalThis.fetch = realFetch;
+await ok('a link that works becomes a source: the site, the path, a value per part with its example, and the key', () => {
+  let r = fromExampleLink('https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival?BusStopCode=03229&ServiceNo=15');
+  assert.equal(r.baseUrl, 'https://datamall2.mytransport.sg');
+  assert.equal(r.name, 'Bus arrival'); assert.equal(r.action.path, '/ltaodataservice/v3/BusArrival'); assert.equal(r.key, null);
+  assert.deepEqual(r.action.params.map((p) => [p.name, p.in, p.type, p.sample, p.required]), [['BusStopCode', 'query', 'text', '03229', true], ['ServiceNo', 'query', 'text', '15', true]], 'codes keep their zeros as text');
+  assert.ok(!('problem' in cleanAction(r.action, new Set())), 'it passes the same check as when saved');
+  // A key in the link becomes the key, never an example; the answer's format stays as it is; ids in the path are values.
+  r = fromExampleLink('https://api.example.com/v2/stops/83139/arrivals?api_key=SECRET-1&format=json&lat=1.3521&on=2026-11-19&all=true');
+  assert.deepEqual(r.key, { name: 'api_key', value: 'SECRET-1' });
+  assert.equal(r.action.path, '/v2/stops/{stop}/arrivals'); assert.equal(r.name, 'Arrivals');
+  assert.deepEqual(r.action.params.map((p) => [p.name, p.in, p.type, p.fixed ?? p.sample]), [['stop', 'path', 'text', '83139'], ['format', 'query', 'text', 'json'], ['lat', 'query', 'number', '1.3521'], ['on', 'query', 'date', '2026-11-19'], ['all', 'query', 'boolean', 'true']]);
+  assert.ok(!JSON.stringify(r.action).includes('SECRET-1'));
+  assert.ok(!('problem' in cleanAction(r.action, new Set())));
+  // Names already taken get a new id; plain problems for links that won't do.
+  assert.equal(fromExampleLink('https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival', new Set(['bus-arrival'])).action.id, 'bus-arrival-2');
+  for (const [bad, why] of [['', /Paste a link/], ['datamall', /whole link/], ['http://api.example.com/x', /https/], ['https://me:pw@api.example.com/x', /sign-in/], ['https://10.0.0.1/x', /./], ['https://localhost/x', /./]]) assert.match(fromExampleLink(bad).problem ?? '', why, bad);
+});
+
+await ok('a test shows the start of what came back only when asked (the person setting it up)', async () => {
+  const acts = [{ id: 'a', name: 'A', path: '/a', params: [], live: true, example: '', on: true }];
+  const run = async () => ({ text: 'x'.repeat(800) });
+  const [withPeek] = await testActions(run, acts, { peek: true });
+  assert.equal(withPeek.ok, true); assert.equal(withPeek.peek.length, 600);
+  const [without] = await testActions(run, acts);
+  assert.equal(without.peek, undefined);
+  const [bad] = await testActions(async () => { throw new DataProblem('No such stop.'); }, acts, { peek: true });
+  assert.equal(bad.ok, false); assert.equal(bad.problem, 'No such stop.'); assert.equal(bad.peek, undefined);
+});
+
 await ok('places from live questions: offered after a few times, not when already kept or turned down, forgotten after 60 days', () => {
   const day = 86_400_000, t0 = Date.UTC(2026, 10, 1);
   const item = { key: 'src:bus-arrivals:BusStopCode=83139', name: 'Bus arrivals', value: 'BusStopCode 83139' };

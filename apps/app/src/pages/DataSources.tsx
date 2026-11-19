@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { actionLine, type DataSourceInfo, type DataUse } from '@niko/shared';
-import { ActionsStep, AddressStep, addressProblem, api, draftOf, emptyDraft, Switch, TestLines, type SourceDraft, type TestResult } from '@niko/ui';
+import { ActionsStep, AddressStep, addressProblem, AnswersStep, answersProblem, LinkStep, linkProblem, api, draftOf, emptyDraft, Switch, TestLines, type SourceDraft, type TestResult } from '@niko/ui';
 import { useNiko } from '../niko';
 import { NoteLine, SettingsPage } from './Settings';
 
@@ -177,22 +177,24 @@ function KeySheet({ s, onClose, onKey }: { s: Src; onClose: () => void; onKey: (
   );
 }
 
-/** Add a data source (or change one of their own): 1 · Address and sign-in, 2 · What Niko can ask, 3 · Test and save. */
+/** Add a data source (or change one of their own): 1 · Paste a link that works, 2 · What it answers, 3 · Test and save.
+ *  "More ways" sets it up by hand (address and sign-in, actions, an OpenAPI file). Changing one opens at step 2. */
 export function AddOwn({ edit, use, datasets, onClose, onSaved }: { edit?: Src; use?: DataUse; datasets?: boolean; onClose: () => void; onSaved: (text: string) => Promise<void> }) {
   const sheet = useSheet(onClose);
   const [d, setD] = useState<SourceDraft>(() => (edit ? draftOf(edit) : { ...emptyDraft(), ...(use ? { use } : {}) }));
-  const [stepN, setStep] = useState(1);
+  const [stepN, setStep] = useState(edit ? 2 : 1);
+  const [manual, setManual] = useState(false);
   const [err, setErr] = useState('');
   const [tests, setTests] = useState<TestResult[] | null>(null);
   const [busy, setBusy] = useState('');
   const set = (p: Partial<SourceDraft>) => { setD((x) => ({ ...x, ...p })); setErr(''); if (p.actions || p.baseUrl || p.key !== undefined || p.auth || p.authName !== undefined) setTests(null); };
-  const p1 = addressProblem(d, !!edit?.hasKey), kept = d.actions.filter((a) => a.on).length;
+  const p1 = edit || manual ? addressProblem(d, !!edit?.hasKey) : linkProblem(d, false), p2 = answersProblem(d);
   const body = () => ({ ...d, termsOk: d.termsOk });
   const test = async () => {
     setBusy('test'); setErr('');
     try { setTests((await api<{ results: TestResult[] }>('/data/test', { body: { id: edit?.id, draft: body() } })).results); } catch (e) { setErr((e as Error).message); } finally { setBusy(''); }
   };
-  const go = (n: number) => { if (n > 1 && p1) return setErr(p1); if (n > 2 && !kept) return setErr('Keep at least one thing Niko can ask.'); setErr(''); setStep(n); if (n === 3 && !tests) void test(); };
+  const go = (n: number) => { if (n > 1 && p1) { setStep(1); return setErr(p1); } if (n > 2 && p2) { setStep(2); return setErr(p2); } setErr(''); setStep(n); if (n === 3 && !tests) void test(); };
   const save = async () => {
     setBusy('save'); setErr('');
     try {
@@ -205,10 +207,10 @@ export function AddOwn({ edit, use, datasets, onClose, onSaved }: { edit?: Src; 
       <div className="ds-sheet-in">
         <div className="ds-sheet-h"><b>{edit ? `Change ${edit.name}` : 'Add a data source'}</b></div>
         <div className="ds-steps" role="group" aria-label="Steps">
-          {['Address and sign-in', 'What Niko can ask', 'Test and save'].map((t, i) => <button key={t} type="button" aria-current={stepN === i + 1 ? 'step' : undefined} onClick={() => go(i + 1)}>{i + 1} · {t}</button>)}
+          {[edit || manual ? 'Address and sign-in' : 'Paste a link', 'What it answers', 'Test and save'].map((t, i) => <button key={t} type="button" aria-current={stepN === i + 1 ? 'step' : undefined} onClick={() => go(i + 1)}>{i + 1} · {t}</button>)}
         </div>
-        {stepN === 1 && <AddressStep d={d} set={set} admin={false} hasKey={!!edit?.hasKey} />}
-        {stepN === 2 && <ActionsStep d={d} set={set} datasets={!!datasets} onBase={(url) => set({ baseUrl: url })} />}
+        {stepN === 1 && (edit || manual ? <AddressStep d={d} set={set} admin={false} hasKey={!!edit?.hasKey} /> : <LinkStep d={d} set={set} admin={false} hasKey={false} onManual={() => setManual(true)} />)}
+        {stepN === 2 && (manual ? <ActionsStep d={d} set={set} datasets={!!datasets} onBase={(url) => set({ baseUrl: url })} /> : <AnswersStep d={d} set={set} datasets={!!datasets} onManual={() => setManual(true)} />)}
         {stepN === 3 && <div className="ds-step">
           {busy === 'test' && <span className="ds-hint" role="status">Testing each action…</span>}
           <TestLines results={tests} />
@@ -219,6 +221,7 @@ export function AddOwn({ edit, use, datasets, onClose, onSaved }: { edit?: Src; 
         {err && <p className="ds-err" role="alert">{err}</p>}
         <div className="ds-end">
           <button type="button" className="sec" onClick={onClose}>Cancel</button>
+          {stepN > 1 && <button type="button" className="sec" onClick={() => { setErr(''); setStep(stepN - 1); }}>Back</button>}
           {stepN < 3 ? <button type="button" className="pri" onClick={() => go(stepN + 1)}>Next</button>
             : <button type="button" className="pri" disabled={!d.termsOk || !!busy} onClick={() => void save()}>{busy === 'save' ? 'Saving…' : 'Save'}</button>}
         </div>
