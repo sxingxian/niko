@@ -13,7 +13,7 @@ export {
   splitText, parseDelimited, guessType, guessHeader, toSheet, rowPieces, sheetSummary, markdownTables, fromJson, looksLikeInstructions,
   type Piece, type Sheet,
 } from '@niko/shared';
-import { fromJson, looksLikeInstructions, markdownTables, parseDelimited, rowPieces, sheetSummary, splitText, toSheet, type Piece, type Sheet } from '@niko/shared';
+import { prepareText, xmlProblem, type Piece, type PreparedText, type Sheet } from '@niko/shared';
 export interface Prepared { kind: KnKind; pieces: Piece[]; sheets: Sheet[]; flagged: boolean }
 
 /** Text from HTML or XML, keeping headings so pieces stay under them. Needs the browser's DOMParser. */
@@ -41,30 +41,43 @@ export async function sha256Hex(buf: ArrayBuffer): Promise<string> {
 }
 
 // ---------------------------------------------------------------- reading a file
+/** How long reading one file may take in the background thread before it's stopped. */
+const READ_TIME_MS = 60_000;
+/** The heavy part of reading runs in a background thread with a time limit, so a huge or hostile file can't freeze
+ *  the page. Where workers aren't available (tests), it runs here. */
+function prepareInWorker(kind: KnKind, name: string, text: string, fromCloudflare: boolean): Promise<PreparedText> {
+  if (typeof Worker === 'undefined') return Promise.resolve(prepareText(kind, name, text, fromCloudflare));
+  return new Promise((resolve, reject) => {
+    const w = new Worker(new URL('./knowledgeRead.worker.ts', import.meta.url), { type: 'module' });
+    const stop = setTimeout(() => { w.terminate(); reject(new Error('That file took too long to read. Try a smaller file, or split it into parts.')); }, READ_TIME_MS);
+    w.onmessage = (e: MessageEvent<{ ok: true; out: PreparedText } | { ok: false; error: string }>) => {
+      clearTimeout(stop); w.terminate();
+      if (e.data.ok) resolve(e.data.out); else reject(new Error(e.data.error));
+    };
+    w.onerror = () => { clearTimeout(stop); w.terminate(); reject(new Error('That file couldn’t be read.')); };
+    w.postMessage({ kind, name, text, fromCloudflare });
+  });
+}
+
 /** Reads a file into pieces and sheets. Cloudflare is asked only for PDF, Word and spreadsheet files. */
 export async function prepare(file: File, readWithCloudflare: boolean): Promise<Prepared> {
   const kind = knKindOf(file.name);
   if (!kind) throw new Error('Knowledge takes MD, TXT, CSV, TSV, JSON, XML, HTML, PDF, Word (DOCX), Excel (XLSX, XLS) and OpenDocument files.');
-  let text = '';
-  let sheets: Sheet[] = [];
-  const base = file.name.replace(/\.[^.]+$/, '');
+  let text: string, fromCloudflare = false, as: KnKind = kind;
   if (knNeedsCloudflare(kind)) {
     if (!readWithCloudflare) throw new Error('PDF, Word and spreadsheet files are read with Cloudflare, which is off. Choose it under “Read files with”, or save the file as CSV, MD or TXT.');
     const res = await fetch(`/api/knowledge/read?name=${encodeURIComponent(file.name)}`, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/octet-stream' }, body: file });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new ApiError(data?.error ?? 'That file couldn’t be read.', res.status, data);
-    text = String(data.text ?? '');
-    if (knIsSheet(kind)) { sheets = markdownTables(text).map((t) => toSheet(t.name, t.rows)); if (sheets.length) text = ''; }
+    text = String(data.text ?? ''); fromCloudflare = true;
   } else {
-    const raw = await file.text();
-    if (kind === 'csv' || kind === 'tsv') sheets = [toSheet(base, parseDelimited(raw, kind === 'csv' ? ',' : '\t'))];
-    else if (kind === 'json') ({ sheets, text } = fromJson(file.name, raw));
-    else if (kind === 'html' || kind === 'xml') text = fromMarkup(raw, kind);
-    else text = raw;
+    text = await file.text();
+    if (kind === 'xml') { const p = xmlProblem(text); if (p) throw new Error(p); }
+    // HTML and XML need the page's DOMParser, so they become Markdown here and are split in the background.
+    if (kind === 'html' || kind === 'xml') { text = fromMarkup(text, kind); as = 'md'; }
   }
-  const pieces = [...splitText(text), ...sheets.flatMap((s) => (s.rows.length > KN_SHEET_ROW_PIECES_MAX ? [sheetSummary(s)] : rowPieces(s)))];
-  if (!pieces.length && !sheets.some((s) => s.rows.length)) throw new Error('No text was found in that file.');
-  return { kind, pieces, sheets: sheets.filter((s) => s.rows.length), flagged: looksLikeInstructions(text) || sheets.some((s) => s.rows.some((r) => looksLikeInstructions(r.join(' ')))) };
+  const out = await prepareInWorker(as, file.name, text, fromCloudflare);
+  return { kind, pieces: out.pieces, sheets: out.sheets, flagged: out.flagged };
 }
 
 /** Adds one file: reads it, starts it on the server, sends its pieces and sheets, and finishes it. If anything fails

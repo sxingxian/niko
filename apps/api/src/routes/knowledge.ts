@@ -15,7 +15,7 @@ import { notionPage, notionPages, PlaceError, placeConnections, remoteFor } from
 import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile, roots, setRoot } from '../knPlacesStore';
 import { credentials } from '../providers';
 import { cleanStorage, loadStorage, saveStorage, shownStorage, testStorage } from '../knStorage';
-import { addCloudflareNumbers, addOwnNumbers, clearOwnNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeDb, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
+import { accountKnowledge, addCloudflareNumbers, addOwnNumbers, clearOwnNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
 
 export const knowledge = new Hono<AppEnv>();
 type C = Context<AppEnv>;
@@ -53,7 +53,7 @@ export async function syncNotes(c: C, k: Kdb) {
 }
 /** Notes learned in Niko need the Knowledge database and learning in the person's plan (it works without files). */
 async function notesStore(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: KnowledgePrefs } | Response> {
-  const k = knowledgeDb(c.env);
+  const k = accountKnowledge(c.env, c.get('user').id);
   if (!k) return c.json({ error: NOT_HERE }, 503);
   const w = await who(c);
   if (!w.access.learning) return c.json({ error: NOT_ON_ACCOUNT }, 403);
@@ -61,7 +61,7 @@ async function notesStore(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; pref
 }
 /** Files kept in Niko need the Knowledge database, Knowledge files and the Niko place. */
 async function store(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: KnowledgePrefs } | Response> {
-  const k = knowledgeDb(c.env);
+  const k = accountKnowledge(c.env, c.get('user').id);
   if (!k) return c.json({ error: NOT_HERE }, 503);
   const w = await who(c);
   if (!w.access.niko) return c.json({ error: NOT_ON_ACCOUNT }, 403);
@@ -87,7 +87,7 @@ const placeFail = (c: C, e: unknown) => (e instanceof PlaceError ? c.json({ erro
 
 // Everything the Knowledge screen needs at once.
 knowledge.get('/', async (c) => {
-  const u = c.get('user'), k = knowledgeDb(c.env);
+  const u = c.get('user'), k = accountKnowledge(c.env, c.get('user').id);
   const w = await who(c);
   const settings = await knowledgeSettings(c.get('db'));
   return c.json({
@@ -116,13 +116,13 @@ knowledge.put('/prefs', async (c) => {
   // so a connection problem shows straight away. Moving back to Niko: Niko stops using the copies (they stay there).
   if (isRemotePlace(prefs.place) && prefs.place !== before.place) {
     if (!access[prefs.place]) return c.json({ error: NOT_ON_ACCOUNT }, 403);
-    const k = knowledgeDb(c.env);
+    const k = accountKnowledge(c.env, c.get('user').id);
     if (!k) return c.json({ error: NOT_HERE }, 503);
     const remote = await remoteFor(c.env, c.get('db'), u.id, prefs.place);
     if (!remote) return c.json({ error: (prefs.place === 's3' ? 'Add your storage first.' : `Connect ${KN_PLACE_NAMES[prefs.place]} first.`), connect: prefs.place }, 409);
     try { await placeRoot(k, remote, u.id); } catch (e) { return placeFail(c, e); }
   }
-  if (prefs.place === 'niko' && isRemotePlace(before.place)) { const k = knowledgeDb(c.env); if (k) await leavePlaces(k, u.id); }
+  if (prefs.place === 'niko' && isRemotePlace(before.place)) { const k = accountKnowledge(c.env, c.get('user').id); if (k) await leavePlaces(k, u.id); }
   if (prefs.search === 'cloudflare' && !access.cloudflareSearch) prefs.search = 'device';
   // Their own service: allowed by the plan, and tried once before it's saved, so a wrong model is caught now.
   if (prefs.search === 'own') {
@@ -132,7 +132,7 @@ knowledge.put('/prefs', async (c) => {
       if (await tooMany(c, 'kn-own-try:' + u.id, 30, 3600)) return c.json({ error: 'That’s a lot of tries. Try again in a little while.' }, 429);
       try { await (await ownEmbedder(c.env, c.get('db'), u, prefs.own))(['Niko']); }
       catch (e) { return c.json({ error: (e as Error).message }, 400); }
-      const k = knowledgeDb(c.env);
+      const k = accountKnowledge(c.env, c.get('user').id);
       if (k) await clearOwnNumbers(k, u.id);
     }
   }
@@ -215,9 +215,9 @@ knowledge.patch('/files/:id', async (c) => {
 
 knowledge.delete('/files/:id', async (c) => {
   const s = await store(c); if (s instanceof Response) return s;
-  // Its copies go to the bin there too (Notion, Drive and OneDrive keep them a while), except when the file is only
-  // moving to this device, where the copies stay.
-  const copies = c.req.query('keep') === '1' ? null : await copiesOf(s.k, c.get('user').id, c.req.param('id'));
+  // Its copies in Notion, Drive, OneDrive or their storage stay unless the person chose to remove them too
+  // (?copy=bin): Notion, Drive and OneDrive keep them in their bin a while; their own storage deletes them.
+  const copies = c.req.query('copy') === 'bin' ? await copiesOf(s.k, c.get('user').id, c.req.param('id')) : null;
   if (copies) {
     const remote = await remoteFor(c.env, c.get('db'), c.get('user').id, copies.place).catch(() => null);
     if (remote) for (const it of copies.items) await remote.trash(it.id, it.kind).catch((e) => console.warn(`knowledge copy not removed: ${String((e as Error)?.message ?? e).slice(0, 120)}`));
@@ -445,7 +445,7 @@ knowledge.post('/taught', async (c) => {
 // Cloudflare turns a PDF, Word or spreadsheet file into text and keeps nothing; the browser then splits the text.
 // The file is sent as the request body, with its name in ?name=.
 knowledge.post('/read', async (c) => {
-  if (!knowledgeDb(c.env)) return c.json({ error: NOT_HERE }, 503);
+  if (!accountKnowledge(c.env, c.get('user').id)) return c.json({ error: NOT_HERE }, 503);
   const u = c.get('user');
   const { access, prefs } = await who(c);
   if (!access.cloudflareRead || prefs.read !== 'cloudflare') return c.json({ error: 'Reading PDF and Word files with Cloudflare isn’t on. Choose it in Settings · Knowledge, or add the text as an MD or TXT file.' }, 403);

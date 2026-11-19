@@ -71,7 +71,7 @@ type Place = 'niko' | 'device';
 interface Ops {
   list: () => Promise<KnFile[]>;
   add: (f: File, collection: string, onStep: (step: string, done: number, total: number) => void) => Promise<unknown>;
-  remove: (id: string) => Promise<void>;
+  remove: (id: string, copy?: 'bin') => Promise<void>;
   keep: (id: string) => Promise<void>;
   sheets: (fileId: string) => Promise<KnSheet[]>;
   saveSheet: (fileId: string, sheetId: string, b: { columns: KnColumn[]; header: boolean }) => Promise<KnSheet>;
@@ -94,6 +94,7 @@ export function Knowledge() {
   const [copying, setCopying] = useState<{ done: number; total: number; name: string; rows?: { done: number; total: number } } | null>(null);
   const [notionPages, setNotionPages] = useState<{ id: string; title: string }[] | null>(null);
   const [storage, setStorage] = useState<StorageForm | null>(null);
+  const [removing, setRemoving] = useState<{ file: KnFile; bin: boolean } | null>(null);
   const [storageNote, setStorageNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [moving, setMoving] = useState<{ done: number; total: number; name: string } | null>(null);
   const [model, setModel] = useState<{ ready: boolean; p: number | null }>({ ready: embedReady(), p: null });
@@ -118,7 +119,7 @@ export function Knowledge() {
   } : {
     list: async () => (await api<{ files: KnFile[] }>('/knowledge/files')).files,
     add: (f, c, onStep) => addFile(f, c, { readWithCloudflare: s.access.cloudflareRead && s.prefs.read === 'cloudflare', onStep }),
-    remove: async (id) => { await api(`/knowledge/files/${id}`, { method: 'DELETE' }); },
+    remove: async (id, copy) => { await api(`/knowledge/files/${id}${copy ? '?copy=bin' : ''}`, { method: 'DELETE' }); },
     keep: async (id) => { await api(`/knowledge/files/${id}`, { method: 'PATCH', body: { flagged: false } }); },
     sheets: async (id) => (await api<{ sheets: KnSheet[] }>(`/knowledge/files/${id}/sheets`)).sheets,
     saveSheet: async (id, sid, b) => (await api<{ sheet: KnSheet }>(`/knowledge/files/${id}/sheets/${sid}`, { method: 'PUT', body: b })).sheet,
@@ -211,10 +212,16 @@ export function Knowledge() {
     }
     await load();
   };
-  const remove = async (f: KnFile) => {
+  // A file with a copy in Notion, Drive, OneDrive or their storage asks first what to do with the copy there.
+  const remove = async (f: KnFile, copy?: 'keep' | 'bin') => {
     setMenu(null);
-    try { await ops.remove(f.id); setFiles((x) => x.filter((y) => y.id !== f.id)); await load(); }
-    catch (e) { setNote({ ok: false, text: (e as Error).message }); }
+    if (!copy && f.copied && f.place && isRemotePlace(f.place)) { setRemoving({ file: f, bin: false }); return; }
+    try {
+      await ops.remove(f.id, copy === 'bin' ? 'bin' : undefined);
+      setFiles((x) => x.filter((y) => y.id !== f.id));
+      if (copy) setNote({ ok: true, text: copy === 'bin' ? (f.place === 's3' ? `Removed. Its file in your storage was deleted too.` : `Removed. Its copy is in ${PLACE_NAME[f.place as KnPlace]}’s bin.`) : `Removed. Its copy is still ${inPlace(f.place as KnPlace)}.` });
+      await load();
+    } catch (e) { setNote({ ok: false, text: (e as Error).message }); }
   };
   const keep = async (f: KnFile) => {
     try { await ops.keep(f.id); setFiles((x) => x.map((y) => (y.id === f.id ? { ...y, flagged: false } : y))); }
@@ -631,6 +638,7 @@ export function Knowledge() {
         </aside>
       </div>
       )}
+      {removing && <RemoveCopy file={removing.file} bin={removing.bin} onBin={(bin) => setRemoving({ ...removing, bin })} onClose={() => setRemoving(null)} onRemove={() => { const r = removing; setRemoving(null); void remove(r.file, r.bin ? 'bin' : 'keep'); }} />}
       {checking && <CheckColumns file={checking} ops={ops} onClose={() => setChecking(null)} />}
     </SettingsPage>
   );
@@ -677,6 +685,28 @@ function CheckColumns({ file, ops, onClose }: { file: KnFile; ops: Ops; onClose:
           <label className="kn-check"><input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} />First row is the header</label>
           <div className="kn-dlg-b"><button type="button" className="bt" onClick={onClose}>Cancel</button><button type="button" className="pri md" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save columns'}</button></div>
         </>}
+      </div>
+    </Sheet>
+  );
+}
+
+/** Removing a file kept elsewhere: keep its copy there (the default) or remove that too. */
+function RemoveCopy({ file, bin, onBin, onClose, onRemove }: { file: KnFile; bin: boolean; onBin: (bin: boolean) => void; onClose: () => void; onRemove: () => void }) {
+  const place = (file.place ?? 'gdrive') as KnRemotePlace;
+  const what = place === 'gdrive' ? (file.sheets ? 'Google Sheet' : 'Google Doc') : place === 'notion' ? (file.sheets ? 'Notion database' : 'Notion page') : 'copy';
+  const keepSub = place === 'gdrive' ? 'It stays in your Niko Knowledge folder in Drive.' : place === 'notion' ? 'It stays on your Niko Knowledge page in Notion.' : place === 'onedrive' ? 'It stays in Niko’s folder in your OneDrive.' : 'It stays in the niko-knowledge folder of your storage.';
+  const binLabel = place === 's3' ? 'Also delete the file in your storage' : `Also move the ${what} to the bin`;
+  const binSub = place === 's3' ? 'It can’t be brought back.' : place === 'gdrive' ? 'You can get it back from Drive’s bin for 30 days.' : place === 'notion' ? 'You can get it back from Notion’s trash.' : 'You can get it back from OneDrive’s recycle bin.';
+  return (
+    <Sheet onClose={onClose} labelledBy="kn-rm-h">
+      <div className="kn-dlg">
+        <b id="kn-rm-h" className="kn-dlg-h">Remove “{file.name}”?</b>
+        <span className="kn-lead">Niko removes its text, rows and search index straight away.</span>
+        <div className="kn-opts" role="radiogroup" aria-label="Its copy">
+          <label className={'kn-opt' + (!bin ? ' on' : '')}><input type="radio" name="kn-rm" checked={!bin} onChange={() => onBin(false)} /><span><span className="kn-opt-t">Keep the {what}</span><span className="srow-hint">{keepSub}</span></span></label>
+          <label className={'kn-opt' + (bin ? ' on' : '')}><input type="radio" name="kn-rm" checked={bin} onChange={() => onBin(true)} /><span><span className="kn-opt-t">{binLabel}</span><span className="srow-hint">{binSub}</span></span></label>
+        </div>
+        <div className="kn-dlg-b"><button type="button" className="bt" onClick={onClose}>Cancel</button><button type="button" className="pri md danger" onClick={onRemove}>Remove file</button></div>
       </div>
     </Sheet>
   );
