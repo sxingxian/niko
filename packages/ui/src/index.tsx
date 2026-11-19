@@ -28,6 +28,14 @@ export class ApiError extends Error {
 export function lockedSignal(sent: number) {
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('niko:locked', { detail: { sent } }));
 }
+/** Leaves an account: forgets what this tab kept for it in session storage, then loads the page again from the start,
+ *  so nothing one account loaded (answers, briefings, pictures, files) can show for the next. */
+export function leaveAccount(to: string) {
+  try { for (const k of Object.keys(sessionStorage)) if (k.startsWith('niko.') || k === 'kn-return') sessionStorage.removeItem(k); } catch { /* storage off */ }
+  if (typeof window !== 'undefined') window.location.replace(to);
+}
+/** The account this page has been answered for. */
+let pageAccount: string | null = null;
 /** Same-origin JSON call. Cookies carry the session; nothing is kept in browser storage. */
 export async function api<T = any>(path: string, init: { method?: string; body?: unknown; form?: FormData } = {}): Promise<T> {
   const sent = Date.now();
@@ -37,10 +45,18 @@ export async function api<T = any>(path: string, init: { method?: string; body?:
     headers: init.body ? { 'content-type': 'application/json' } : undefined,
     body: init.form ?? (init.body ? JSON.stringify(init.body) : undefined),
   });
+  // Another account answered than the one this page has been showing (it signed in in another tab): the page reloads.
+  const who = res.headers.get('x-niko-account');
+  if (who && typeof window !== 'undefined') {
+    if (pageAccount && who !== pageAccount) window.dispatchEvent(new CustomEvent('niko:signed-out', { detail: { changed: true } }));
+    pageAccount = pageAccount ?? who;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     // The server keeps the screen lock: any refused call tells the app to show the lock.
     if (res.status === 423 && data?.locked && typeof window !== 'undefined') lockedSignal(sent);
+    // Signed out (the session ended, or another tab signed out): the app lets go of everything this account loaded.
+    if (res.status === 401 && typeof window !== 'undefined' && !/^\/(auth|admin)\//.test(path)) window.dispatchEvent(new CustomEvent('niko:signed-out'));
     throw new ApiError(data?.error ?? 'Something went wrong.', res.status, data);
   }
   return data as T;

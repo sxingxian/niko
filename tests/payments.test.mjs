@@ -164,7 +164,7 @@ class Browser {
       if (!v || attrs.some((a) => /max-age=0\b/i.test(a.trim()) || /expires=thu, 01 jan 1970/i.test(a.trim()))) this.jar.delete(k); else this.jar.set(k, v);
     }
     const data = await res.json().catch(() => ({}));
-    return { status: res.status, data };
+    return { status: res.status, data, account: res.headers.get('x-niko-account'), cache: res.headers.get('cache-control') };
   }
   get(p) { return this.call('GET', p); }
   post(p, b = {}) { return this.call('POST', p, b); }
@@ -206,6 +206,19 @@ await ok('first owner is set up; existing accounts never need to pay', async () 
   admin.jar.set('__Host-niko_admin', token);
   const me = await owner.get('/me');
   assert.equal(me.data.access.has, true); assert.equal(me.data.access.kind, 'admin');
+});
+
+await ok('every answer says which account it is for (a page showing another account reloads), and nothing is cached', async () => {
+  const someone = new Browser();
+  let r = await someone.get('/me');
+  assert.equal(r.status, 401); assert.equal(r.account, null, 'no account, no header');
+  assert.equal(r.cache, 'no-store');
+  const [o] = await q(`select id from users where is_owner limit 1`);
+  r = await owner.get('/me');
+  assert.equal(r.account, o.id); assert.equal(r.cache, 'no-store');
+  // Pages themselves are never kept by the browser, so Back after signing out can't show the last account's page.
+  const page = await worker.fetch(new Request(ORIGIN + '/app/inbox'), env, ctx);
+  assert.equal(page.headers.get('cache-control'), 'no-store');
 });
 
 await ok('nothing set up in Stripe: Connect has Niko make the webhook and billing page in each mode', async () => {

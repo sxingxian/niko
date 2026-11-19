@@ -25,6 +25,10 @@ api.use('*', async (c, next) => {
   c.set('site', siteFor(new URL(c.req.url)));
   await next();
   c.header('cache-control', 'no-store');
+  // Which account answered, so a page that was showing another account (one signed in another tab since) reloads
+  // instead of mixing the two. Same-origin only; the id is already the account's own.
+  const who = (c.get('user') as { id?: string } | undefined)?.id;
+  if (who) c.header('x-niko-account', who);
   // After the answer: the daily job (unpaid sign-ups, reminders), at most once an hour. See maybeDaily.
   try {
     const env = c.env, db = c.get('db');
@@ -128,7 +132,9 @@ export default {
       out.headers.set('cross-origin-resource-policy', 'same-origin');
     }
     if (path.endsWith('/sw.js')) out.headers.set('service-worker-allowed', '/');
-    if (!isFile || path.endsWith('.html')) out.headers.set('cache-control', 'no-cache');
+    // Pages are never kept by the browser (no-store): after signing out, Back can't bring up a page the last account had
+    // open. Files with a hash in their name are cached as usual.
+    if (!isFile || path.endsWith('.html')) out.headers.set('cache-control', 'no-store');
     return out;
   },
 };

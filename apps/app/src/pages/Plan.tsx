@@ -2,7 +2,7 @@
 // Also the Billing card in Account, where a plan can be chosen ahead of time and Stripe's billing page opened.
 import { useEffect, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { api, Icon } from '@niko/ui';
+import { api, appUrl, Icon, leaveAccount } from '@niko/ui';
 import { money, type AccessInfo, type Plan } from '@niko/shared';
 import { useNiko } from '../niko';
 import { Shell, TestNote } from './Auth';
@@ -66,7 +66,7 @@ export function PlanGate({ children }: { children: ReactNode }) {
   const ret = usePlanReturn(() => setDone(true), !!access && !access.has);
   useEffect(() => { if (access?.plans.length && !access.plans.some((p) => p.plan === pick)) setPick(access.plans[0]!.plan); }, [access]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!access || (access.has && !done)) return <>{children}</>;
-  const signOut = async () => { await api('/auth/sign-out', { method: 'POST' }).catch(() => undefined); await voiceForgetAll(); await refreshMe(); };
+  const signOut = async () => { await api('/auth/sign-out', { method: 'POST' }).catch(() => undefined); await voiceForgetAll().catch(() => undefined); leaveAccount(appUrl('/sign-in')); };
   if (done) {
     return (
       <><div className="bg" /><Shell tag="Good to have you." label="Subscribed">

@@ -146,6 +146,9 @@ function App() {
   );
 }
 
+// A page brought back from the browser's memory (Back after signing out) may belong to an account that left: load it
+// again so it shows only what the account signed in now may see.
+window.addEventListener('pageshow', (e) => { if (e.persisted) window.location.reload(); });
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter basename={appBase() || '/'}><App /></BrowserRouter>
