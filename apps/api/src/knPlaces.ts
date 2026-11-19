@@ -310,19 +310,19 @@ function onedrive(token: string): Remote {
 // ---------------------------------------------------------------- which place
 /** The person's place, signed in with their own connection; null when it isn't connected. */
 export async function remoteFor(env: Env, db: Db, userId: string, place: KnRemotePlace): Promise<Remote | null> {
-  if (place === 's3') return null; // their own storage comes with stage 4g
+  if (place === 's3') { const { storageRemote } = await import('./knStorage'); return storageRemote(env, db, userId); }
   const provider = place === 'gdrive' ? 'google-drive' : place;
   const s = await credentials(env, db, userId, provider).catch(() => null);
   if (!s?.accessToken) return null;
   return place === 'notion' ? notion(s.accessToken) : place === 'gdrive' ? gdrive(s.accessToken) : onedrive(s.accessToken);
 }
 /** Whether each place is connected, and the account name shown with it. */
-export async function placeConnections(db: Db, userId: string): Promise<Record<'notion' | 'gdrive' | 'onedrive', { connected: boolean; label: string | null }>> {
+export async function placeConnections(db: Db, userId: string): Promise<Record<KnRemotePlace, { connected: boolean; label: string | null }>> {
   const one = async (provider: string) => {
     const c = await getConnection(db, userId, provider).catch(() => null);
     const m = (c?.meta ?? {}) as Record<string, unknown>;
     return { connected: !!c, label: c ? String(m.workspace ?? m.label ?? m.teamName ?? '') || null : null };
   };
-  const [notionC, gdriveC, onedriveC] = await Promise.all([one('notion'), one('google-drive'), one('onedrive')]);
-  return { notion: notionC, gdrive: gdriveC, onedrive: onedriveC };
+  const [notionC, gdriveC, onedriveC, s3C] = await Promise.all([one('notion'), one('google-drive'), one('onedrive'), one('kn-storage')]);
+  return { notion: notionC, gdrive: gdriveC, onedrive: onedriveC, s3: s3C };
 }
