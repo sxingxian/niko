@@ -355,9 +355,13 @@ knowledge.put('/places/notion', async (c) => {
   const s = await placeStore(c, 'notion'); if (s instanceof Response) return s;
   const b = await c.req.json<{ page?: unknown; name?: unknown }>().catch(() => ({} as { page?: unknown; name?: unknown }));
   const u = c.get('user');
+  // Choosing what's already in use changes nothing: nothing is copied again, so nothing is duplicated there.
+  const [now] = await s.k.q<{ root_id: string; root_name: string; made: boolean }>(`select root_id, root_name, made from kn_places where account_id = $1 and place = 'notion'`, [u.id]);
+  const nid = (v: string) => v.replace(/-/g, '').toLowerCase();
   if (b.page === null) {
     const name = b.name === undefined ? KN_DEFAULT_FOLDER.notion : cleanFolder('notion', b.name);
     if (!name) return c.json({ error: 'Give the page a name.' }, 400);
+    if (now && now.made !== false && now.root_name === name) return c.json({ ok: true, root: null, relocated: { files: 0, learned: false } });
     await saveFolder(c, 'notion', name);
     await setRoot(s.k, u.id, 'notion', null);
     return c.json({ ok: true, root: null, relocated: await relocate(s.k, u.id, 'notion') });
@@ -366,6 +370,7 @@ knowledge.put('/places/notion', async (c) => {
   if (!cred?.accessToken) return c.json({ error: 'Connect Notion first.', connect: 'notion' }, 409);
   try {
     const p = await notionPage(cred.accessToken, typeof b.page === 'string' ? b.page : '');
+    if (now && now.made === false && nid(now.root_id) === nid(p.id)) return c.json({ ok: true, root: p.title, relocated: { files: 0, learned: false } });
     const relocated = await relocate(s.k, u.id, 'notion');
     await setRoot(s.k, u.id, 'notion', { id: p.id, name: p.title });
     return c.json({ ok: true, root: p.title, relocated });

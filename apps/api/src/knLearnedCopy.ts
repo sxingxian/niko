@@ -62,8 +62,14 @@ export async function syncLearnedCopy(k: Kdb, remote: Remote, account: string, n
   try {
     const root = await placeRoot(k, remote, account);
     const md = learnedMarkdown(await listLearned(k, account), remote.place !== 'notion');
-    const w = copy.remoteId && remote.replaceDoc ? await remote.replaceDoc(copy.remoteId, LEARNED_COPY_TITLE, md) : await remote.writeDoc(root.id, LEARNED_COPY_TITLE, md);
-    if (copy.remoteId && copy.remoteId !== w.id) await remote.trash(copy.remoteId, 'doc').catch(() => undefined);
+    // One "What Niko learned" there: one Niko wrote before and lost track of (after a change of place and back) is used
+    // again, and any others it finds there go to the bin.
+    const found = remote.findDocs ? await remote.findDocs(root.id, LEARNED_COPY_TITLE).catch(() => []) : [];
+    const same = (a: string, b: string) => a.replace(/-/g, '').toLowerCase() === b.replace(/-/g, '').toLowerCase();
+    const keep = copy.remoteId ?? found[0]?.id ?? null;
+    const extra = found.filter((f) => !keep || !same(f.id, keep)).map((f) => f.id);
+    const w = keep && remote.replaceDoc ? await remote.replaceDoc(keep, LEARNED_COPY_TITLE, md).catch(() => remote.writeDoc(root.id, LEARNED_COPY_TITLE, md)) : await remote.writeDoc(root.id, LEARNED_COPY_TITLE, md);
+    for (const old of [...(keep && !same(keep, w.id) ? [keep] : []), ...extra]) await remote.trash(old, 'doc').catch(() => undefined);
     const [r] = await k.q<Row>(`update kn_learned_copy set remote_id = $2, remote_url = $3, dirty = false, synced_at = now(), error = null where account_id = $1
        returning place, remote_id, remote_url, dirty, synced_at, error`, [account, w.id, w.url]);
     return asCopy(r!);

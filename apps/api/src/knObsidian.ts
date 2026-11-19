@@ -161,6 +161,11 @@ export function obsidianRemoteOf(cfg: ObsidianConfig): Remote {
     async makeRoot(name) { const folder = (name ?? OBSIDIAN_FOLDER).replace(/\/+$/, ''); return { id: folder, name: folder }; },
     async writeDoc(root, title, markdown) { const path = await free(root, title); return { id: path, url: link(path), version: await v.put(path, markdown) }; },
     async replaceDoc(id, _title, markdown) { return { id, url: link(id), version: await v.put(id, markdown) }; },
+    async findDocs(root, title) {
+      const base = `${root || OBSIDIAN_FOLDER}/${noteName(title)}`, out: { id: string; url: string | null }[] = [];
+      for (let n = 1; n <= 5; n++) { const path = `${base}${n === 1 ? '' : ` (${n})`}.md`; if ((await v.stat(path)) !== null) out.push({ id: path, url: link(path) }); }
+      return out;
+    },
     async writeSheet(root, sheet) {
       const path = await free(root, sheet.title);
       return { id: path, url: link(path), version: await v.put(path, sheetMarkdown(sheet.title, sheet.columns.map((name) => ({ name })), sheet.rows)), done: sheet.rows.length };

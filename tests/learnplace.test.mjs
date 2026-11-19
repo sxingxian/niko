@@ -127,6 +127,14 @@ await ok('where in each app: a folder name is cleaned and kept; a Notion page Ni
   assert.equal((await jason.get('/knowledge')).data.prefs.folders.notion, 'My Niko notes');
   await jason.put('/knowledge/prefs', { learn: true, folders: { notion: 'Sneaky' } });
   assert.equal((await jason.get('/knowledge')).data.prefs.folders.notion, 'My Niko notes', 'not changed through the settings save');
+  // Choosing what's already in use changes nothing, so nothing is copied there again (no second "What Niko learned").
+  await kn.query(`insert into kn_places (account_id, place, root_id, root_name, made) values ($1, 'notion', 'root-page-1', 'My Niko notes', true) on conflict (account_id, place) do update set root_id = excluded.root_id, root_name = excluded.root_name, made = true`, [jasonId]);
+  await kn.query(`insert into kn_learned_copy (account_id, place, remote_id, dirty) values ($1, 'notion', 'copy-1', false) on conflict (account_id) do update set place = 'notion', remote_id = 'copy-1'`, [jasonId]);
+  r = await jason.put('/knowledge/places/notion', { page: null, name: 'My Niko notes' });
+  assert.equal(r.status, 200); assert.deepEqual(r.data.relocated, { files: 0, learned: false });
+  assert.equal((await kn.query(`select remote_id from kn_learned_copy where account_id = $1`, [jasonId])).rows[0].remote_id, 'copy-1', 'the copy is kept');
+  assert.equal((await kn.query(`select count(*)::int as n from kn_places where account_id = $1 and place = 'notion'`, [jasonId])).rows[0].n, 1, 'Niko’s page is kept');
+  await kn.query(`delete from kn_learned_copy where account_id = $1`, [jasonId]); await kn.query(`delete from kn_places where account_id = $1`, [jasonId]);
   // The default name isn't stored; a place the plan doesn't allow is refused.
   await jason.put('/knowledge/places/gdrive/folder', { name: 'Niko Knowledge' });
   assert.equal((await jason.get('/knowledge')).data.prefs.folders.gdrive, undefined);

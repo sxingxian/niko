@@ -189,6 +189,7 @@ function fakePlace(place = 'gdrive', per = Infinity) {
     async readDoc(id) { return items.get(id).text; },
     async readSheet(id) { return items.get(id).rows; },
     async trash(id) { items.delete(id); },
+    async findDocs(root, title) { return [...items].filter(([, it]) => it.root === root && it.title === title && it.text !== undefined).map(([id]) => ({ id, url: `https://example.com/${id}` })).reverse(); },
   };
   return r;
 }
@@ -335,6 +336,32 @@ await ok('what Niko learned: a copy to read, rewritten after changes (at most on
   assert.ok((await listLearned(k, C)).some((n) => n.kind === 'habit' && n.confirmed && n.habit === 'inbox-morning'), 'a habit said yes to comes over as said yes to');
   assert.equal(await forgetAllFileMatches(k, C), 1);
   assert.deepEqual((await listLearned(k, C)).map((n) => n.kind), ['habit']);
+});
+
+await ok('one “What Niko learned” there: switching away and back reuses it, and extra copies go to the bin', async () => {
+  const W = '00000000-0000-4000-8000-0000000000f7';
+  await saveNote(k, env, W, { kind: 'remembered', said: 'Parking is on B2', means: 'Parking is on B2', how: 'remember' }, { cloudflare: true });
+  const notion = fakePlace('notion');
+  await setLearnedCopy(k, W, 'notion');
+  const first = (await syncLearnedCopy(k, notion, W)).remoteId;
+  // Learning moves elsewhere (Niko forgets the copy), then back: the copy already there is used, not a second one.
+  await setLearnedCopy(k, W, null); await setLearnedCopy(k, W, 'notion');
+  let copy = await syncLearnedCopy(k, notion, W);
+  assert.equal([...notion.items.values()].filter((it) => it.title === 'What Niko learned').length, 1, 'one copy there');
+  assert.ok(!notion.items.has(first) || copy.remoteId === first);
+  // A duplicate made earlier (before this fix) is cleaned up on the next write.
+  await notion.writeDoc('root1', 'What Niko learned', 'old');
+  await markLearnedDirty(k, W);
+  copy = await syncLearnedCopy(k, notion, W, Date.now() + 61_000);
+  assert.deepEqual([...notion.items].filter(([, it]) => it.title === 'What Niko learned').map(([id]) => id), [copy.remoteId]);
+  // Where a place writes over the same document (Obsidian, OneDrive), it keeps it: same id, same name.
+  const vault = fakePlace('obsidian');
+  vault.replaceDoc = async (id, _t, md) => { vault.items.get(id).text = md; return { id, url: null, version: 'v2' }; };
+  await setLearnedCopy(k, W, 'obsidian');
+  const v1 = (await syncLearnedCopy(k, vault, W)).remoteId;
+  await setLearnedCopy(k, W, null); await setLearnedCopy(k, W, 'obsidian');
+  assert.equal((await syncLearnedCopy(k, vault, W)).remoteId, v1, 'the same note, written over');
+  assert.equal(vault.items.size, 1);
 });
 
 await ok('Niko’s Notes leaves out the Notion pages Niko made for Knowledge and the page the person chose for it', async () => {
