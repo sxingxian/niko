@@ -15,6 +15,7 @@ import { ownEmbedder, ownSearchSources } from '../ownEmbed';
 import { notionPage, notionPages, PlaceError, placeConnections, remoteFor } from '../knPlaces';
 import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile, roots, setRoot } from '../knPlacesStore';
 import { credentials } from '../providers';
+import { isKnowledgeNotion, knowledgeNotionIds } from '../knNotes';
 import { cleanStorage, loadStorage, saveStorage, shownStorage, testStorage } from '../knStorage';
 import { accountKnowledge, addFromText, addCloudflareNumbers, addOwnNumbers, clearOwnNumbers, addPieces, addSheet, addSheetRows, deleteFile, filePieces, setDeviceNumbers, sheetRows, finishFile, keepAsData, KnError, knowledgeSettings, limitsFor, listFiles, listSheets, readWithCloudflare, search, startFile, updateSheet, usage, type Kdb } from '../knowledge';
 
@@ -320,7 +321,9 @@ knowledge.get('/places/notion/pages', async (c) => {
   if (!s.access.notion) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   const cred = await credentials(c.env, c.get('db'), c.get('user').id, 'notion').catch(() => null);
   if (!cred?.accessToken) return c.json({ error: 'Connect Notion first.', connect: 'notion' }, 409);
-  try { return c.json({ pages: await notionPages(cred.accessToken) }); } catch (e) { return placeFail(c, e); }
+  // Niko's own copies aren't offered as the page to keep Knowledge on.
+  const ids = await knowledgeNotionIds(s.k, c.get('user').id).catch(() => new Set<string>());
+  try { return c.json({ pages: await notionPages(cred.accessToken, (p) => isKnowledgeNotion(p, ids)) }); } catch (e) { return placeFail(c, e); }
 });
 knowledge.put('/places/notion', async (c) => {
   const s = await store(c); if (s instanceof Response) return s;

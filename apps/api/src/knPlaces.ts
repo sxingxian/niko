@@ -187,11 +187,11 @@ function notion(token: string): Remote {
   };
 }
 /** Pages Niko can see in their Notion (the ones they shared when connecting), to pick where copies go. */
-export async function notionPages(token: string): Promise<{ id: string; title: string }[]> {
-  const j = await json<{ results?: { id: string; properties?: Record<string, { type?: string; title?: unknown }>; archived?: boolean; in_trash?: boolean; parent?: { type?: string } }[] }>(await call('notion', `${NOTION}/search`, token, {
+export async function notionPages(token: string, hide: (p: { id: string; parent?: { page_id?: string; database_id?: string } }) => boolean = () => false): Promise<{ id: string; title: string }[]> {
+  const j = await json<{ results?: { id: string; properties?: Record<string, { type?: string; title?: unknown }>; archived?: boolean; in_trash?: boolean; parent?: { type?: string; page_id?: string; database_id?: string } }[] }>(await call('notion', `${NOTION}/search`, token, {
     method: 'POST', headers: { 'notion-version': NOTION_VERSION }, json: { page_size: 50, filter: { property: 'object', value: 'page' }, sort: { direction: 'descending', timestamp: 'last_edited_time' } },
   }));
-  return (j.results ?? []).filter((p) => !p.archived && !p.in_trash && p.parent?.type !== 'database_id')
+  return (j.results ?? []).filter((p) => !p.archived && !p.in_trash && p.parent?.type !== 'database_id' && !hide(p))
     .map((p) => ({ id: p.id, title: plain(Object.values(p.properties ?? {}).find((x) => x.type === 'title')?.title).slice(0, 120) || 'Untitled' }));
 }
 /** Checks Niko can see a page they picked, and gives its title. */

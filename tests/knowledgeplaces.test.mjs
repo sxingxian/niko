@@ -15,6 +15,8 @@ import { piecesMarkdown, sheetCsv, splitText, parseDelimited } from '../packages
 import { notionBlocks, notionMarkdown, remoteFor, PlaceError, safeName } from '../apps/api/src/knPlaces.ts';
 import { addPieces, addSheet, finishFile, listFiles, startFile } from '../apps/api/src/knowledge.ts';
 import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile } from '../apps/api/src/knPlacesStore.ts';
+import { isKnowledgeNotion, knowledgeNotionIds } from '../apps/api/src/knNotes.ts';
+import { setRoot } from '../apps/api/src/knPlacesStore.ts';
 import { binLearnedCopy, learnedCopyOf, learnedMarkdown, markLearnedDirty, setLearnedCopy, syncLearnedCopy } from '../apps/api/src/knLearnedCopy.ts';
 import { confirmHabit, forgetAllFileMatches, forgetNotesOnly, keepHabit, listLearned, noticeHabit, saveNote } from '../apps/api/src/learned.ts';
 import { store, fakeDb } from './brains-stubs.mjs';
@@ -333,6 +335,32 @@ await ok('what Niko learned: a copy to read, rewritten after changes (at most on
   assert.ok((await listLearned(k, C)).some((n) => n.kind === 'habit' && n.confirmed && n.habit === 'inbox-morning'), 'a habit said yes to comes over as said yes to');
   assert.equal(await forgetAllFileMatches(k, C), 1);
   assert.deepEqual((await listLearned(k, C)).map((n) => n.kind), ['habit']);
+});
+
+await ok('Niko’s Notes leaves out the Notion pages Niko made for Knowledge, not a page the person picked', async () => {
+  const D = '00000000-0000-4000-8000-0000000000d4';
+  const notion = fakePlace('notion');
+  const doc = await addDoc(D, 'Handbook.md', [{ heading: 'A', body: 'Text.' }], 'd'.repeat(64));
+  const sheet = await addCsv(D, 'Clients.csv', [{ name: 'Client', type: 'text' }], [['Acme']], 'e'.repeat(64));
+  await copyStep(k, notion, D, doc); await copyStep(k, notion, D, sheet);
+  await setLearnedCopy(k, D, 'notion'); await syncLearnedCopy(k, notion, D);
+  let ids = await knowledgeNotionIds(k, D);
+  const [docId, dbId, learnedId] = [...notion.items.keys()];
+  const dash = (x) => `${x}-0000`; // ids are compared without dashes
+  assert.ok(isKnowledgeNotion({ id: docId }, ids), 'a copy of a file');
+  assert.ok(isKnowledgeNotion({ id: 'row1', parent: { database_id: dbId } }, ids), 'a row of a file’s database');
+  assert.ok(isKnowledgeNotion({ id: learnedId }, ids), 'what Niko learned');
+  assert.ok(isKnowledgeNotion({ id: 'x', parent: { page_id: 'root1' } }, ids), 'anything Niko put on its own page');
+  assert.ok(isKnowledgeNotion({ id: 'root1' }, ids), 'its own page');
+  assert.ok(!isKnowledgeNotion({ id: 'my-diary', parent: { page_id: 'somewhere' } }, ids), 'their own notes stay');
+  void dash;
+  // A page they picked stays in their Notes; Niko's copies under it don't.
+  await setRoot(k, D, 'notion', { id: 'work-wiki', name: 'Work wiki' });
+  ids = await knowledgeNotionIds(k, D);
+  assert.ok(!isKnowledgeNotion({ id: 'work-wiki' }, ids), 'the page they picked is theirs');
+  assert.ok(isKnowledgeNotion({ id: docId, parent: { page_id: 'work-wiki' } }, ids));
+  assert.ok(!isKnowledgeNotion({ id: 'their-page', parent: { page_id: 'work-wiki' } }, ids), 'their own pages on it stay too');
+  assert.deepEqual([...await knowledgeNotionIds(k, '00000000-0000-4000-8000-0000000000e5')], [], 'another account: nothing');
 });
 
 await pool.end();
