@@ -8,6 +8,7 @@ import { forgetGlanceDefaults, GLANCE_DEFAULT_KEY, glanceDefaults } from '../gla
 import { accountDefaults, ACCOUNT_LIMITS_KEY, forgetAccountDefaults } from '../limits';
 import { AI_DEFAULT_KEY, aiDefaults, forgetAiDefaults } from '../access';
 import { databaseUsage, KN_SETTINGS_KEY, knowledgeDb, knowledgeSettings } from '../knowledge';
+import { forgetLearnedInNiko, learnsInNiko } from '../knLearnOff';
 import type { AppEnv } from '../env';
 import { hashRecoveryCode, makeRecoveryCodes, newTotpSecret, randomToken, seal, sha256, totpStep, totpUri, unseal } from '../lib/crypto';
 import { verifyPassword } from '../lib/password';
@@ -478,6 +479,19 @@ admin.get('/ai', requireAdmin, async (c) => {
   const list = await db.select({ id: users.id, name: users.name, email: users.email, role: users.role, status: users.status, aiAccess: users.aiAccess }).from(users).orderBy(users.createdAt);
   return c.json({ defaults: await aiDefaults(db, true), users: list.map((u) => ({ ...u, aiAccess: cleanAiAccess(u.aiAccess) })) });
 });
+/** Deletes what Niko learned that's kept in Niko for accounts Kept in Niko is now off for. The switch is already saved,
+ *  so a problem here is reported, not undone: answering never reads those notes, and the next sign-in deletes them. */
+async function forgetLearned(c: Context<AppEnv>, ids: string[]): Promise<{ forgot?: number; forgetFailed?: true }> {
+  if (!ids.length) return {};
+  try {
+    const n = await forgetLearnedInNiko(c.env, c.get('db'), ids);
+    if (n) await audit(c, 'knowledge.learned-deleted', { people: ids.length, notes: n }, c.get('user').id);
+    return { forgot: n };
+  } catch (e) {
+    console.warn(`forget learned: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+    return { forgetFailed: true };
+  }
+}
 admin.put('/ai/default', requireAdmin, async (c) => {
   const b = await c.req.json<{ access?: unknown }>().catch(() => ({} as { access?: unknown }));
   const access = cleanAiAccess(b.access);
@@ -485,7 +499,7 @@ admin.put('/ai/default', requireAdmin, async (c) => {
   // Only what differs from each option's starting value is kept: off for most, on for options that start off.
   const stored = Object.fromEntries(Object.entries(access).filter(([k, v]) => v !== defaultOn({}, k)));
   const db = c.get('db');
-  const members = await db.select({ email: users.email, role: users.role, aiAccess: users.aiAccess }).from(users);
+  const members = await db.select({ id: users.id, email: users.email, role: users.role, aiAccess: users.aiAccess }).from(users);
   if (!aiHasBrain(aiOff(stored, {}))) return c.json({ error: 'At least one brain must stay on.' }, 400);
   const stuck = members.find((m) => m.role !== 'admin' && !aiHasBrain(aiOff(stored, cleanAiAccess(m.aiAccess))));
   if (stuck) return c.json({ error: `That would leave ${stuck.email} with no brain. Change their own settings first.` }, 400);
@@ -493,7 +507,9 @@ admin.put('/ai/default', requireAdmin, async (c) => {
   await db.insert(appSettings).values({ key: AI_DEFAULT_KEY, value: stored }).onConflictDoUpdate({ target: appSettings.key, set: { value: stored } });
   forgetAiDefaults();
   await audit(c, 'ai.default', { off: aiOff(stored, {}).join(', ') || 'none', changed: changedKeys(before, stored).join(', ') }, c.get('user').id);
-  return c.json({ ok: true, defaults: stored });
+  // Kept in Niko turned off for what Niko learns: what Niko kept for everyone it now applies to is deleted.
+  const forgot = await forgetLearned(c, members.filter((m) => !learnsInNiko(stored, m)).map((m) => m.id));
+  return c.json({ ok: true, defaults: stored, ...forgot });
 });
 admin.put('/ai/users/:id', requireAdmin, async (c) => {
   const b = await c.req.json<{ access?: unknown }>().catch(() => ({} as { access?: unknown }));
@@ -506,7 +522,8 @@ admin.put('/ai/users/:id', requireAdmin, async (c) => {
   if (!aiHasBrain(aiOff(defaults, own))) return c.json({ error: 'At least one brain must stay on.' }, 400);
   await db.update(users).set({ aiAccess: own }).where(eq(users.id, target.id));
   await audit(c, 'ai.user', { target: target.email, changes: Object.entries(own).map(([k, v]) => `${k} ${v ? 'on' : 'off'}`).join(', ') || 'follows the default' }, c.get('user').id);
-  return c.json({ ok: true, access: own });
+  const forgot = learnsInNiko(defaults, { role: target.role, aiAccess: own }) ? {} : await forgetLearned(c, [target.id]);
+  return c.json({ ok: true, access: own, ...forgot });
 });
 // ---------------------------------------------------------------- new items on Home
 // Whether people can turn it on, and the most often each kind may be checked: a default for everyone, and changes for

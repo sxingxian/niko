@@ -3,7 +3,7 @@
 // the restricted role apply as on Neon). A member with learning but no Knowledge files.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -67,6 +67,11 @@ class Browser {
 const PW = 'correct horse battery staple ' + randomBytes(4).toString('hex');
 const owner = new Browser();
 assert.equal((await owner.post('/auth/setup', { token: env.BOOTSTRAP_TOKEN, email: 'owner@example.com', name: 'Owner', password: PW })).status, 200);
+// An admin session for the owner (second factor passed), for Admin · Knowledge saves.
+const adm = new Browser();
+{ const ownerId = (await main.query(`select id from users where email = 'owner@example.com'`)).rows[0].id, token = randomBytes(24).toString('hex');
+  await main.query(`insert into sessions (user_id, token_hash, kind, mfa_ok, expires_at) values ($1, $2, 'admin', true, now() + interval '1 hour')`, [ownerId, createHash('sha256').update(token).digest('hex')]);
+  adm.jar.set('__Host-niko_admin', token); }
 // A member with a plan for life, learning on and Knowledge files off (the default).
 await main.query(`insert into users (email, name, password_hash, role, status, lifetime, ai_access) select 'jason@example.com', 'Jason', password_hash, 'member', 'active', true, '{"kn:learning": true}'::jsonb from users where email = 'owner@example.com'`);
 const jasonId = (await main.query(`select id from users where email = 'jason@example.com'`)).rows[0].id;
@@ -128,6 +133,52 @@ await ok('where in each app: a folder name is cleaned and kept; a Notion page Ni
   await access({ 'kn:learning': true, 'kn:learn:onedrive': false });
   assert.equal((await jason.put('/knowledge/places/onedrive/folder', { name: 'X' })).status, 403);
   await access({ 'kn:learning': true });
+});
+
+await ok('Kept in Niko off for what Niko learns: saving deletes what Niko kept; nothing is read or kept there again', async () => {
+  const count = async () => (await kn.query(`select count(*)::int as n from kn_learned where account_id = $1`, [jasonId])).rows[0].n;
+  await jason.post('/knowledge/learned', { kind: 'remembered', said: 'Parking is on B2', means: 'Parking is on B2' });
+  await jason.post('/knowledge/learned', { kind: 'habit', habit: 'walk-short' });
+  await kn.query(`insert into kn_learned_copy (account_id, place) values ($1, 'notion') on conflict do nothing`, [jasonId]);
+  assert.ok((await count()) >= 2);
+  // The admin turns it off for Jason: everything learned in Niko goes, with the record of a copy in his own app.
+  let r = await adm.put(`/admin/ai/users/${jasonId}`, { access: { 'kn:learning': true, 'kn:learn:niko': false } });
+  assert.equal(r.status, 200, JSON.stringify(r.data)); assert.ok(r.data.forgot >= 2, 'says how many went');
+  assert.equal(await count(), 0);
+  assert.equal((await kn.query(`select count(*)::int as n from kn_learned_copy where account_id = $1`, [jasonId])).rows[0].n, 0);
+  const prefs = (await main.query(`select knowledge from users where id = $1`, [jasonId])).rows[0].knowledge;
+  assert.equal(prefs.notes, 0); assert.deepEqual(prefs.habits, []);
+  // From now on: kept on his device; Niko and copies in his apps aren't offered, and Niko's notes can't be read or added.
+  r = await jason.get('/knowledge');
+  assert.equal(r.data.access.learnPlaces.niko, false); assert.equal(r.data.access.learnPlaces.notion, false); assert.equal(r.data.access.learnPlaces.device, true);
+  assert.equal((await jason.get('/me')).data.knowledge.learnPlace, 'device');
+  assert.equal((await jason.get('/knowledge/learned')).status, 403);
+  assert.equal((await jason.post('/knowledge/learned', { kind: 'person', said: 'Mum', means: 'Siew Hoon' })).status, 403);
+  assert.equal((await jason.post('/knowledge/taught', { question: 'refunds?', target: { file: 'a', heading: 'b' } })).status, 403);
+  assert.equal((await jason.put('/knowledge/prefs', { learnPlace: 'notion' })).status, 403);
+  await jason.put('/knowledge/prefs', { learnPlace: 'niko' });
+  assert.equal((await jason.get('/me')).data.knowledge.learnPlace, 'device', 'an earlier choice of Niko changes nothing');
+  assert.equal((await jason.put('/knowledge/prefs', { learn: true })).status, 200, 'other settings still save');
+  assert.equal(await count(), 0);
+  // Anything still kept there (a save that couldn't finish) goes the next time he opens Niko.
+  await kn.query(`insert into kn_learned (account_id, kind, subject, body, source, sure, confirmed) values ($1, 'remembered', 'x', 'x', 'told', 1, true)`, [jasonId]);
+  await main.query(`update users set knowledge = knowledge || '{"notes": 1}'::jsonb where id = $1`, [jasonId]);
+  await jason.get('/me');
+  assert.equal(await count(), 0);
+  // With the device off too, learning has nowhere to keep notes, so it's off.
+  await access({ 'kn:learning': true, 'kn:learn:niko': false, 'kn:learn:device': false });
+  assert.equal((await jason.get('/knowledge')).data.access.learning, false);
+  // The default for everyone: people who follow it lose what Niko kept; admins keep theirs.
+  await access({ 'kn:learning': true });
+  await jason.post('/knowledge/learned', { kind: 'remembered', said: 'Parking is on B2', means: 'Parking is on B2' });
+  assert.equal(await count(), 1);
+  const defaults = (await adm.get('/admin/ai')).data.defaults;
+  r = await adm.put('/admin/ai/default', { access: { ...defaults, 'kn:learn:niko': false } });
+  assert.equal(r.status, 200, JSON.stringify(r.data)); assert.equal(r.data.forgot, 1);
+  assert.equal(await count(), 0);
+  assert.equal((await owner.get('/knowledge')).data.access.learnPlaces.niko, true, 'an admin always has every option');
+  assert.equal((await adm.put('/admin/ai/default', { access: defaults })).status, 200);
+  assert.equal((await jason.get('/knowledge')).data.access.learnPlaces.niko, true);
 });
 
 await ok('notes are only ever this person’s: row security applies to the copy record too', async () => {

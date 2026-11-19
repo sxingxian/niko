@@ -494,3 +494,7 @@ body { background: #07090d; }
 .dsa-key-m.is-ok { color: #7fe3a8; }
 .dsa-key-m.is-bad { color: #ffb3b3; }
 .kn-adm-warn { margin-top: 8px; padding: 12px 14px; border-radius: 14px; background: rgba(255,211,138,.08); border: 1px solid rgba(255,211,138,.35); font: 400 13px/1.45 system-ui, sans-serif; color: #ffe2b0; }
+
+/* Saving that deletes something (Admin · Knowledge, Kept in Niko off for what Niko learns). */
+.pri.danger { background: #ff9b9b; border-color: #ff9b9b; color: #1a0505; }
+.kn-krow-t .sub.warn-t { color: #ffd38a; }

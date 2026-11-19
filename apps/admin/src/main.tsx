@@ -197,7 +197,7 @@ function AiOptions({ guard }: { guard: (e: unknown) => void }) {
 type KnAdminUser = { id: string; name: string; email: string; role: string; status: string; knowledgeLimits: Partial<KnowledgeLimits>; used: { files: number; bytes: number; notes?: number } };
 type KnAdmin = { ready: boolean; usage: { bytes: number; files: number; people: number } | null; split: 'browser' | 'server'; defaults: KnowledgeLimits; users: KnAdminUser[] };
 /** The Knowledge switches built so far, in their groups (the others in AI_OPTION_GROUPS arrive with their stages). */
-const KN_GROUPS: [string, string[]][] = [['Files', ['kn:files']], ['Where they keep files', ['kn:place:niko', 'kn:place:device', 'kn:place:notion', 'kn:place:gdrive', 'kn:place:onedrive', 'kn:place:obsidian', 'kn:place:s3']], ['Cloudflare', ['kn:cf-read', 'kn:cf-search']], ['Other search sources', ['kn:search-key', 'kn:search-server']], ['Learning', ['kn:learning']], ['Where they keep what Niko learns', ['kn:learn:device', 'kn:learn:notion', 'kn:learn:gdrive', 'kn:learn:onedrive', 'kn:learn:obsidian', 'kn:learn:s3']]];
+const KN_GROUPS: [string, string[]][] = [['Files', ['kn:files']], ['Where they keep files', ['kn:place:niko', 'kn:place:device', 'kn:place:notion', 'kn:place:gdrive', 'kn:place:onedrive', 'kn:place:obsidian', 'kn:place:s3']], ['Cloudflare', ['kn:cf-read', 'kn:cf-search']], ['Other search sources', ['kn:search-key', 'kn:search-server']], ['Learning', ['kn:learning']], ['Where they keep what Niko learns', ['kn:learn:niko', 'kn:learn:device', 'kn:learn:notion', 'kn:learn:gdrive', 'kn:learn:onedrive', 'kn:learn:obsidian', 'kn:learn:s3']]];
 const KN_SHOWN = KN_GROUPS.flatMap(([, keys]) => keys);
 const KN_REMOTE_KEYS = ['kn:place:notion', 'kn:place:gdrive', 'kn:place:onedrive', 'kn:place:obsidian', 'kn:place:s3'];
 const KN_LIMIT_ROWS: [keyof KnowledgeLimits, string, string, number[], (n: number) => string][] = [
@@ -218,6 +218,7 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [find, setFind] = useState('');
   const [split, setSplit] = useState<'browser' | 'server'>('browser');
+  const [asking, setAsking] = useState(false);
   const load = useCallback(async () => {
     try {
       const [a, b] = await Promise.all([api<KnAdmin>('/admin/knowledge'), api<{ defaults: Record<string, boolean>; users: AiUser[] }>('/admin/ai')]);
@@ -246,19 +247,32 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
   const setLim = (k: keyof KnowledgeLimits, v: number) => { const next = { ...limits }; if (person && v === kn.defaults[k]) delete next[k]; else next[k] = v; setLimits(next); setDirty(true); setNote(null); };
   const count = (p: KnAdminUser) => Object.keys(p.knowledgeLimits).length + KN_SHOWN.filter((k) => k in (ai.users.find((u) => u.id === p.id)?.aiAccess ?? {})).length;
   const filesOn = on('kn:files');
-  const save = async () => {
-    setBusy(true); setNote(null);
+  // Turning off Kept in Niko for what Niko learns deletes what Niko kept for everyone it applies to (never admins, or
+  // people with their own setting when it's the default that changes), so Save asks first. Counts only, never contents.
+  const ownOf = (id: string) => ai.users.find((u) => u.id === id)?.aiAccess ?? {};
+  const nikoWas = person ? ('kn:learn:niko' in ownOf(person.id) ? ownOf(person.id)['kn:learn:niko']! : defOn('kn:learn:niko')) : defOn('kn:learn:niko');
+  const losingPeople = nikoWas && !on('kn:learn:niko')
+    ? (person ? [person] : kn.users.filter((p) => !('kn:learn:niko' in ownOf(p.id)))).filter((p) => p.role !== 'admin' && (p.used.notes ?? 0) > 0) : [];
+  const losing = { people: losingPeople.length, notes: losingPeople.reduce((n, p) => n + (p.used.notes ?? 0), 0) };
+  const notesWord = (n: number) => `${n.toLocaleString()} ${n === 1 ? 'note' : 'notes'}`;
+  const losingText = person ? `${(person.name || person.email).split(' ')[0]}’s ${notesWord(losing.notes)} kept in Niko` : `what Niko kept for ${losing.people} ${losing.people === 1 ? 'person' : 'people'}`;
+  const save = async (sure = false) => {
+    if (losing.notes && !sure) { setAsking(true); return; }
+    setAsking(false); setBusy(true); setNote(null);
     try {
+      let gone: { forgot?: number; forgetFailed?: true } = {};
       // AI options keep every switch together, so the Knowledge ones are saved alongside the rest unchanged.
       if (person) {
         const rest = Object.fromEntries(Object.entries(aiPerson?.aiAccess ?? {}).filter(([k]) => !KN_SHOWN.includes(k)));
-        await api(`/admin/ai/users/${person.id}`, { method: 'PUT', body: { access: { ...rest, ...access } } });
+        gone = await api(`/admin/ai/users/${person.id}`, { method: 'PUT', body: { access: { ...rest, ...access } } });
         await api(`/admin/knowledge/users/${person.id}`, { method: 'PUT', body: { limits } });
       } else {
-        await api('/admin/ai/default', { method: 'PUT', body: { access: { ...ai.defaults, ...access } } });
+        gone = await api('/admin/ai/default', { method: 'PUT', body: { access: { ...ai.defaults, ...access } } });
         await api('/admin/knowledge/settings', { method: 'PUT', body: { limits, split } });
       }
-      await load(); setNote({ ok: true, text: person ? `Saved for ${person.name || person.email}.` : 'Saved. Everyone without their own changes gets this within a minute.' });
+      const deleted = gone.forgetFailed ? ' What Niko learned couldn’t be deleted just now; it’s never used, and goes the next time they open Niko.'
+        : gone.forgot ? ` ${notesWord(gone.forgot)} deleted from Niko.` : '';
+      await load(); setNote({ ok: !gone.forgetFailed, text: (person ? `Saved for ${person.name || person.email}.` : 'Saved. Everyone without their own changes gets this within a minute.') + deleted });
     } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
   };
   const item = (key: string) => AI_OPTION_GROUPS.find((g) => g.id === 'knowledge')!.items.find((i) => i.key === key)!;
@@ -298,7 +312,7 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
             <p className="sub" style={{ fontSize: 13 }}>{person ? (person.role === 'admin' ? 'Admins always have every option; these apply if they are made a member.' : count(person) ? 'Different from the default where marked. Everything else follows the default.' : `Follows the default. Change anything to change it for ${first} only.`) : 'What every account gets, unless it is changed for that person.'}</p></div>
           <div className="ai-acts">
             {person && <button className="bt" onClick={() => { setAccess({}); setLimits({}); setDirty(true); }} disabled={!count(person) && !dirty}>Reset to default</button>}
-            <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
+            <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={() => void save()} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
           </div>
         </div>
         {person && <div className="kn-useline">
@@ -307,21 +321,21 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
         </div>}
         {KN_GROUPS.map(([title, keys]) => <div key={title} className="kn-group">
           <span className="k kn-group-h">{title}</span>
-          {title === 'Where they keep what Niko learns' && <div className={'kn-krow' + (on('kn:learning') ? '' : ' dim')}>
-            <span className="kn-krow-t"><b>Kept in Niko</b><span className="sub">The Knowledge database · the default</span></span>
-            <span className="kn-krow-m" />
-            <span className="kn-krow-c"><span className="pill">Always</span></span>
-          </div>}
+          {title === 'Where they keep what Niko learns' && on('kn:learning') && !on('kn:learn:niko') && !on('kn:learn:device') && <div className="kn-adm-warn">Learning has nowhere to keep notes, so it’s off for {person ? first : 'everyone who follows the default'}. Turn on Kept in Niko or Kept on their device.</div>}
           {keys.map((k) => {
             // Learning is its own permission (names, corrections, "remember that…" need no files), as on the server.
             // Notion, Drive, OneDrive and own storage also need Kept in Niko, because Niko keeps their search pieces.
             const it = item(k), remote = KN_REMOTE_KEYS.includes(k);
             const needsNiko = remote && filesOn && !on('kn:place:niko');
-            // Where learned notes may be kept follows Learning, not Knowledge files.
+            // Where learned notes may be kept follows Learning, not Knowledge files. A copy in their own app is made from
+            // notes kept in Niko, so those need Kept in Niko for what Niko learns.
             const learnPlace = k.startsWith('kn:learn:');
-            const gated = learnPlace ? !on('kn:learning') : k !== 'kn:files' && k !== 'kn:learning' && (!filesOn || needsNiko);
+            const needsNikoNotes = learnPlace && k !== 'kn:learn:niko' && k !== 'kn:learn:device' && !on('kn:learn:niko');
+            const gated = learnPlace ? !on('kn:learning') || needsNikoNotes : k !== 'kn:files' && k !== 'kn:learning' && (!filesOn || needsNiko);
+            const sub = k === 'kn:learn:niko' && losing.notes ? `Off · saving deletes ${losingText}`
+              : changed(k) ? `Default is ${defOn(k) ? 'on' : 'off'}` : needsNiko ? 'Needs Kept in Niko · Niko keeps the pieces' : needsNikoNotes ? 'Needs Kept in Niko · the copy is made from notes kept in Niko' : it.sub;
             return <div key={k} className={'kn-krow' + (gated ? ' dim' : '')}>
-              <span className="kn-krow-t"><b>{it.name}</b><span className="sub">{changed(k) ? `Default is ${defOn(k) ? 'on' : 'off'}` : needsNiko ? 'Needs Kept in Niko · Niko keeps the pieces' : it.sub}</span></span>
+              <span className="kn-krow-t"><b>{it.name}</b><span className={'sub' + (k === 'kn:learn:niko' && losing.notes ? ' warn-t' : '')}>{sub}</span></span>
               <span className="kn-krow-m">{changedMark(changed(k), () => resetOn(k))}</span>
               <span className="kn-krow-c"><Switch on={on(k)} onChange={(v) => setOn(k, v)} label={it.name} disabled={gated} /></span>
             </div>;
@@ -349,10 +363,32 @@ function KnowledgeAdmin({ guard }: { guard: (e: unknown) => void }) {
           {split === 'server' && <div className="kn-adm-warn">Needs Workers Paid ($5 a month): on the free plan, big files stop part-way. Files already added aren’t changed.</div>}
           <p className="sub" style={{ fontSize: 12, margin: '8px 0 0' }}>Off: each person’s browser splits their files, as now (free plan). On: the browser sends the text and Niko splits it, which is quicker on phones and older computers. Files kept on This device are always read on the device.</p>
         </div>}
-        <p className="sub kn-foot">Knowledge files start off: people get them only when you turn them on, for everyone or for them. Learning is separate: it works with or without files. Turning off a place for what Niko learns moves nobody’s notes: a copy in their own app stops being updated and Niko keeps the notes; notes already on a device stay there, unused, until it’s back on. Lowering a limit never deletes anything; it only stops more files being added. Answering Telegram from Knowledge is each person’s own Settings switch. People see these as part of their plan, with no mention of an admin. Every change is written to the audit log.</p>
+        {asking && <ForgetLearnedDialog title={person ? `Delete what Niko learned for ${first}?` : `Delete what Niko learned for ${losing.people} ${losing.people === 1 ? 'person' : 'people'}?`}
+          body={`Turning off Kept in Niko deletes the ${notesWord(losing.notes)} Niko kept for ${person ? first : `the ${losing.people === 1 ? 'person' : `${losing.people} people`} who follow the default`}, including habits and matches taught for files. From now on, what Niko learns ${on('kn:learn:device') ? `for ${person ? first : 'them'} is kept on their device` : `isn’t kept anywhere, so learning is off for ${person ? first : 'them'}`}.`}
+          everyone={!person} busy={busy} onCancel={() => setAsking(false)} onConfirm={() => void save(true)} />}
+        <p className="sub kn-foot">Knowledge files start off: people get them only when you turn them on, for everyone or for them. Learning is separate: it works with or without files. Turning off Kept in Niko for what Niko learns deletes what Niko kept for everyone it applies to, when you save; what Niko learns for them is then kept on their device. Turning off any other place for what Niko learns moves nobody’s notes: a copy in their own app stops being updated and Niko keeps the notes; notes already on a device stay there, unused, until it’s back on. Lowering a limit never deletes anything; it only stops more files being added. Answering Telegram from Knowledge is each person’s own Settings switch. People see these as part of their plan, with no mention of an admin. Every change is written to the audit log.</p>
       </section>
     </div>
   </>;
+}
+
+/** Asked before saving when Kept in Niko goes off for what Niko learns, since saving deletes those notes. */
+function ForgetLearnedDialog({ title, body, everyone, busy, onCancel, onConfirm }: { title: string; body: string; everyone: boolean; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    box.current?.querySelector<HTMLElement>('button')?.focus();
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel(); };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [onCancel]);
+  return <div className="scrim" onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+    <div ref={box} className="dialog" role="dialog" aria-modal="true" aria-labelledby="flh">
+      <div><h2 id="flh">{title}</h2><p className="sub">{body}</p></div>
+      <p className="sub">Copies in their own Notion, Drive, OneDrive, Obsidian or storage stay there and stop being updated. Notes on their devices aren’t touched. This can’t be undone.</p>
+      {everyone && <p className="sub">Admins, and people you set Kept in Niko on for, keep theirs.</p>}
+      <div className="dialog-acts"><button className="bt" onClick={onCancel}>Cancel</button><button className="pri danger" style={{ height: 44, fontSize: 14 }} onClick={onConfirm} disabled={busy}>{busy ? 'Saving…' : 'Delete and save'}</button></div>
+    </div>
+  </div>;
 }
 
 // ---------------------------------------------------------------- new items on Home
