@@ -337,7 +337,7 @@ await ok('what Niko learned: a copy to read, rewritten after changes (at most on
   assert.deepEqual((await listLearned(k, C)).map((n) => n.kind), ['habit']);
 });
 
-await ok('Niko’s Notes leaves out the Notion pages Niko made for Knowledge, not a page the person picked', async () => {
+await ok('Niko’s Notes leaves out the Notion pages Niko made for Knowledge and the page the person chose for it', async () => {
   const D = '00000000-0000-4000-8000-0000000000d4';
   const notion = fakePlace('notion');
   const doc = await addDoc(D, 'Handbook.md', [{ heading: 'A', body: 'Text.' }], 'd'.repeat(64));
@@ -354,12 +354,15 @@ await ok('Niko’s Notes leaves out the Notion pages Niko made for Knowledge, no
   assert.ok(isKnowledgeNotion({ id: 'root1' }, ids), 'its own page');
   assert.ok(!isKnowledgeNotion({ id: 'my-diary', parent: { page_id: 'somewhere' } }, ids), 'their own notes stay');
   void dash;
-  // A page they picked stays in their Notes; Niko's copies under it don't.
+  // A page they chose for Knowledge becomes Knowledge's: it, Niko's copies on it and their own pages on it leave Notes.
   await setRoot(k, D, 'notion', { id: 'work-wiki', name: 'Work wiki' });
   ids = await knowledgeNotionIds(k, D);
-  assert.ok(!isKnowledgeNotion({ id: 'work-wiki' }, ids), 'the page they picked is theirs');
+  assert.ok(isKnowledgeNotion({ id: 'work-wiki' }, ids), 'the page they chose');
   assert.ok(isKnowledgeNotion({ id: docId, parent: { page_id: 'work-wiki' } }, ids));
-  assert.ok(!isKnowledgeNotion({ id: 'their-page', parent: { page_id: 'work-wiki' } }, ids), 'their own pages on it stay too');
+  assert.ok(isKnowledgeNotion({ id: 'their-page', parent: { page_id: 'work-wiki' } }, ids), 'pages they keep on it');
+  // The page picker still offers it, so it shows as chosen.
+  assert.ok(!isKnowledgeNotion({ id: 'work-wiki' }, await knowledgeNotionIds(k, D, { picked: false })));
+  assert.ok(isKnowledgeNotion({ id: docId }, await knowledgeNotionIds(k, D, { picked: false })), 'Niko’s copies still aren’t offered');
   assert.deepEqual([...await knowledgeNotionIds(k, '00000000-0000-4000-8000-0000000000e5')], [], 'another account: nothing');
 });
 
@@ -384,9 +387,12 @@ await ok('Notes leaves out what Niko’s Notion connection made, even pages Niko
   // Niko’s records still count when Notion can’t say who made a page; a lookup that fails keeps the page.
   assert.deepEqual((await withoutKnowledge(pages, new Set([id(1)]), '', creator)).map((p) => p.id), [id(4), id(5), id(6), id(7)]);
   assert.deepEqual((await withoutKnowledge([pages[3]], new Set(), BOT, async () => { throw new Error('down'); })).map((p) => p.id), [id(4)]);
-  // A page they picked for Knowledge is theirs; Niko’s copies on it go.
+  // A page of theirs that isn't Knowledge's stays; Niko’s copies put on any page go.
   assert.ok(!isKnowledgeNotion({ id: 'work-wiki', created_by: { id: ME } }, new Set(), BOT));
   assert.ok(isKnowledgeNotion({ id: 'copy', created_by: { id: BOT.replace(/-/g, '') }, parent: { page_id: 'work-wiki' } }, new Set(), BOT));
+  // The page they chose for Knowledge (from Niko's records) goes with everything on it, even pages Niko didn't make.
+  const chosen = [{ id: id(20), created_by: { id: ME }, parent: { page_id: id(92) } }, { id: id(21), created_by: { id: ME }, parent: { page_id: id(20) } }];
+  assert.deepEqual((await withoutKnowledge(chosen, new Set([id(20)]), BOT, creator)).map((p) => p.id), []);
 });
 
 await ok('another page or folder: copies are made again there, the old ones stay, Niko’s old folder is forgotten', async () => {
