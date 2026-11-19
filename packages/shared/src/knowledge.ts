@@ -155,20 +155,23 @@ export function cleanKnowledgePrefs(v: unknown): KnowledgePrefs {
 export interface KnowledgeAccess { files: boolean; niko: boolean; device: boolean; cloudflareRead: boolean; cloudflareSearch: boolean; learning: boolean; /** Search numbers from one of their AI keys, or their own model server. */ ownKey: boolean; ownServer: boolean;
   /** Keeping a copy of their files in their own Notion, Google Drive, OneDrive or S3 storage (Niko keeps the pieces). */
   notion: boolean; gdrive: boolean; onedrive: boolean; s3: boolean; obsidian: boolean;
-  /** Where they may keep what Niko learns, besides Niko itself (only with learning). */
-  learnPlaces: Record<'device' | KnRemotePlace, boolean> }
-/** Where what Niko learns is kept now: their choice when their plan allows it, else Niko. Notes kept in Niko or with a copy
- *  elsewhere live in Niko's Knowledge database; 'device' notes live only in that browser. */
+  /** Where they may keep what Niko learns (only with learning). A copy in their own app is made from notes kept in Niko,
+   *  so those need Niko too. With neither Niko nor the device allowed, learning has nowhere to keep notes and is off. */
+  learnPlaces: Record<KnPlace, boolean> }
+/** Where what Niko learns is kept now: their choice when their plan allows it, else Niko, else this device. Notes kept in
+ *  Niko or with a copy elsewhere live in Niko's Knowledge database; 'device' notes live only in that browser. */
 export const knLearnPlaceOf = (p: Pick<KnowledgePrefs, 'learnPlace'>, a: Pick<KnowledgeAccess, 'learnPlaces'>): KnPlace =>
-  p.learnPlace !== 'niko' && a.learnPlaces[p.learnPlace] ? p.learnPlace : 'niko';
+  a.learnPlaces[p.learnPlace] ? p.learnPlace : a.learnPlaces.niko ? 'niko' : 'device';
 export function knowledgeAccess(allowed: (key: string) => boolean): KnowledgeAccess {
-  const files = allowed('kn:files'), learning = allowed('kn:learning');
+  const files = allowed('kn:files'), learnNiko = allowed('kn:learn:niko'), learnDevice = allowed('kn:learn:device');
+  const learning = allowed('kn:learning') && (learnNiko || learnDevice);
   return { files, niko: files && allowed('kn:place:niko'), device: files && allowed('kn:place:device'),
     cloudflareRead: files && allowed('kn:cf-read'), cloudflareSearch: files && allowed('kn:cf-search'), learning,
     ownKey: files && allowed('kn:search-key'), ownServer: files && allowed('kn:search-server'),
     // The pieces of files kept elsewhere are still kept in Niko, so those places need Niko's database too.
     ...Object.fromEntries(KN_REMOTE_PLACES.map((p) => [p, files && allowed('kn:place:niko') && allowed(`kn:place:${p}`)])) as Record<KnRemotePlace, boolean>,
-    learnPlaces: Object.fromEntries((['device', ...KN_REMOTE_PLACES] as const).map((p) => [p, learning && allowed(`kn:learn:${p}`)])) as Record<'device' | KnRemotePlace, boolean> };
+    learnPlaces: { niko: learning && learnNiko, device: learning && learnDevice,
+      ...Object.fromEntries(KN_REMOTE_PLACES.map((p) => [p, learning && learnNiko && allowed(`kn:learn:${p}`)])) as Record<KnRemotePlace, boolean> } };
 }
 
 /** What a sheet column holds, so counts and totals come out right. */

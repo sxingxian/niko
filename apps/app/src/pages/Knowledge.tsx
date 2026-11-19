@@ -411,7 +411,7 @@ export function Knowledge() {
   // ---------------------------------------------------------------- where what Niko learns is kept
   const learnNow = knLearnPlaceOf(prefs, access);
   const lInfo = (p: KnPlace) => (isRemotePlace(p) ? st.learnPlaces?.[p] : undefined);
-  const learnSpots: KnPlace[] = SPOTS.filter((p) => (p === 'niko' ? true : p === 'device' ? access.learnPlaces.device : !!lInfo(p)));
+  const learnSpots: KnPlace[] = SPOTS.filter((p) => (p === 'niko' || p === 'device' ? access.learnPlaces[p] : !!lInfo(p)));
   const lShown: KnPlace = lPicked ?? learnNow;
   const notesPlace: Place = learnNow === 'device' ? 'device' : 'niko';
   const lCopy = st.learnedCopy && st.learnedCopy.place === learnNow ? st.learnedCopy : null;
@@ -492,7 +492,7 @@ export function Knowledge() {
       <div className="kn-page">
         <div className="kn-main">
           {tabs}
-          <LearnedTab account={account} place={notesPlace} filesPlace={place} where={learnWhere} copied={isRemotePlace(learnNow)} files={access.files} learn={prefs.learn} onLearn={(v) => void savePrefs({ learn: v }).then(() => refreshMe())} situations={prefs.situations} onSituations={(v) => void savePrefs({ situations: v }).then(() => refreshMe())} />
+          <LearnedTab account={account} place={notesPlace} filesPlace={access.learnPlaces.niko ? place : notesPlace} where={learnWhere} copied={isRemotePlace(learnNow)} files={access.files} learn={prefs.learn} onLearn={(v) => void savePrefs({ learn: v }).then(() => refreshMe())} situations={prefs.situations} onSituations={(v) => void savePrefs({ situations: v }).then(() => refreshMe())} />
         </div>
         <LearnedAside files={access.files} />
       </div>

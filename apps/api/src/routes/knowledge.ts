@@ -56,12 +56,14 @@ export async function syncNotes(c: C, k: Kdb) {
   // A copy of what Niko learned in their own app is rewritten on its next sync.
   await markLearnedDirty(k, u.id);
 }
-/** Notes learned in Niko need the Knowledge database and learning in the person's plan (it works without files). */
+/** Notes learned in Niko need the Knowledge database, learning in the person's plan (it works without files), and Kept in
+ *  Niko allowed for what Niko learns. */
 async function notesStore(c: C): Promise<{ k: Kdb; access: KnowledgeAccess; prefs: KnowledgePrefs } | Response> {
   const k = accountKnowledge(c.env, c.get('user').id);
   if (!k) return c.json({ error: NOT_HERE }, 503);
   const w = await who(c);
-  if (!w.access.learning) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  // Notes are kept in Niko only while their plan allows it; otherwise they're on their device, or nowhere.
+  if (!w.access.learnPlaces.niko) return c.json({ error: NOT_ON_ACCOUNT }, 403);
   return { k, ...w };
 }
 /** A place for files or for what Niko learns: the Knowledge database, and either allowed by their plan. */
@@ -146,8 +148,10 @@ knowledge.put('/prefs', async (c) => {
   const prefs = { ...cleanKnowledgePrefs({ ...before, ...asked }), files: before.files, notes: before.notes, habits: before.habits, folders: before.folders };
   // Where what Niko learns is kept: Niko, or a place their plan allows. A copy in their own app needs it connected and
   // Niko's page or folder made there now, so a connection problem shows straight away.
-  const learnTo = prefs.learnPlace, learnFrom = knLearnPlaceOf(before, access);
-  if (learnTo !== 'niko' && !access.learnPlaces[learnTo]) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  // A choice that isn't allowed can't be made; one made earlier and no longer allowed stays as it was (where notes go then
+  // follows what is allowed, the same before and after, so nothing moves).
+  if (prefs.learnPlace !== before.learnPlace && !access.learnPlaces[prefs.learnPlace]) return c.json({ error: NOT_ON_ACCOUNT }, 403);
+  const learnTo = knLearnPlaceOf(prefs, access), learnFrom = knLearnPlaceOf(before, access);
   if (learnTo !== learnFrom) {
     const k = accountKnowledge(c.env, u.id);
     if (!k && learnTo !== 'device') return c.json({ error: NOT_HERE }, 503);

@@ -408,7 +408,8 @@ export const AI_OPTION_GROUPS: AiOptionGroup[] = [
     { key: 'kn:search-key', name: 'Search with their AI key', sub: 'An embedding model on one of their own AI keys · their key' },
     { key: 'kn:search-server', name: 'Search with their own model server', sub: 'An embedding model on their own server, such as Ollama' },
     { key: 'kn:learning', name: 'Learning from each person', sub: 'Names, corrections and what they ask Niko to remember · with or without files', offByDefault: true, feature: true },
-    // Where what Niko learns may be kept, besides Niko itself.
+    // Where what Niko learns may be kept. Turning off Kept in Niko deletes what Niko kept for them (Admin · Knowledge).
+    { key: 'kn:learn:niko', name: 'Kept in Niko', sub: 'The Knowledge database · the default' },
     { key: 'kn:learn:device', name: 'Kept on their device', sub: 'Stays in that browser · never on Niko’s server' },
     { key: 'kn:learn:notion', name: 'Notion', sub: 'A copy to read in their Notion · Niko keeps the notes' },
     { key: 'kn:learn:gdrive', name: 'Google Drive', sub: 'A copy to read in their Drive · Niko keeps the notes' },

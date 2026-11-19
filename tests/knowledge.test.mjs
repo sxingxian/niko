@@ -245,14 +245,22 @@ await ok('each person’s choices and what their account allows', () => {
   assert.equal(cleanKnowledgePrefs({ place: 'device', learnPlace: 'notion' }).learnPlace, 'notion');
   assert.equal(cleanKnowledgePrefs({ learnPlace: 'evil' }).learnPlace, 'niko');
   const off = new Set(['kn:cf-search']);
-  assert.deepEqual(knowledgeAccess((key) => !off.has(key)), { files: true, niko: true, device: true, cloudflareRead: true, cloudflareSearch: false, learning: true, ownKey: true, ownServer: true, notion: true, gdrive: true, onedrive: true, s3: true, obsidian: true, learnPlaces: { device: true, notion: true, gdrive: true, onedrive: true, s3: true, obsidian: true } });
-  assert.deepEqual(knowledgeAccess((key) => key !== 'kn:files'), { files: false, niko: false, device: false, cloudflareRead: false, cloudflareSearch: false, learning: true, ownKey: false, ownServer: false, notion: false, gdrive: false, onedrive: false, s3: false, obsidian: false, learnPlaces: { device: true, notion: true, gdrive: true, onedrive: true, s3: true, obsidian: true } });
+  assert.deepEqual(knowledgeAccess((key) => !off.has(key)), { files: true, niko: true, device: true, cloudflareRead: true, cloudflareSearch: false, learning: true, ownKey: true, ownServer: true, notion: true, gdrive: true, onedrive: true, s3: true, obsidian: true, learnPlaces: { niko: true, device: true, notion: true, gdrive: true, onedrive: true, s3: true, obsidian: true } });
+  assert.deepEqual(knowledgeAccess((key) => key !== 'kn:files'), { files: false, niko: false, device: false, cloudflareRead: false, cloudflareSearch: false, learning: true, ownKey: false, ownServer: false, notion: false, gdrive: false, onedrive: false, s3: false, obsidian: false, learnPlaces: { niko: true, device: true, notion: true, gdrive: true, onedrive: true, s3: true, obsidian: true } });
   // Where notes may be kept follows learning, not files; Niko is the fallback when the choice isn't allowed.
   const noLearn = knowledgeAccess((key) => key !== 'kn:learning');
-  assert.deepEqual(noLearn.learnPlaces, { device: false, notion: false, gdrive: false, onedrive: false, s3: false, obsidian: false });
+  assert.deepEqual(noLearn.learnPlaces, { niko: false, device: false, notion: false, gdrive: false, onedrive: false, s3: false, obsidian: false });
   const noDevice = knowledgeAccess((key) => key !== 'kn:learn:device');
   assert.equal(knLearnPlaceOf({ learnPlace: 'device' }, noDevice), 'niko');
   assert.equal(knLearnPlaceOf({ learnPlace: 'notion' }, noDevice), 'notion');
+  // Kept in Niko off for what Niko learns: copies in their apps go with it (they're made from notes kept in Niko), and
+  // notes go to the device; with the device off too, learning has nowhere to keep notes and is off.
+  const noNiko = knowledgeAccess((key) => key !== 'kn:learn:niko');
+  assert.deepEqual(noNiko.learnPlaces, { niko: false, device: true, notion: false, gdrive: false, onedrive: false, s3: false, obsidian: false });
+  assert.equal(noNiko.learning, true); assert.equal(noNiko.niko, true, 'files kept in Niko are a separate switch');
+  for (const p of ['niko', 'notion', 'device']) assert.equal(knLearnPlaceOf({ learnPlace: p }, noNiko), 'device');
+  const nowhere = knowledgeAccess((key) => key !== 'kn:learn:niko' && key !== 'kn:learn:device');
+  assert.equal(nowhere.learning, false); assert.equal(Object.values(nowhere.learnPlaces).some(Boolean), false);
 });
 
 await pool.end();

@@ -14,6 +14,7 @@ import { BrainFail, brainKeys, defaultLabel, keyInfo, listModels, loadKeys, NOT_
 import { cleanWhere, forecastCard, forecastText, geocode, setOpenMeteoKey, stripWeatherTags, weatherTags } from '../weather';
 import { audioProblem, defaultHearLabel, hear, hearServerKey, HEAR_PROVIDERS_LIST, hearKeyInfo, hearKeyProblem, hearKeys, loadHearKeys, MAX_AUDIO_BYTES, saveHearKeys, type HearKey } from '../hears';
 import { NOT_ON_ACCOUNT, offFor } from '../access';
+import { forgetLearnedInNiko } from '../knLearnOff';
 import { diffGlance, limitsFor } from '../glance';
 import { Declined, defaultImageLabel, serverKey, IMAGE_PROVIDERS_LIST, imageKeyInfo, imageKeyProblem, imageKeys, loadImageKeys, MAX_PROMPT, paint, saveImageKeys, type ImageKey } from '../images';
 import { defaultVoiceLabel, Gone, listVoices, loadVoiceKeys, voiceKeys, noteVoice, saveVoiceKeys, speakWithKey, voiceKeyInfo, voiceKeyProblem, type VoiceKey } from '../voices';
@@ -77,6 +78,9 @@ app.get('/me', async (c) => {
   // Where Knowledge is kept and how it is searched, so answering knows whether to search this device's files first.
   const kn = knowledgeAccess((k) => aiAllowed(off, k)), knp = cleanKnowledgePrefs((u as { knowledge?: unknown }).knowledge);
   const knPlace = knPlaceOf(knp, kn);
+  // Kept in Niko is off for what Niko learns but something is still kept there (an admin save that couldn't finish, or a
+  // change of role): it's deleted now.
+  if (!aiAllowed(off, 'kn:learn:niko') && (knp.notes > 0 || knp.habits.length)) await forgetLearnedInNiko(c.env, c.get('db'), [u.id]).catch((e) => console.warn(`forget learned: ${String((e as Error)?.message ?? e).slice(0, 200)}`));
   const knowledgeMe = (kn.files || kn.learning) && !hide ? { knowledge: { place: knPlace, learnPlace: kn.learning ? knLearnPlaceOf(knp, kn) : 'niko', search: knSearchOf(knp, kn, knPlace),
     learn: kn.learning && knp.learn, situations: kn.learning && knp.situations, habits: kn.learning ? knp.habits : [] } } : {};
   // Engine · Data sources is shown only when the plan includes a source or lets them add their own.
@@ -964,7 +968,8 @@ app.post('/chat', async (c) => {
   // Files kept on the person's device: the browser searched them (and its notes) and sent its best matches.
   const knDevice = (knPlace === 'device' && knOk) || notesHere ? cleanDeviceKnowledge(b.knowledge) : null;
   const kdb = knOk && knPlace === 'niko' && knAccess.niko && knPrefs.files > 0 ? accountKnowledge(c.env, u.id) : null;
-  const ndb = knAccess.learning && (!notesHere || knPlace === 'niko') && knPrefs.notes > 0 ? accountKnowledge(c.env, u.id) : null;
+  // Notes kept in Niko (and matches taught for files kept in Niko): only while their plan lets Niko keep what it learns.
+  const ndb = knAccess.learnPlaces.niko && (!notesHere || knPlace === 'niko') && knPrefs.notes > 0 ? accountKnowledge(c.env, u.id) : null;
   // Cloudflare's search numbers for the question, made once for files and notes.
   const cfVector = (kdb || ndb) && knCf ? await embed(c.env, [text]).then((v) => v[0] ?? null).catch(() => null) : null;
   // Their own search service (one of their AI keys or their model server): the question's numbers, or words only.
@@ -975,7 +980,7 @@ app.post('/chat', async (c) => {
     : ndb ? await notesFor(ndb, u.id, text, { vector: cfVector, situation: situated }).catch((e) => { console.warn(`learned: ${String((e as Error)?.message ?? e).slice(0, 200)}`); return []; }) : [];
   const taught = kdb && ndb ? await taughtFor(ndb, u.id, text, { vector: cfVector }).catch(() => undefined) : undefined;
   if (knDevice && knOk && knPlace === 'device') kn = deviceKnowledgeFor(knDevice, text, knPrefs, learnSave, situated);
-  else if (kdb) kn = await knowledgeFor(kdb, c.env, u.id, text, { prefs: knPrefs, cloudflare: knCf, cfVector, ownVector, vector: (b.knowledge as { vector?: unknown } | undefined)?.vector, taught, pin: cleanTarget(b.pin), ask: learnSave && !situated, situation: situated })
+  else if (kdb) kn = await knowledgeFor(kdb, c.env, u.id, text, { prefs: knPrefs, cloudflare: knCf, cfVector, ownVector, vector: (b.knowledge as { vector?: unknown } | undefined)?.vector, taught, pin: cleanTarget(b.pin), ask: learnSave && knAccess.learnPlaces.niko && !situated, situation: situated })
     .catch((e) => { console.warn(`knowledge: ${String((e as Error)?.message ?? e).slice(0, 200)}`); return null; });
   const learned = learnedBlock(notes);
   const situation = situated && knAccess.learning && knPrefs.situations ? situationBlock(brief.events, clampNum(b.tz, -840, 840, 0), cleanWhere(b.near)) : '';
@@ -1094,7 +1099,7 @@ app.post('/chat', async (c) => {
   if (!oneOff) await db.insert(chatTurns).values([{ userId: u.id, role: 'user', content: text }, { userId: u.id, role: 'assistant', content: reply }]);
   // New notes: kept in Niko, or handed to the browser to keep when what Niko learns is kept on this device.
   let learnedNow: { id: string; kind: string; said: string; means: string }[] = [];
-  if (toLearn.length && !notesHere) {
+  if (toLearn.length && !notesHere && knAccess.learnPlaces.niko) {
     const ldb = ndb ?? accountKnowledge(c.env, u.id);
     if (ldb) {
       for (const a of toLearn) {
