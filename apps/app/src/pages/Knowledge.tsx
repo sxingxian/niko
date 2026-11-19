@@ -156,9 +156,11 @@ export function Knowledge() {
   }, [files, extraCols]);
 
   if (!me) return null;
-  const sub = 'Give Niko your own files. Niko keeps doing everything it does now, and when a file is a confident match it leads the answer, with what Niko knows, finds online and sees in your apps added after.';
-  if (!st) return <SettingsPage title="Knowledge" sub={sub}><NoteLine note={note} /></SettingsPage>;
+  const filesSub = 'Give Niko your own files. Niko keeps doing everything it does now, and when a file is a confident match it leads the answer, with what Niko knows, finds online and sees in your apps added after.';
+  if (!st) return <SettingsPage title="Knowledge" sub={filesSub}><NoteLine note={note} /></SettingsPage>;
   const { access, prefs, limits } = st;
+  // Learning without files: the page says nothing about files.
+  const sub = access.files || !access.learning ? filesSub : 'Niko learns from how you use it: the names you use, your corrections and what you ask it to remember. Only you can see what it keeps.';
   const place = placeOf(st);
   const spot = knShownPlace(prefs, access);
   const shown: KnPlace = picked ?? spot;
@@ -392,14 +394,14 @@ export function Knowledge() {
     <SettingsPage title="Knowledge" sub={sub}>
       <NoteLine note={note} />
       {!st.available ? (
-        <div className="kn-page"><div className="kn-main"><section className="g kn-card"><b className="kn-h">Knowledge</b><p className="srow-hint">Knowledge isn’t available right now. Try again later.</p></section></div></div>
+        <div className="kn-page"><div className="kn-main"><section className="g kn-card"><b className="kn-h">Knowledge</b><p className="srow-hint">{access.files || access.learning ? 'Knowledge isn’t available right now. Try again later.' : 'Knowledge isn’t included in your plan.'}</p></section></div></div>
       ) : tab === 'learned' ? (
       <div className="kn-page">
         <div className="kn-main">
           {tabs}
-          <LearnedTab account={account} place={place} learn={prefs.learn} onLearn={(v) => void savePrefs({ learn: v }).then(() => refreshMe())} situations={prefs.situations} onSituations={(v) => void savePrefs({ situations: v }).then(() => refreshMe())} />
+          <LearnedTab account={account} place={place} files={access.files} learn={prefs.learn} onLearn={(v) => void savePrefs({ learn: v }).then(() => refreshMe())} situations={prefs.situations} onSituations={(v) => void savePrefs({ situations: v }).then(() => refreshMe())} />
         </div>
-        <LearnedAside />
+        <LearnedAside files={access.files} />
       </div>
       ) : (
       <div className="kn-page">

@@ -406,7 +406,7 @@ export const AI_OPTION_GROUPS: AiOptionGroup[] = [
     { key: 'kn:cf-search', name: 'Cloudflare search', sub: 'Search numbers for their files · keeps nothing' },
     { key: 'kn:search-key', name: 'Search with their AI key', sub: 'An embedding model on one of their own AI keys · their key' },
     { key: 'kn:search-server', name: 'Search with their own model server', sub: 'An embedding model on their own server, such as Ollama' },
-    { key: 'kn:learning', name: 'Learning from each person', sub: 'Names, corrections and taught matches', offByDefault: true, feature: true } ] },
+    { key: 'kn:learning', name: 'Learning from each person', sub: 'Names, corrections and what they ask Niko to remember · with or without files', offByDefault: true, feature: true } ] },
 ];
 const OFF_BY_DEFAULT = new Set(AI_OPTION_GROUPS.flatMap((g) => g.items.filter((i) => i.offByDefault).map((i) => i.key)));
 /** Whether an option is on in the default for everyone: what the admin saved, else the option's own starting value. */

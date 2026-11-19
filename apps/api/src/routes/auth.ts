@@ -72,7 +72,7 @@ auth.post('/sign-in', async (c) => {
     return m > 0 ? c.json({ error: lockedMessage(m) }, 429) : c.json({ error: 'Email or password is not correct.' }, 401);
   }
   await clearThrottle(db, b.email, ip);
-  if (u.status !== 'active') return c.json({ error: 'This account is not switched on yet. Ask your admin.' }, 403);
+  if (u.status !== 'active') return c.json({ error: 'This account isn’t switched on yet. Try again later.' }, 403);
   await startSession(c, u.id, 'app');
   await audit(c, 'signin.ok', {}, u.id);
   return c.json({ ok: true });

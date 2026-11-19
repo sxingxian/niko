@@ -966,7 +966,9 @@ app.post('/chat', async (c) => {
   const cfVector = (kdb || ndb) && knCf ? await embed(c.env, [text]).then((v) => v[0] ?? null).catch(() => null) : null;
   // Their own search service (one of their AI keys or their model server): the question's numbers, or words only.
   const ownVector = kdb && knSearchOf(knPrefs, knAccess, 'niko') === 'own' ? await ownEmbedder(c.env, db, u, knPrefs.own!).then((e) => e([text])).then((v) => v[0] ?? null).catch((e) => { console.warn(`own search: ${String((e as Error)?.message ?? e).slice(0, 160)}`); return null; }) : null;
-  const notes = knDevice ? knDevice.learned
+  // Notes the device sends are used only when the plan includes learning, like notes kept in Niko.
+  const notes = !knAccess.learning ? []
+    : knDevice ? knDevice.learned
     : ndb ? await notesFor(ndb, u.id, text, { vector: cfVector, situation: situated }).catch((e) => { console.warn(`learned: ${String((e as Error)?.message ?? e).slice(0, 200)}`); return []; }) : [];
   const taught = kdb && ndb ? await taughtFor(ndb, u.id, text, { vector: cfVector }).catch(() => undefined) : undefined;
   if (knDevice && knOk) kn = deviceKnowledgeFor(knDevice, text, knPrefs, learnSave, situated);

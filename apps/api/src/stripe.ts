@@ -41,7 +41,7 @@ export function modeStatus(env: StripeSecrets, mode: StripeMode): { ready: boole
   else if (secret && !hook) problem = `Press Connect so Niko sets up ${mode} mode in Stripe.`;
   return { ready: !problem && !!secret && !!hook, secret: !!secret, webhook: !!hook, problem };
 }
-export const NOT_READY = 'Payments aren’t set up on this server yet. Ask your admin.';
+export const NOT_READY = 'Payments aren’t available right now. Try again later.';
 
 export class StripeError extends Error {
   constructor(message: string, public status: number, public code?: string) { super(message); }

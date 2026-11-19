@@ -265,7 +265,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   // Habits said yes to: from the account (Knowledge in Niko) or this device (Knowledge kept here).
   const [localHabits, setLocalHabits] = useState<string[]>([]);
   useEffect(() => { if (me?.knowledge?.place === 'device') void habitsHere(me.id).then(setLocalHabits).catch(() => setLocalHabits([])); else setLocalHabits([]); }, [me?.id, me?.knowledge?.place]);
-  const habitsNow = (m = meRef.current) => (m?.knowledge?.place === 'device' ? localHabitsRef.current : m?.knowledge?.habits ?? []);
+  // Habits kept on the device apply only while the plan includes learning, as the server does for habits kept in Niko.
+  const habitsNow = (m = meRef.current) => (!aiAllowed(m?.aiOff ?? [], 'kn:learning') ? [] : m?.knowledge?.place === 'device' ? localHabitsRef.current : m?.knowledge?.habits ?? []);
   const localHabitsRef = useRef(localHabits); localHabitsRef.current = localHabits;
   const [brief, setBrief] = useState<Brief | null>(null);
   const [micOn, setMicOn] = useState(false);

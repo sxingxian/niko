@@ -322,7 +322,7 @@ export function SignUp() {
     return <Shell tag="Reconnecting."><h1>Can’t reach Niko</h1><p className="err" role="alert">{down}</p><p className="sub">This page keeps trying and continues by itself once the server answers.</p><Link className="lnk" to="/sign-in">Back to sign in</Link></Shell>;
   }
   if (cfg && !setup && cfg.registration !== 'open') {
-    return <Shell tag="Invite only."><h1>Invite only</h1><p className="sub">Niko accounts are created by invitation. Ask your admin for an invite.</p><Link className="lnk" to="/sign-in">Sign in</Link></Shell>;
+    return <Shell tag="Invite only."><h1>Invite only</h1><p className="sub">Niko accounts are created by invitation. Use the link in your invite email.</p><Link className="lnk" to="/sign-in">Sign in</Link></Shell>;
   }
   const price = view?.priceCents ?? cfg?.signup?.priceCents ?? null;
   const months = view?.months ?? cfg?.signup?.months ?? 12;
@@ -340,7 +340,7 @@ export function SignUp() {
       {step === 'account' && <form onSubmit={submit} style={{ display: 'contents' }}>
         <div className="hd">
           <h1>{setup ? 'Set up Niko' : 'Create an account'}</h1>
-          <p className="sub">{setup ? 'Create the owner account. You need the setup token from the server.' : pays ? `${money(price)} once for ${lengthLabel(months)} of Niko. You pay after confirming your email, then an admin switches your account on.` : 'You confirm your email, then an admin switches your account on.'}</p>
+          <p className="sub">{setup ? 'Create the owner account. You need the setup token from the server.' : pays ? `${money(price)} once for ${lengthLabel(months)} of Niko. You pay after confirming your email, then your account is switched on.` : 'You confirm your email, then your account is switched on.'}</p>
         </div>
         {err && <p className="err" role="alert">{err}</p>}
         {setup && <Field label="Setup token"><input className="in" type="password" autoComplete="off" value={f.token} onChange={(e) => setF({ ...f, token: e.target.value })} required /></Field>}
@@ -383,7 +383,7 @@ export function SignUp() {
 
       {(step === 'paid' || step === 'waiting') && <>
         <div className="hd"><Icon name="check" size={40} /><h1>{step === 'paid' ? 'Payment received' : 'Email confirmed'}</h1>
-          <p className="sub">{step === 'paid' ? `Receipt sent to ${email}. Your paid time starts when an admin switches your account on.` : 'An admin switches your account on before you can sign in.'}</p></div>
+          <p className="sub">{step === 'paid' ? `Receipt sent to ${email}. Your paid time starts when your account is switched on.` : 'You can sign in once your account is switched on.'}</p></div>
         <div className="notebox"><Icon name="mail" size={20} /><span>We’ll email you as soon as it’s on.</span></div>
         <a className="sec" href={location.hostname.startsWith('nikoapp.') ? 'https://niko.midnightpoetry.studio/' : '/'}>Back to the Niko home page</a>
       </>}

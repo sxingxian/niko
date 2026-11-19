@@ -1550,6 +1550,28 @@ await ok('release check: with Knowledge files on but nothing kept, everyday ques
   assert.equal((await admin.put(`/admin/ai/users/${nurU.id}`, { access: nurU.ai_access ?? {} })).status, 200);
 });
 
+await ok('notes sent from a device are used only when the plan includes learning', async () => {
+  const nur = new Browser();
+  assert.equal((await nur.post('/auth/sign-in', { email: 'nur@example.com', password: PW })).status, 200);
+  const nurU = await user('nur@example.com');
+  const base = nurU.ai_access ?? {};
+  const prompt = async () => {
+    aiCalls.length = 0;
+    const r = await nur.post('/chat', { message: 'Email the team about Friday', tz: 0, knowledge: { hits: [], tables: [], numbers: false, learned: [{ kind: 'person', said: 'the team', means: 'Design team zq7', level: 'sure', how: 'You told Niko' }] } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    return JSON.parse(aiCalls.filter((c) => c.host === 'api.groq.com').at(-1).body).messages[0].content;
+  };
+  // Files on, kept on the device, learning not in the plan: the device's notes are ignored.
+  assert.equal((await admin.put(`/admin/ai/users/${nurU.id}`, { access: { ...base, 'kn:files': true, 'kn:place:device': true, 'kn:learning': false } })).status, 200);
+  assert.equal((await nur.put('/knowledge/prefs', { place: 'device' })).status, 200);
+  assert.ok(!(await prompt()).includes('Design team zq7'), 'not used without learning');
+  // With learning, they are.
+  assert.equal((await admin.put(`/admin/ai/users/${nurU.id}`, { access: { ...base, 'kn:files': true, 'kn:place:device': true, 'kn:learning': true } })).status, 200);
+  assert.ok((await prompt()).includes('Design team zq7'), 'used with learning');
+  await nur.put('/knowledge/prefs', { place: 'niko' });
+  assert.equal((await admin.put(`/admin/ai/users/${nurU.id}`, { access: base })).status, 200);
+});
+
 await ok('the admin can add a person’s own key for a source; theirs replaces it, and turning the source off keeps the admin’s', async () => {
   const nur = new Browser();
   assert.equal((await nur.post('/auth/sign-in', { email: 'nur@example.com', password: PW })).status, 200);
