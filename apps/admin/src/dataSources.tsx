@@ -101,7 +101,7 @@ function WhoCanUse({ st, reload, fail, setNote }: { st: St; reload: () => Promis
   const [sel, setSel] = useState('all');
   const [find, setFind] = useState('');
   const person = st.users.find((p) => p.id === sel) ?? null;
-  const defOf = (k: string): boolean | number | string => (k === 'own' ? st.defaults.own : k === 'om' ? st.defaults.om : k === 'calls' ? st.defaults.calls : k === 'wxFirst' ? st.defaults.wxFirst : st.sources.find((s) => `src:${s.id}` === k)?.offer === 'everyone');
+  const defOf = (k: string): boolean | number | string => (k === 'own' ? st.defaults.own : k === 'ds' ? st.defaults.ds : k === 'om' ? st.defaults.om : k === 'calls' ? st.defaults.calls : k === 'wxFirst' ? st.defaults.wxFirst : st.sources.find((s) => `src:${s.id}` === k)?.offer === 'everyone');
   const [draft, setDraft] = useState<Record<string, boolean | number | string>>({});
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -115,7 +115,7 @@ function WhoCanUse({ st, reload, fail, setNote }: { st: St; reload: () => Promis
     setBusy(true);
     try {
       if (person) await api(`/admin/data/users/${person.id}`, { method: 'PUT', body: { access: draft } });
-      else await api('/admin/data/default', { method: 'PUT', body: { own: val('own'), om: val('om'), wxFirst: val('wxFirst'), calls: val('calls'), sources: Object.fromEntries(st.sources.map((s) => [s.id, val(`src:${s.id}`)])) } });
+      else await api('/admin/data/default', { method: 'PUT', body: { own: val('own'), ds: val('ds'), om: val('om'), wxFirst: val('wxFirst'), calls: val('calls'), sources: Object.fromEntries(st.sources.map((s) => [s.id, val(`src:${s.id}`)])) } });
       await reload(); setNote({ ok: true, text: person ? `Saved for ${person.name || person.email}.` : 'Saved for everyone.' });
     } catch (e) { fail(e); } finally { setBusy(false); }
   };
@@ -157,7 +157,8 @@ function WhoCanUse({ st, reload, fail, setNote }: { st: St; reload: () => Promis
           : <p className="sub" style={{ fontSize: 13, padding: '14px 0', borderTop: '1px solid rgba(255,255,255,.1)' }}>No sources added yet. Add one on the Sources tab.</p>}
         <span className="k dsa-gh">Their own sources</span>
         {row('own', 'Let them add their own', 'Private to them · https, public addresses, read-only actions', 'switch')}
-        <span className="k dsa-gh">Limits</span>
+        <span className="k dsa-gh">Datasets and limits</span>
+        {row('ds', 'Import datasets into Knowledge', 'Needs Knowledge files kept in Niko; counts toward their space', 'switch')}
         {row('calls', 'Data calls each month', 'Answers reused from a moment ago aren’t counted', 'calls')}
       </section>
     </div>

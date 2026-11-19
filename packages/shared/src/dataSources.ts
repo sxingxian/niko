@@ -40,7 +40,12 @@ export interface DataAction {
   /** An example question, shown to the person ("how's the air near the office?"). */
   example: string;
   on: boolean;
+  /** A dataset: imported into Knowledge as a table and refreshed when used, if older than this. Never asked live. */
+  dataset?: DataRefresh;
 }
+export type DataRefresh = 'day' | 'week' | 'month';
+export const DATA_REFRESH_NAMES: Record<DataRefresh, string> = { day: 'daily', week: 'weekly', month: 'monthly' };
+export const DATA_REFRESH_MS: Record<DataRefresh, number> = { day: 86_400_000, week: 7 * 86_400_000, month: 30 * 86_400_000 };
 export interface DataSourceInfo {
   id: string;
   name: string;
@@ -70,7 +75,7 @@ export const DATA_RESULT_CHARS = 4000;
  *  never shared between accounts. */
 export const DATA_CACHE_S = { live: 20, other: 300 } as const;
 export const DATA_CALL_STEPS = [500, 1000, 2000, 5000, 0] as const; // 0: no limit
-export const DATA_DEFAULTS = { own: false, calls: 1000, om: true, wxFirst: 'om' } as const;
+export const DATA_DEFAULTS = { own: false, calls: 1000, om: true, wxFirst: 'om', ds: true } as const;
 /** The built-in weather service's id in a weather order. */
 export const OPEN_METEO = 'open-meteo';
 
@@ -162,7 +167,9 @@ export function cleanAction(v: unknown, taken: Set<string> = new Set()): DataAct
   let id = slug(s(a.id, 40) || name) || 'action';
   for (let i = 2; taken.has(id); i++) id = `${slug(name).slice(0, 36) || 'action'}-${i}`;
   taken.add(id);
-  return { id, name, path, params, live: a.live !== false, example: s(a.example, 120), on: a.on !== false };
+  const dataset = (['day', 'week', 'month'] as const).find((x) => x === a.dataset);
+  if (dataset && params.some((p) => p.required && p.fixed === undefined && !p.sample)) return { problem: `“${name}”: a dataset is fetched without a question, so give each needed value a fixed or test value.` };
+  return { id, name, path, params, live: dataset ? false : a.live !== false, example: s(a.example, 120), on: a.on !== false, ...(dataset ? { dataset } : {}) };
 }
 export function cleanActions(v: unknown): DataAction[] | { problem: string } {
   const list = Array.isArray(v) ? v.slice(0, DATA_LIMITS.actions) : [];
@@ -258,7 +265,7 @@ export function openApiActions(spec: unknown): { kept: DataAction[]; left: { nam
 /** One line describing an action, as the screens show it ("GET /orders/{number} · number: whole number"). */
 export function actionLine(a: DataAction): string {
   const ps = a.params.filter((p) => p.fixed === undefined).map((p) => `${p.name}: ${p.type === 'enum' ? `one of ${p.values!.slice(0, 5).join(', ')}${p.values!.length > 5 ? '…' : ''}` : p.type === 'text' ? `text, up to ${p.max ?? 100}` : p.type === 'integer' ? 'whole number' : p.type}${p.required ? '' : ' (optional)'}`);
-  return [`GET ${a.path}`, ...ps, a.live ? 'live' : ''].filter(Boolean).join(' · ');
+  return [`GET ${a.path}`, ...ps, a.dataset ? `dataset in Knowledge · refreshed ${DATA_REFRESH_NAMES[a.dataset]} when used` : a.live ? 'live' : ''].filter(Boolean).join(' · ');
 }
 
 // ---------------------------------------------------------------- answers
@@ -279,7 +286,7 @@ export const stripDataTags = (reply: string) => reply.replace(/\[\[data:[^\]]*\]
 /** What the AI is told about the sources it may ask (only actions that are on). */
 export function dataBlock(sources: { tag: string; name: string; actions: DataAction[] }[]): string {
   const lines: string[] = [];
-  for (const src of sources) for (const a of src.actions.filter((x) => x.on)) {
+  for (const src of sources) for (const a of src.actions.filter((x) => x.on && !x.dataset)) {
     const ps = a.params.filter((p) => p.fixed === undefined).map((p) => `${p.name}${p.required ? '' : '?'}=${p.type === 'enum' ? p.values!.join('/') : p.type}${p.about ? ` (${p.about.slice(0, 80)})` : ''}`);
     lines.push(`- ${src.tag}.${a.id}: ${a.name} from ${src.name}${a.live ? ' (live)' : ''}${ps.length ? ` · values: ${ps.join(', ')}` : ''}`);
   }
@@ -310,19 +317,19 @@ export function resultText(body: string, kind: 'json' | 'csv'): string {
 // ---------------------------------------------------------------- who may use what
 /** The admin's defaults: whether people may add their own sources, and the monthly number of data calls. Each admin
  *  source's own default comes from who it is offered to. */
-export interface DataDefaults { own: boolean; calls: number; /** Open-Meteo (built in) for everyone. */ om: boolean; /** New accounts try Open-Meteo first, or other weather sources first. */ wxFirst: 'om' | 'others' }
+export interface DataDefaults { own: boolean; calls: number; /** Open-Meteo (built in) for everyone. */ om: boolean; /** New accounts try Open-Meteo first, or other weather sources first. */ wxFirst: 'om' | 'others'; /** Datasets may be imported into Knowledge (it also needs Knowledge files in Niko). */ ds: boolean }
 /** One person's changes to the defaults: `src:<id>` (an admin source), `own`, `calls`. */
 export type DataAccess = Record<string, boolean | number>;
 export function cleanDataDefaults(v: unknown): DataDefaults {
   const o = (v ?? {}) as Record<string, unknown>;
   const calls = Number(o.calls);
   return { own: typeof o.own === 'boolean' ? o.own : DATA_DEFAULTS.own, calls: (DATA_CALL_STEPS as readonly number[]).includes(calls) ? calls : DATA_DEFAULTS.calls,
-    om: typeof o.om === 'boolean' ? o.om : DATA_DEFAULTS.om, wxFirst: o.wxFirst === 'others' ? 'others' : 'om' };
+    om: typeof o.om === 'boolean' ? o.om : DATA_DEFAULTS.om, wxFirst: o.wxFirst === 'others' ? 'others' : 'om', ds: typeof o.ds === 'boolean' ? o.ds : DATA_DEFAULTS.ds };
 }
 export function cleanDataAccess(v: unknown): DataAccess {
   const out: DataAccess = {};
   for (const [k, x] of Object.entries((v ?? {}) as Record<string, unknown>)) {
-    if ((k === 'own' || k === 'om' || /^src:[0-9a-f-]{36}$/.test(k)) && typeof x === 'boolean') out[k] = x;
+    if ((k === 'own' || k === 'om' || k === 'ds' || /^src:[0-9a-f-]{36}$/.test(k)) && typeof x === 'boolean') out[k] = x;
     else if (k === 'calls' && (DATA_CALL_STEPS as readonly number[]).includes(Number(x))) out[k] = Number(x);
   }
   return out;
@@ -332,7 +339,7 @@ export function dataAllowed(defaults: DataDefaults, own: DataAccess, sources: { 
   const src: Record<string, boolean> = {};
   for (const x of sources) src[x.id] = x.termsOk && (isAdmin || (typeof own[`src:${x.id}`] === 'boolean' ? own[`src:${x.id}`] as boolean : x.offer === 'everyone'));
   return { src, own: isAdmin || (typeof own.own === 'boolean' ? own.own : defaults.own), calls: isAdmin ? 0 : typeof own.calls === 'number' ? own.calls : defaults.calls,
-    om: isAdmin || (typeof own.om === 'boolean' ? own.om : defaults.om) };
+    om: isAdmin || (typeof own.om === 'boolean' ? own.om : defaults.om), ds: isAdmin || (typeof own.ds === 'boolean' ? own.ds : defaults.ds) };
 }
 /** Connections · Weather: the order weather sources are tried in (Open-Meteo and data sources used as weather),
  *  the ones switched off, the home place, units, and whether weather questions may carry the device's location.
@@ -386,4 +393,54 @@ export function weatherOrder(prefs: WeatherPrefs, available: string[], wxFirst: 
   const fresh = available.filter((id) => !known.includes(id));
   const om = fresh.filter((id) => id === OPEN_METEO), rest = fresh.filter((id) => id !== OPEN_METEO);
   return prefs.saved ? [...known, ...rest, ...om] : wxFirst === 'om' ? [...om, ...known, ...rest] : [...known, ...rest, ...om];
+}
+
+// ---------------------------------------------------------------- datasets (imported into Knowledge)
+export interface DatasetTable { columns: { name: string; type: 'text' | 'number' | 'date' | 'yesno' }[]; rows: string[][] }
+function csvRows(text: string): string[][] {
+  const out: string[][] = []; let row: string[] = [], cell = '', q = false;
+  const delim = (text.split('\n')[0] ?? '').split('\t').length > (text.split('\n')[0] ?? '').split(',').length ? '\t' : ',';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (q) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; continue; }
+    if (ch === '"') q = true;
+    else if (ch === delim) { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); cell = ''; if (row.some((c) => c.trim())) out.push(row); row = []; }
+    else cell += ch;
+  }
+  row.push(cell); if (row.some((c) => c.trim())) out.push(row);
+  return out;
+}
+/** The first list of records in a JSON answer (at the top, or a few levels in, such as result.records). */
+function jsonRecords(v: unknown, depth = 0): Record<string, unknown>[] | null {
+  if (Array.isArray(v)) return v.length && v.every((x) => x && typeof x === 'object' && !Array.isArray(x)) ? v as Record<string, unknown>[] : null;
+  if (v && typeof v === 'object' && depth < 4) for (const x of Object.values(v)) { const r = jsonRecords(x, depth + 1); if (r) return r; }
+  return null;
+}
+/** A dataset answer as a table: CSV or TSV with a header row, or the first list of records in JSON. Column kinds are
+ *  guessed from the values (numbers, dates, yes/no, else text). At most 40 columns and 20,000 rows. */
+export function datasetTable(body: string, kind: 'json' | 'csv'): DatasetTable | { problem: string } {
+  let header: string[], rows: string[][];
+  if (kind === 'csv') {
+    const all = csvRows(body);
+    if (all.length < 2) return { problem: 'The dataset had no rows.' };
+    header = all[0]!; rows = all.slice(1);
+  } else {
+    let v: unknown; try { v = JSON.parse(body); } catch { return { problem: 'The dataset wasn’t valid JSON.' }; }
+    const recs = jsonRecords(v);
+    if (!recs) return { problem: 'The dataset has no list of records Niko can keep as a table.' };
+    header = [...new Set(recs.slice(0, 200).flatMap((r) => Object.keys(r)))];
+    rows = recs.map((r) => header.map((h) => { const x = r[h]; return x === null || x === undefined ? '' : typeof x === 'object' ? JSON.stringify(x) : String(x); }));
+  }
+  header = header.slice(0, 40).map((h, i) => h.trim().slice(0, 120) || `Column ${i + 1}`);
+  rows = rows.slice(0, 20_000).map((r) => header.map((_, i) => String(r[i] ?? '').slice(0, 500)));
+  const kindOf = (i: number): DatasetTable['columns'][number]['type'] => {
+    const vals = rows.map((r) => r[i]!.trim()).filter(Boolean).slice(0, 500);
+    if (!vals.length) return 'text';
+    if (vals.every((x) => /^-?[\d,]*\.?\d+$/.test(x))) return 'number';
+    if (vals.every((x) => /^\d{4}-\d{2}(-\d{2})?/.test(x))) return 'date';
+    if (vals.every((x) => /^(yes|no|true|false|y|n)$/i.test(x))) return 'yesno';
+    return 'text';
+  };
+  return { columns: header.map((name, i) => ({ name, type: kindOf(i) })), rows };
 }

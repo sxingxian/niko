@@ -10,6 +10,7 @@ import { audit, requireAdmin } from '../lib/session';
 import { cleanInput, DATA_DEFAULTS_KEY, dataCalls, dataDefaults, DataProblem, forgetDataDefaults, infoOf, OM_KEY_SETTING, openMeteoKey, runAction, type SourceInput, type SourceRow } from '../datasources';
 import { seal } from '../lib/crypto';
 import { testActions } from './data';
+import { removeDatasetsForAll } from '../datasets';
 
 export const adminData = new Hono<AppEnv>();
 adminData.use('*', requireAdmin);
@@ -57,6 +58,7 @@ adminData.put('/sources/:id', async (c) => {
 adminData.delete('/sources/:id', async (c) => {
   const before = await adminSource(c);
   if (!before) return c.json({ error: 'No such source.' }, 404);
+  await removeDatasetsForAll(c.env, c.get('db'), before.id);
   await c.get('db').delete(dataSources).where(eq(dataSources.id, before.id));
   await audit(c, 'data.source.remove', { source: before.name }, c.get('user').id);
   return c.json({ ok: true });
@@ -77,9 +79,9 @@ adminData.post('/test', async (c) => {
 
 /** The default for everyone: which admin sources are on (sets who each is offered to), own sources, monthly calls. */
 adminData.put('/default', async (c) => {
-  const b = await c.req.json<{ own?: unknown; calls?: unknown; om?: unknown; wxFirst?: unknown; sources?: Record<string, unknown> }>().catch(() => ({} as Record<string, never>));
+  const b = await c.req.json<{ own?: unknown; calls?: unknown; om?: unknown; wxFirst?: unknown; ds?: unknown; sources?: Record<string, unknown> }>().catch(() => ({} as Record<string, never>));
   const db = c.get('db');
-  const d = cleanDataDefaults({ ...(await dataDefaults(db, true)), ...Object.fromEntries((['own', 'calls', 'om', 'wxFirst'] as const).filter((k) => b[k] !== undefined).map((k) => [k, b[k]])) });
+  const d = cleanDataDefaults({ ...(await dataDefaults(db, true)), ...Object.fromEntries((['own', 'calls', 'om', 'wxFirst', 'ds'] as const).filter((k) => b[k] !== undefined).map((k) => [k, b[k]])) });
   await db.insert(appSettings).values({ key: DATA_DEFAULTS_KEY, value: d }).onConflictDoUpdate({ target: appSettings.key, set: { value: d } });
   forgetDataDefaults();
   const rows = await db.select().from(dataSources).where(isNull(dataSources.ownerId));
@@ -105,6 +107,7 @@ adminData.put('/users/:id', async (c) => {
   const own = Object.fromEntries(Object.entries(cleanDataAccess(b.access)).filter(([k, v]) => {
     if (k === 'own') return v !== d.own;
     if (k === 'om') return v !== d.om;
+    if (k === 'ds') return v !== d.ds;
     if (k === 'calls') return v !== d.calls;
     const r = rows.find((x) => `src:${x.id}` === k);
     return !!r && v !== (r.offer === 'everyone');

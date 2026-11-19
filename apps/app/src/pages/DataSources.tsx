@@ -9,10 +9,11 @@ import { useNiko } from '../niko';
 import { NoteLine, SettingsPage } from './Settings';
 
 type Src = DataSourceInfo & { on: boolean };
-type St = { canAdd: boolean; calls: { limit: number; used: number }; offered: Src[]; mine: Src[]; actionsOff: string[] };
+type Kept = { source: string; action: string; at: number | null; rows: number; problem: string | null };
+type St = { canAdd: boolean; calls: { limit: number; used: number }; offered: Src[]; mine: Src[]; actionsOff: string[]; datasets: { ok: boolean; kept: Kept[] } };
 type Note = { ok: boolean; text: string } | null;
 const IconPlus = () => <svg className="kn-ic sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>;
-const kinds = (s: DataSourceInfo) => [s.actions.some((a) => a.live) ? 'Live' : 'Data'];
+const kinds = (s: DataSourceInfo) => [...(s.actions.some((a) => a.live) ? ['Live'] : []), ...(s.actions.some((a) => a.dataset) ? ['Dataset'] : []), ...(!s.actions.some((a) => a.live || a.dataset) ? ['Data'] : [])];
 const what = (s: DataSourceInfo) => s.actions.filter((a) => a.on).map((a) => a.name).slice(0, 4).join(' · ') || 'Nothing switched on';
 
 export function DataSources() {
@@ -88,10 +89,10 @@ export function DataSources() {
           <p><Link to="/engine">Back to Engine</Link></p>
         </aside>
       </div>
-      {detail && <Details s={detail} off={st.actionsOff} onClose={() => setDetail(null)} onEdit={() => { setAdding({ edit: detail }); setDetail(null); }}
+      {detail && <Details s={detail} off={st.actionsOff} datasets={st.datasets} onClose={() => setDetail(null)} onEdit={() => { setAdding({ edit: detail }); setDetail(null); }}
         onChanged={async (text) => { const r = await load(); setDetail(r ? [...r.offered, ...r.mine].find((x) => x.id === detail.id) ?? null : null); if (text) setNote({ ok: true, text }); }}
         onGone={async (text) => { setDetail(null); await load(); await refreshMe(); setNote({ ok: true, text }); }} />}
-      {adding && <AddOwn edit={adding.edit} onClose={() => setAdding(null)} onSaved={async (text) => { setAdding(null); await load(); await refreshMe(); setNote({ ok: true, text }); }} />}
+      {adding && <AddOwn datasets={st.datasets.ok} edit={adding.edit} onClose={() => setAdding(null)} onSaved={async (text) => { setAdding(null); await load(); await refreshMe(); setNote({ ok: true, text }); }} />}
       {keyFor && <KeySheet s={keyFor} onClose={() => setKeyFor(null)} onKey={(k) => turnOn(keyFor, k)} />}
     </SettingsPage>
   );
@@ -103,11 +104,20 @@ function useSheet(onClose: () => void) {
   return { ref: dlg, onCancel: (e: SyntheticEvent) => { e.preventDefault(); onClose(); } };
 }
 
-function Details({ s, off, onClose, onEdit, onChanged, onGone }: { s: Src; off: string[]; onClose: () => void; onEdit: () => void; onChanged: (text?: string) => Promise<void>; onGone: (text: string) => Promise<void> }) {
+function Details({ s, off, datasets, onClose, onEdit, onChanged, onGone }: { s: Src; off: string[]; datasets: St['datasets']; onClose: () => void; onEdit: () => void; onChanged: (text?: string) => Promise<void>; onGone: (text: string) => Promise<void> }) {
   const sheet = useSheet(onClose);
   const [tests, setTests] = useState<TestResult[] | null>(null);
   const [busy, setBusy] = useState('');
   const [err, setErr] = useState('');
+  const fetchNow = async (id: string) => {
+    setBusy(`ds:${id}`); setErr('');
+    try { const r = await api<{ rows: number }>(`/data/datasets/${s.id}/${id}`, { method: 'POST' }); await onChanged(`Kept in Knowledge: ${r.rows.toLocaleString()} rows.`); } catch (e) { setErr((e as Error).message); } finally { setBusy(''); }
+  };
+  const dsLine = (id: string) => {
+    if (!datasets.ok) return 'Needs Knowledge files kept in Niko.';
+    const k = datasets.kept.find((x) => x.source === s.id && x.action === id);
+    return k?.problem ? `Last try: ${k.problem}` : k?.at ? `In Knowledge › Data sources · ${k.rows.toLocaleString()} rows · fetched ${new Date(k.at).toLocaleDateString([], { day: 'numeric', month: 'short' })}` : 'Not in Knowledge yet.';
+  };
   const toggle = async (id: string, on: boolean) => {
     setErr('');
     try { await api('/data/actions', { method: 'PUT', body: { source: s.id, action: id, on } }); await onChanged(); } catch (e) { setErr((e as Error).message); }
@@ -130,8 +140,9 @@ function Details({ s, off, onClose, onEdit, onChanged, onGone }: { s: Src; off: 
             const on = !off.includes(`${s.id}:${a.id}`);
             return (
               <li key={a.id}>
-                <span className="ds-a-t"><span>{a.name}</span><span className="ds-hint">{actionLine(a)}</span>{a.example && <span className="ds-hint dim">e.g. {a.example}</span>}</span>
-                <Switch on={on} onChange={(v) => void toggle(a.id, v)} label={a.name} />
+                <span className="ds-a-t"><span>{a.name}</span><span className="ds-hint">{actionLine(a)}</span>{a.dataset ? <span className="ds-hint dim">{dsLine(a.id)}</span> : a.example && <span className="ds-hint dim">e.g. {a.example}</span>}</span>
+                <span className="ds-a-b">{a.dataset && datasets.ok && on && <button type="button" className="sec dsp-b" disabled={!!busy} onClick={() => void fetchNow(a.id)}>{busy === `ds:${a.id}` ? 'Fetching…' : datasets.kept.some((x) => x.source === s.id && x.action === a.id && x.at) ? 'Refresh now' : 'Import now'}</button>}
+                <Switch on={on} onChange={(v) => void toggle(a.id, v)} label={a.name} /></span>
               </li>
             );
           })}
@@ -167,7 +178,7 @@ function KeySheet({ s, onClose, onKey }: { s: Src; onClose: () => void; onKey: (
 }
 
 /** Add a data source (or change one of their own): 1 · Address and sign-in, 2 · What Niko can ask, 3 · Test and save. */
-export function AddOwn({ edit, use, onClose, onSaved }: { edit?: Src; use?: DataUse; onClose: () => void; onSaved: (text: string) => Promise<void> }) {
+export function AddOwn({ edit, use, datasets, onClose, onSaved }: { edit?: Src; use?: DataUse; datasets?: boolean; onClose: () => void; onSaved: (text: string) => Promise<void> }) {
   const sheet = useSheet(onClose);
   const [d, setD] = useState<SourceDraft>(() => (edit ? draftOf(edit) : { ...emptyDraft(), ...(use ? { use } : {}) }));
   const [stepN, setStep] = useState(1);
@@ -197,7 +208,7 @@ export function AddOwn({ edit, use, onClose, onSaved }: { edit?: Src; use?: Data
           {['Address and sign-in', 'What Niko can ask', 'Test and save'].map((t, i) => <button key={t} type="button" aria-current={stepN === i + 1 ? 'step' : undefined} onClick={() => go(i + 1)}>{i + 1} · {t}</button>)}
         </div>
         {stepN === 1 && <AddressStep d={d} set={set} admin={false} hasKey={!!edit?.hasKey} />}
-        {stepN === 2 && <ActionsStep d={d} set={set} onBase={(url) => set({ baseUrl: url })} />}
+        {stepN === 2 && <ActionsStep d={d} set={set} datasets={!!datasets} onBase={(url) => set({ baseUrl: url })} />}
         {stepN === 3 && <div className="ds-step">
           {busy === 'test' && <span className="ds-hint" role="status">Testing each action…</span>}
           <TestLines results={tests} />

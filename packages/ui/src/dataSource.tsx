@@ -2,7 +2,7 @@
 // sources: address and sign-in, what Niko can ask (read-only actions, typed in or found in an OpenAPI file), and test
 // results. Every check here is repeated on the server; these only show problems early.
 import { useRef, useState } from 'react';
-import { actionLine, DATA_USE_NAMES, cleanAction, cleanBaseUrl, openApiActions, type DataAction, type DataAuth, type DataKeyMode, type DataOffer, type DataParam, type DataParamType, type DataSourceInfo, type DataUse } from '@niko/shared';
+import { actionLine, DATA_USE_NAMES, type DataRefresh, cleanAction, cleanBaseUrl, openApiActions, type DataAction, type DataAuth, type DataKeyMode, type DataOffer, type DataParam, type DataParamType, type DataSourceInfo, type DataUse } from '@niko/shared';
 
 export interface SourceDraft {
   name: string; use: DataUse; baseUrl: string; auth: DataAuth; authName: string; keyMode: DataKeyMode; key: string;
@@ -46,7 +46,7 @@ const TYPES: [DataParamType, string][] = [['text', 'Text'], ['number', 'Number']
 const blankParam = (): DataParam => ({ name: '', in: 'query', type: 'text', required: false, max: 100 });
 
 /** Step 2 · What Niko can ask: read-only actions, from an OpenAPI file or added one by one. */
-export function ActionsStep({ d, set, onBase }: { d: SourceDraft; set: (p: Partial<SourceDraft>) => void; onBase?: (url: string) => void }) {
+export function ActionsStep({ d, set, onBase, datasets = true }: { d: SourceDraft; set: (p: Partial<SourceDraft>) => void; onBase?: (url: string) => void; datasets?: boolean }) {
   const file = useRef<HTMLInputElement>(null);
   const [left, setLeft] = useState<{ name: string; why: string }[]>([]);
   const [edit, setEdit] = useState<{ i: number; a: DataAction } | null>(null);
@@ -99,7 +99,11 @@ export function ActionsStep({ d, set, onBase }: { d: SourceDraft; set: (p: Parti
             <label className="fld"><span className="k">Path (GET)</span><input className="in" value={ea.path} maxLength={200} spellCheck={false} onChange={(e) => setA({ path: e.target.value })} placeholder="/orders/{number}" /></label>
           </div>
           <label className="fld"><span className="k">Example question</span><input className="in" value={ea.example} maxLength={120} onChange={(e) => setA({ example: e.target.value })} placeholder="where’s order 482910?" /></label>
-          <label className="ds-check"><input type="checkbox" checked={ea.live} onChange={(e) => setA({ live: e.target.checked })} />Live: ask it every time (otherwise an answer may be reused for a few minutes)</label>
+          <label className="fld"><span className="k">How Niko uses it</span><select className="in" value={ea.dataset ? `ds-${ea.dataset}` : ea.live ? 'live' : 'recent'} onChange={(e) => { const v = e.target.value; setA(v.startsWith('ds-') ? { dataset: v.slice(3) as DataRefresh, live: false } : { dataset: undefined, live: v === 'live' }); }}>
+            <option value="live">Live answer: asked every time</option>
+            <option value="recent">Answer: asked when needed, reused for a few minutes</option>
+            {(datasets || ea.dataset) && <><option value="ds-day">Dataset in Knowledge, refreshed daily when used</option><option value="ds-week">Dataset in Knowledge, refreshed weekly when used</option><option value="ds-month">Dataset in Knowledge, refreshed monthly when used</option></>}
+          </select>{ea.dataset && <span className="ds-hint">Fetched without a question, so each needed value uses its fixed or test value. Kept as a table in Knowledge, so Niko can count and add up its rows.</span>}</label>
           <span className="k">Values Niko fills in</span>
           {ea.params.map((p, k) => (
             <div key={k} className="ds-param">

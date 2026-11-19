@@ -31,6 +31,7 @@ import { designFor } from '../designs';
 import { backgrounds } from './backgrounds';
 import { knowledge, syncNotes } from './knowledge';
 import { data } from './data';
+import { refreshUsed } from '../datasets';
 import { DataProblem, liveFor, openMeteoKey, runAction, sourcesFor, usableFor, weatherFor } from '../datasources';
 import { deviceKnowledgeFor, embed, knowledgeDb, knowledgeFor, lookupSheet, type KnContext } from '../knowledge';
 import { JUDGE_RULE, learnedBlock, LEARNED_RULE, notesFor, PEOPLE_RULE, QUIET_RULE, saveNote, SAVE_RULE, SITUATION_RULE, situationBlock, taughtFor } from '../learned';
@@ -1093,6 +1094,8 @@ app.post('/chat', async (c) => {
       if (learnedNow.length) await syncNotes(c, ldb).catch(() => undefined);
     }
   }
+  // Datasets among the files this answer used are fetched again afterwards, if older than their period.
+  if (kn && !kn.device && kn.fileIds.length) { try { c.executionCtx.waitUntil(refreshUsed(c.env, db, u, kn.fileIds).catch(() => undefined)); } catch { /* not on Workers (tests) */ } }
   const card = wxCard ? await (wxCard as Promise<WeatherCard | null>) : null;
   const knowledge = kn && !oneOff && kn.sources.length ? { lead: kn.lead, only: kn.only, taught: kn.taught, ...(kn.ask ? { ask: kn.ask } : {}), sources: kn.sources.slice(0, 4).map(({ n, file, heading, collection }) => ({ n, file, heading, collection })) } : null;
   return c.json({ reply, engine: used, switched: used !== first, ...(oneOff ? {} : { brief }), ...(card ? { weather: card } : {}), ...(knowledge ? { knowledge } : {}),
