@@ -4,6 +4,7 @@ export const connections = { name: 'connections', userId: 'userId', provider: 'p
 export const store = { creds: {}, engineWrites: [], keyWrites: [] };
 export async function credentials(_env, _db, _userId, provider) { return store.creds[provider] ?? null; }
 export async function getConnection(_db, _userId, provider) { return store.creds[provider] ? { meta: {} } : undefined; }
+export async function notionPeople() { return { owner: 'owner-1', bot: 'bot-1' }; }
 export function publicHttpsUrl(raw) {
   // The same rule as apps/api/src/providers.ts.
   if (typeof raw !== 'string') return null;

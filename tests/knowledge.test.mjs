@@ -226,7 +226,9 @@ await ok('Cloudflare reading: only PDF, Word and spreadsheets; size limit; pictu
   const r = await readWithCloudflare(env, 'Contract.pdf', bytes, 10 * 1024 * 1024);
   assert.deepEqual(r, { kind: 'pdf', text: '# Contract\n\nAcme renews on 31 December.' });
   const sent = calls.read.at(-1);
-  assert.equal(sent.opts.conversionOptions.pdf.images.convert, false); assert.equal(sent.opts.conversionOptions.docx.images.convert, false);
+  assert.equal(sent.opts.conversionOptions.pdf.images.convert, false);
+  const w = await readWithCloudflare(env, 'Sharing 2.docx', bytes, 1e7);
+  assert.equal(w.kind, 'docx'); assert.equal(calls.read.at(-1).opts, undefined, 'Word is read with Cloudflare’s own defaults (settings made it refuse the file)');
   await rejects(readWithCloudflare(env, 'notes.md', bytes, 1e7), 400, /browser reads/);
   await rejects(readWithCloudflare(env, 'x.exe', bytes, 1e7), 400);
   await rejects(readWithCloudflare(env, 'big.pdf', new ArrayBuffer(2048), 1024), 413);
@@ -236,6 +238,11 @@ await ok('Cloudflare reading: only PDF, Word and spreadsheets; size limit; pictu
   readReply = { format: 'markdown', data: '   ' };
   await rejects(readWithCloudflare(env, 'scan.pdf', bytes, 1e7), 400, /scanned/);
   readReply = null;
+  // Cloudflare turning the PDF settings down: the file is read again with none.
+  const before = calls.read.length; let first = true; const real = env.AI.toMarkdown;
+  env.AI.toMarkdown = async (f, o) => { if (first && o) { first = false; calls.read.push({ name: f.name, opts: o }); throw new Error('Too small: expected string to have >=1 characters'); } return real(f, o); };
+  assert.equal((await readWithCloudflare(env, 'Contract.pdf', bytes, 1e7)).kind, 'pdf'); assert.equal(calls.read.length - before, 2);
+  env.AI.toMarkdown = real;
 });
 await ok('each person’s choices and what their account allows', () => {
   assert.deepEqual(cleanKnowledgePrefs({}), { mode: 'files', modes: {}, place: 'niko', read: 'cloudflare', search: 'cloudflare', telegram: true, drafts: false, files: 0, learn: true, notes: 0, situations: true, habits: [], own: null, learnPlace: 'niko', folders: {} });

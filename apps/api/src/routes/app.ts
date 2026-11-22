@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { chatTurns, connections, glanceState, messages, oauthStates, pendingSends, providerApps, sessions, users, type Db } from '@niko/db';
-import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, isTransportQuestion, MAP_ENTRY, MAP_MODES, type MapAskMode, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource, type WeatherCard, plainText, stripTags, cleanKnowledgePrefs, knowledgeAccess, stripTableTags, tableTags, isRemotePlace, knLearnPlaceOf, knPlaceOf, knRemoteOf, knSearchOf, cleanDeviceKnowledge, cleanTableResults, cleanTarget, learnTags, learnAllowed, stripLearnTags, choicesTag, stripChoicesTag, situationOf, judgeTag, stripJudgeTag, type KnHow, type KnLearnAsk, dataBlock, dataTags, stripDataTags, DATA_RULE, LIVE_RULE, liveOrder, placesBlock } from '@niko/shared';
+import { passwordProblem, cleanGlancePrefs, GLANCE_PARTS, glanceEvery, type GlancePart, aiAllowed, brainOption, hearOption, imageOption, voiceOption, aiProviderOf, brainKind, brainOrder, BRAIN_ENTRY, HEAR_ENTRY, hearOrder, IMAGE_ENTRY, imageOrder, MAX_IMAGE_KEYS, type ImageShape, type ImageSource, isWeatherQuestion, isTransportQuestion, MAP_ENTRY, MAP_MODES, type MapAskMode, mapOption, mapPreset, mapsOn, mapChain, mapCountryLists, MAX_MAP_COUNTRIES, MAX_MAP_KEYS, type MapMode, type MapSource, MAX_HEAR_KEYS, PAGE_SIZES, type HearSource, MAX_AI_KEYS, MAX_VOICE_KEYS, VOICE_ENTRY, type BrainEntry, type BrainRest, type VoiceSource, type WeatherCard, plainText, stripTags, cleanKnowledgePrefs, knowledgeAccess, stripTableTags, tableTags, isRemotePlace, knLearnPlaceOf, knPlaceOf, knRemoteOf, knSearchOf, cleanDeviceKnowledge, cleanTableResults, cleanTarget, learnTags, learnAllowed, splitFacts, stripLearnTags, choicesTag, stripChoicesTag, situationOf, judgeTag, stripJudgeTag, type KnHow, type KnLearnAsk, dataBlock, dataTags, stripDataTags, DATA_RULE, LIVE_RULE, liveOrder, placesBlock } from '@niko/shared';
 import { accessState, APPS, BRIEF_PARTS, checkAppKey, KOKORO_VOICES, MAX_RELAY_BYTES, voiceOrder, WORKERS_VOICES, PROVIDERS, SEND_COUNTDOWN_SECONDS, type Appearance, type Brief, type BriefPart, type BriefProblem, type EnginePrefs, type Permissions } from '@niko/shared';
 import { oauthRedirects, type AppEnv, type Env } from '../env';
 import { hmacSha256Hex, randomToken, seal, unseal } from '../lib/crypto';
@@ -1107,7 +1107,8 @@ app.post('/chat', async (c) => {
   if (toLearn.length && !notesHere && knAccess.learnPlaces.niko) {
     const ldb = ndb ?? accountKnowledge(c.env, u.id);
     if (ldb) {
-      for (const a of toLearn) {
+      // Several facts in one go (a list) are kept one by one.
+      for (const a of toLearn.flatMap((x) => (x.kind === 'remembered' ? splitFacts(x.said).slice(0, 12).map((f) => ({ ...x, said: f, means: f })) : [x]))) {
         try { const it = await saveNote(ldb, c.env, u.id, { kind: a.kind, said: a.said, means: a.means, how: a.how }, { cloudflare: knCf }); learnedNow.push({ id: it.id, kind: it.kind, said: it.said, means: it.means }); }
         catch (e) { console.warn(`learned: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
       }

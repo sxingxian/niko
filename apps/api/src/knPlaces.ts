@@ -9,12 +9,12 @@ import { eq } from 'drizzle-orm';
 import { users, type Db } from '@niko/db';
 import { cleanKnowledgePrefs, knFolder, parseDelimited, sheetCsv, type KnRemotePlace } from '@niko/shared';
 import type { Env } from './env';
-import { credentials, getConnection } from './providers';
+import { credentials, getConnection, notionPeople } from './providers';
 
 export class PlaceError extends Error {
   constructor(message: string, readonly status = 502, readonly gone = false) { super(message); }
 }
-export interface Written { id: string; url: string | null; version: string | null }
+export interface Written { id: string; url: string | null; version: string | null; /** Only part of it was written this time (a place that takes a few requests at a time): call again. */ more?: boolean }
 export interface SheetOut { title: string; columns: string[]; rows: string[][] }
 /** One place, signed in as one person. */
 export interface Remote {
@@ -36,6 +36,8 @@ export interface Remote {
   /** Documents with exactly this title already in Niko's folder or page there, newest first, so one Niko wrote before
    *  (and lost track of) is used again instead of a second one. */
   findDocs?(root: string, title: string): Promise<{ id: string; url: string | null }[]>;
+  /** Whether someone other than the person (or Niko) made the last change to a document in a place others can share. */
+  editedByOther?(id: string): Promise<boolean>;
 }
 
 export const ROOT_NAME = 'Niko Knowledge';
@@ -79,7 +81,8 @@ const plain = (r: unknown) => (Array.isArray(r) ? r.map((x) => String((x as { pl
 export function notionBlocks(md: string): unknown[] {
   const out: unknown[] = [];
   for (const para of md.split(/\n\s*\n/)) {
-    for (const line of para.split('\n').length > 1 && para.split('\n').every((l) => /^\s*([-*]|\d+\.)\s/.test(l)) ? para.split('\n') : [para]) {
+    const lines = para.split('\n').filter((l) => l.trim());
+    for (const line of lines.length > 1 && lines.every((l) => /^\s*([-*]|\d+\.)\s/.test(l)) ? lines : [para]) {
       const t = line.trim();
       if (!t) continue;
       const h = /^(#{1,6})\s+(.+)$/.exec(t);
@@ -108,7 +111,40 @@ export function notionMarkdown(blocks: { type?: string; [k: string]: unknown }[]
   }
   return out.join('\n');
 }
-function notion(token: string): Remote {
+/** Requests Niko spends updating one page in a single go: a big change is finished on the next sync. */
+const NOTION_EDITS_PER_CALL = 24;
+type NBlock = { id?: string; type?: string; [k: string]: unknown };
+const blockText = (b: NBlock) => plain((b[String(b.type)] as { rich_text?: unknown } | undefined)?.rich_text).trim();
+const wantText = (b: NBlock) => ((b[String(b.type)] as { rich_text?: { text?: { content?: string } }[] }).rich_text ?? []).map((r) => r.text?.content ?? '').join('').trim();
+/** What to do to a page's blocks to make them the wanted ones: blocks that already say the same are left alone, one
+ *  that says something else (same kind) is changed where it stands, and only what's left over is removed or added. */
+export function notionPlan(have: NBlock[], want: NBlock[]): { updates: { id: string; i: number }[]; deletes: string[]; inserts: { after: string | null; at: number[] }[] } {
+  const hk = have.map((b) => `${b.type}|${blockText(b)}`), wk = want.map((b) => `${b.type}|${wantText(b)}`);
+  const n = hk.length, m = wk.length, W = m + 1, L = new Int32Array((n + 1) * W);
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i * W + j] = hk[i] === wk[j] ? L[(i + 1) * W + j + 1]! + 1 : Math.max(L[(i + 1) * W + j]!, L[i * W + j + 1]!);
+  // The blocks that stay as they are, in order.
+  const keep: [number, number][] = [];
+  for (let i = 0, j = 0; i < n && j < m;) {
+    if (hk[i] === wk[j]) { keep.push([i, j]); i++; j++; }
+    else if (L[(i + 1) * W + j]! >= L[i * W + j + 1]!) i++;
+    else j++;
+  }
+  const updates: { id: string; i: number }[] = [], deletes: string[] = [], inserts: { after: string | null; at: number[] }[] = [];
+  let pi = 0, pj = 0, prev: string | null = null;
+  for (const [ai, aj] of [...keep, [n, m] as [number, number]]) {
+    const d = Array.from({ length: ai - pi }, (_, x) => pi + x), a = Array.from({ length: aj - pj }, (_, x) => pj + x);
+    // Between two blocks that stay: the same kind of block at the same place is changed where it stands; the rest of the
+    // old ones are removed and the rest of the new ones added after the block before them.
+    let t = 0;
+    while (t < d.length && t < a.length && have[d[t]!]!.type === want[a[t]!]!.type) { updates.push({ id: have[d[t]!]!.id!, i: a[t]! }); prev = have[d[t]!]!.id!; t++; }
+    for (const x of d.slice(t)) deletes.push(have[x]!.id!);
+    if (a.length > t) inserts.push({ after: prev, at: a.slice(t) });
+    if (ai < n) prev = have[ai]!.id!;
+    pi = ai + 1; pj = aj + 1;
+  }
+  return { updates, deletes, inserts };
+}
+function notion(token: string, who: { owner: string; bot: string } = { owner: '', bot: '' }): Remote {
   const h = { 'notion-version': NOTION_VERSION };
   const req = (path: string, init: RequestInit & { json?: unknown } = {}) => call('notion', `${NOTION}${path}`, token, { ...init, headers: { ...h, ...(init.headers as Record<string, string> | undefined) } });
   const title = (s: string) => ({ title: { title: rich(s.slice(0, 200)) } });
@@ -190,6 +226,42 @@ function notion(token: string): Remote {
     async trash(id, kind) {
       await req(kind === 'doc' ? `/pages/${id}` : `/databases/${id}`, { method: 'PATCH', json: { archived: true } });
     },
+    // The same page is updated where it stands: bullets that haven't changed aren't touched, a changed one is edited, and
+    // only the ones that went away are removed. Notion takes one request for each, so a big change is finished next time.
+    async replaceDoc(id, _title, markdown) {
+      const have: NBlock[] = [];
+      for (let cursor: string | undefined, n = 0; n < 5; n++) {
+        const j = await json<{ results?: NBlock[]; has_more?: boolean; next_cursor?: string }>(await req(`/blocks/${id}/children?page_size=100${cursor ? `&start_cursor=${encodeURIComponent(cursor)}` : ''}`));
+        have.push(...(j.results ?? []));
+        if (!j.has_more || !j.next_cursor) break;
+        if (n === 4) throw new PlaceError('That page is too long to update in place.', 413);
+        cursor = j.next_cursor;
+      }
+      const want = notionBlocks(markdown) as NBlock[];
+      const plan = notionPlan(have, want);
+      if (plan.inserts.some((x) => x.after === null && have.length)) throw new PlaceError('The page was rearranged; written as a new page.', 413);
+      let budget = NOTION_EDITS_PER_CALL, more = false;
+      const spend = async () => { if (budget-- <= 0) { more = true; return false; } await wait(NOTION_GAP); return true; };
+      for (const u of plan.updates) {
+        if (!(await spend())) break;
+        const t = String(want[u.i]!.type);
+        await req(`/blocks/${u.id}`, { method: 'PATCH', json: { [t]: { rich_text: (want[u.i]![t] as { rich_text: unknown }).rich_text } } });
+      }
+      if (!more) for (const d of plan.deletes) { if (!(await spend())) break; await req(`/blocks/${d}`, { method: 'DELETE' }); }
+      if (!more) for (const ins of plan.inserts) {
+        for (let o = 0; o < ins.at.length; o += 100) {
+          if (!(await spend())) break;
+          await req(`/blocks/${id}/children`, { method: 'PATCH', json: { children: ins.at.slice(o, o + 100).map((x) => want[x]), ...(ins.after ? { after: ins.after } : {}) } });
+        }
+        if (more) break;
+      }
+      return { id, url: `https://www.notion.so/${id.replace(/-/g, '')}`, version: more ? null : await this.version(id, 'doc'), ...(more ? { more: true } : {}) };
+    },
+    async editedByOther(id) {
+      const p = await json<{ last_edited_by?: { id?: string } }>(await req(`/pages/${id}`));
+      const by = p.last_edited_by?.id;
+      return !!by && !!who.owner && by !== who.owner && by !== who.bot;
+    },
     async findDocs(root, name) {
       const found: { id: string; url: string | null; at: string }[] = [];
       let cursor: string | undefined;
@@ -265,6 +337,21 @@ function gdrive(token: string): Remote {
     async readDoc(id) { return exportAs(id, 'text/markdown').catch(() => exportAs(id, 'text/plain')); },
     async readSheet(id) { return parseDelimited(await exportAs(id, 'text/csv'), ','); },
     async trash(id) { await call('gdrive', `${DRIVE}/files/${id}`, token, { method: 'PATCH', json: { trashed: true } }); },
+    // The same Doc is written over (Google turns the Markdown into headings and lists again), so its link stays.
+    async replaceDoc(id, _title, markdown) {
+      const put = async (type: string) => {
+        const start = await call('gdrive', `${DRIVE_UP}/files/${id}?uploadType=resumable&fields=${FIELDS}`, token, { method: 'PATCH', headers: { 'x-upload-content-type': type }, json: {} });
+        const at = start.headers.get('location') ?? '';
+        if (!at.startsWith('https://www.googleapis.com/upload/drive/')) throw new PlaceError('Google Drive didn’t start the upload.');
+        return json<{ id: string; webViewLink?: string; version?: string }>(await call('gdrive', at, token, { method: 'PUT', headers: { 'content-type': type }, body: new TextEncoder().encode(markdown) }));
+      };
+      const f = await put('text/markdown').catch((e) => (e instanceof PlaceError && e.status === 502 ? put('text/plain') : Promise.reject(e)));
+      return { id: f.id, url: f.webViewLink ?? null, version: f.version ?? null };
+    },
+    async editedByOther(id) {
+      const f = await json<{ lastModifyingUser?: { me?: boolean } }>(await call('gdrive', `${DRIVE}/files/${id}?fields=lastModifyingUser(me)`, token));
+      return f.lastModifyingUser?.me === false;
+    },
     async findDocs(root, title) {
       // Niko can only see the files it made (narrow access), so only its own documents come back.
       const q = `name = '${title.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}' and '${root.replace(/'/g, '')}' in parents and trashed = false and mimeType = '${G_DOC}'`;
@@ -359,7 +446,7 @@ async function adapterFor(env: Env, db: Db, userId: string, place: KnRemotePlace
   const provider = place === 'gdrive' ? 'google-drive' : place;
   const s = await credentials(env, db, userId, provider).catch(() => null);
   if (!s?.accessToken) return null;
-  return place === 'notion' ? notion(s.accessToken) : place === 'gdrive' ? gdrive(s.accessToken) : onedrive(s.accessToken);
+  return place === 'notion' ? notion(s.accessToken, await notionPeople(userId, s.accessToken).catch(() => undefined)) : place === 'gdrive' ? gdrive(s.accessToken) : onedrive(s.accessToken);
 }
 /** The name of Niko's page or folder in a place, from their Knowledge settings. */
 async function folderFor(db: Db, userId: string, place: KnRemotePlace): Promise<string> {
