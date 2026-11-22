@@ -414,3 +414,13 @@ export const browserActivity = pgTable('browser_activity', {
   kind: text('kind').notNull(),
   text: text('text').notNull().default(''),
 });
+
+/** "Stay signed in": a site's cookies a person chose to keep, sealed with ENCRYPTION_KEY. */
+export const browserSignins = pgTable('browser_signins', {
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  site: text('site').notNull(),
+  cookiesEnc: text('cookies_enc').notNull(),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  usedAt: ts('used_at'),
+  uses: integer('uses').notNull().default(0),
+}, (t) => [primaryKey({ columns: [t.userId, t.site] })]);

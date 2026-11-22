@@ -1,7 +1,7 @@
 // The browser panel on Home (as the Niko Browser mockup): the live page beside the core, with tabs, an address bar,
 // back, forward and reload. On a phone it fills the space under the core.
 import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from 'react';
-import { Icon } from '@niko/ui';
+import { Icon, Switch } from '@niko/ui';
 import type { BrowserSession } from './session';
 import type { Driver } from './driver';
 
@@ -48,12 +48,12 @@ export function BrowserPanel({ s, d, phone, onClose, onHandToNiko }: { s: Browse
   const go = (e: FormEvent) => { e.preventDefault(); setEditing(false); (document.activeElement as HTMLElement | null)?.blur(); if (addr.trim()) void s.go(addr); };
   const youDrive = v.driver === 'you';
   const pill = v.phase === 'reconnecting' ? ['Reconnecting', 'warn']
-    : v.need?.kind === 'handoff' ? ['Your turn', 'turn'] : v.need?.kind === 'gate' ? ['Waiting for your OK', 'turn']
+    : v.need?.kind === 'handoff' || v.need?.kind === 'code' ? ['Your turn', 'turn'] : v.need?.kind === 'gate' ? ['Waiting for your OK', 'turn']
     : youDrive ? ['You’re driving', 'you'] : ['Niko is driving', 'niko'];
   const live = v.phase === 'live' || v.phase === 'reconnecting';
   const focusTyper = () => typer.current?.focus({ preventScroll: true });
   // A password hand-off: the field is focused in the page, so typing goes straight there.
-  useEffect(() => { if (v.need?.kind === 'handoff' && v.need.handoff === 'password') focusTyper(); }, [v.need]);
+  useEffect(() => { if (v.need?.kind === 'handoff' && (v.need.handoff === 'password' || v.need.handoff === 'code')) focusTyper(); }, [v.need]);
   return (
     <section className="g brw" aria-label="Niko’s browser">
       <div className="brw-head">
@@ -114,7 +114,14 @@ export function BrowserPanel({ s, d, phone, onClose, onHandToNiko }: { s: Browse
         {toast && <div className="brw-toast" role="status">{toast}</div>}
         {v.ignoredAt && Date.now() - v.ignoredAt < 8000 && <div className="brw-toast ignored" role="status"><span className="k">Ignored</span> This page tried to give Niko orders. Niko only follows you.</div>}
       </div>
-      <p className="brw-foot sub">{phone ? minutesText(v.minutes) || 'Private session · closes when you’re done' : 'Typing into a page goes to the site, not to Niko. Private session · closes when you’re done.'}</p>
+      {v.finished && live ? (
+        <div className="brw-done">
+          {v.finished.signedIn
+            ? <span className="brw-stay"><Switch on={v.finished.stay} onChange={(on) => void s.setStay(on)} label="Stay signed in on this site" /><span><span className="brw-stay-t">Stay signed in on {v.finished.site}</span><span className="sub">{v.finished.stay ? 'Kept encrypted for your account only. Forget it any time in Settings.' : 'Off: Niko forgets this sign-in when the browser closes.'}</span></span></span>
+            : <span className="sub">Done. Private session · closes when you’re done</span>}
+          <span className="brw-done-b"><button className="sec" onClick={() => s.keepBrowsing()}>Keep browsing</button><button className="pri" onClick={onClose}>Close browser</button></span>
+        </div>
+      ) : <p className="brw-foot sub">{phone ? minutesText(v.minutes) || 'Private session · closes when you’re done' : 'Typing into a page goes to the site, not to Niko. Private session · closes when you’re done.'}</p>}
     </section>
   );
 }
@@ -134,11 +141,26 @@ function NeedSheet({ s, d, phone }: { s: BrowserSession; d: Driver; phone: boole
     {!phone && <span className="brw-note">{SAFE_NOTE}</span>}
     <span className="brw-sheet-b"><button className="sec" onClick={() => d.decline(n.gate)}>Not now</button><button className="pri" onClick={() => void d.approve(n.action, n.gate)}>{ALLOW[n.gate.kind] ?? 'Allow'}</button></span>
   </div>;
+  if (n.kind === 'code') {
+    const r = n.rect;
+    const shown = n.code.length === 6 ? `${n.code.slice(0, 3)} ${n.code.slice(3)}` : n.code;
+    return <>
+      {r && <i className="brw-spot" aria-hidden="true" style={{ left: `${(r.x / v.page.width) * 100}%`, top: `${(r.y / v.page.height) * 100}%`, width: `${(r.w / v.page.width) * 100}%`, height: `${(r.h / v.page.height) * 100}%` }} />}
+      <div className="brw-sheet" role="dialog" aria-label="Use the code from your Inbox?">
+        <span className="k accent">From your Inbox · {n.site} · just now</span>
+        <span className="brw-sheet-t">Enter the code <span className="brw-code">{shown}</span>?</span>
+        <span className="brw-note">Niko found it in the email they just sent you. It’s used once and not kept.</span>
+        <span className="brw-sheet-b"><button className="sec" onClick={() => void d.typeCodeYourself(n.ref, n.site, n.rect)}>I’ll type it</button><button className="pri" onClick={() => void d.enterCode(n.ref, n.code)}>Enter code</button></span>
+      </div>
+    </>;
+  }
   if (n.kind === 'handoff') {
     const r = n.rect;
     const spot = r && <i className="brw-spot" aria-hidden="true" style={{ left: `${(r.x / v.page.width) * 100}%`, top: `${(r.y / v.page.height) * 100}%`, width: `${(r.w / v.page.width) * 100}%`, height: `${(r.h / v.page.height) * 100}%` }} />;
     const copy = n.handoff === 'password'
       ? { k: 'Your turn', t: `Type a password for ${n.site || 'this site'}.`, p: 'What you type goes straight to the site. Niko can’t see this field, and never types or keeps your passwords.', go: 'Done, carry on', no: 'I’ll finish myself' }
+      : n.handoff === 'code'
+        ? { k: 'Your turn', t: `Type the sign-in code from ${n.site || 'this site'}.`, p: 'What you type goes straight to the site. Niko can’t see this field.', go: 'Done, carry on', no: 'I’ll finish myself' }
       : n.handoff === 'payment'
         ? { k: 'Your turn · payment', t: 'Payment is yours to finish.', p: 'Niko filled in the order. Card fields are hidden from Niko, and it never presses Pay.', go: 'Done', no: 'Cancel order' }
         : { k: 'Your turn', t: 'This site wants a person.', p: 'Tick the box yourself, then Niko carries on. Niko never tries to get past these checks.', go: 'Done, carry on', no: 'Stop here' };
@@ -148,7 +170,7 @@ function NeedSheet({ s, d, phone }: { s: BrowserSession; d: Driver; phone: boole
         <span className="k">{copy.k}</span>
         <span className="brw-sheet-t">{copy.t}</span>
         <span className="brw-note">{copy.p}</span>
-        <span className="brw-sheet-b"><button className="pri" onClick={() => { s.setNeed(null); d.resume(); }}>{copy.go}</button><button className="sec" onClick={() => { s.setNeed(null); d.stop(); }}>{copy.no}</button></span>
+        <span className="brw-sheet-b"><button className="pri" onClick={() => { if (n.handoff === 'password' || n.handoff === 'code') s.markSignedIn(n.site); s.setNeed(null); d.resume(); }}>{copy.go}</button><button className="sec" onClick={() => { s.setNeed(null); d.stop(); }}>{copy.no}</button></span>
       </div>
     </>;
   }

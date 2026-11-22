@@ -1402,6 +1402,15 @@ a.bt { text-decoration: none; display: inline-flex; align-items: center; justify
 @keyframes brwIn { 0% { opacity: 0; transform: translateY(14px); } 100% { opacity: 1; transform: none; } }
 .brw-toast { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); max-width: calc(100% - 32px); padding: 10px 16px; border-radius: 999px; background: rgba(8,12,18,.9); border: 1px solid rgba(255,255,255,.2); font: 400 13px system-ui, sans-serif; color: #fff; animation: brwIn .3s ease both; }
 .brw-foot { font-size: 12px; margin: 0; padding: 0 4px; }
+/* Niko finished: "Stay signed in", Keep browsing, Close browser (as the Main mockup draws it). */
+.brw-done { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 52px; flex-wrap: wrap; padding: 0 4px; }
+.brw-stay { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brw-stay > span:last-child { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.brw-stay-t { font-size: 14px; overflow-wrap: anywhere; }
+.brw-stay .sub, .brw-done > .sub { font-size: 12px; }
+.brw-done-b { display: flex; gap: 8px; }
+.brw-code { font-family: 'JetBrains Mono', monospace; letter-spacing: .12em; white-space: nowrap; }
+@media (max-width: 700px) { .brw-done-b { width: 100%; } .brw-done-b > button { flex: 1; } }
 @media (prefers-reduced-motion: reduce) { .brw-dot, .brw-bar i { animation: none; } .home.browsing .caption.aside { animation: none; transform: translateX(var(--bx)); } }
 @media (min-width: 901px) and (max-width: 1240px) { .home.browsing { --bw: calc(100vw - 420px); } }
 @media (max-width: 900px) { .home.browsing { --s: min(140px, 36vw); } }
@@ -1438,3 +1447,36 @@ a.bt { text-decoration: none; display: inline-flex; align-items: center; justify
 .brw-sheet-top { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
 .brw-sheet .k.quiet { color: var(--muted); }
 .brw-note { font: 400 13px/1.45 system-ui, sans-serif; color: var(--muted); }
+
+/* ---------------------------------------------------------------- Settings · Browser (as the Settings-Browser mockup) */
+.bs-big { font-size: 17px; font-weight: 500; }
+.bs-k { color: #fff; }
+.kn-card > .bs-k:not(:first-child) { padding-top: 6px; }
+.bs-head { display: flex; flex-direction: column; gap: 4px; }
+.bs-row-h { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.bs-fix { font: 500 11px 'JetBrains Mono', monospace; letter-spacing: .12em; text-transform: uppercase; color: #c3cad6; border: 1px solid rgba(255,255,255,.28); border-radius: 999px; padding: 4px 10px; white-space: nowrap; }
+.bs-svc { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 0 0; border-top: 1px solid rgba(255,255,255,.08); }
+.bs-head + .bs-svc, .kn-lead + .bs-svc { border-top: 0; padding-top: 4px; }
+.bs-svc-l { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.bs-svc .srow-name { overflow-wrap: anywhere; }
+.bs-svc > .srow-t, .bs-svc-l .srow-t { min-width: 0; }
+.bs-num { width: 28px; height: 28px; border-radius: 50%; border: 1px solid rgba(255,255,255,.3); display: flex; align-items: center; justify-content: center; font: 500 12px 'JetBrains Mono', monospace; color: #c3cad6; flex: none; }
+.bs-ini { width: 36px; height: 36px; border-radius: 10px; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.14); display: flex; align-items: center; justify-content: center; font: 500 13px 'JetBrains Mono', monospace; flex: none; }
+.bs-lnk { border: 0; background: transparent; color: #9fdcf3; font-size: 14px; cursor: pointer; padding: 10px 6px; white-space: nowrap; min-height: 44px; }
+.bs-lnk:hover { text-decoration: underline; }
+.bs-lnk.danger { color: #ffb3aa; padding-left: 0; }
+.bs-lnk:disabled { opacity: .5; cursor: default; }
+.bs-none { margin: 0; }
+.bs-keep .srow:first-child { border-top: 1px solid rgba(255,255,255,.08); padding-top: 14px; }
+.bs-visit .bs-svc { padding-top: 10px; }
+.bs-steps { list-style: none; margin: 8px 0 4px; padding: 10px 14px; border-radius: 16px; background: rgba(0,0,0,.25); display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.bs-steps li { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px; }
+.bs-st { font: 500 11px 'JetBrains Mono', monospace; color: #8b93a3; padding-top: 2px; }
+.bs-time { display: flex; align-items: baseline; gap: 8px; color: #c3cad6; }
+.bs-time b { font: 500 34px 'Space Grotesk', system-ui, sans-serif; color: #fff; }
+@media (max-width: 700px) {
+  .bs-keep .srow { flex-direction: column; align-items: stretch; }
+  .bs-keep .segs { width: 100%; }
+  .bs-keep .segs-b { flex: 1; }
+  .bs-steps li { grid-template-columns: 1fr; gap: 0; }
+}

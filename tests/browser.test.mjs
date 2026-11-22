@@ -253,3 +253,26 @@ await ok('a password field the person filled in is done: clicking past it is fin
   assert.equal(judgeAction(p, { do: 'click', ref: 2 }, ctx).handoff, null);
   assert.equal(judgeAction(p, { do: 'type', ref: 2, text: 'x' }, ctx).handoff.kind, 'password');
 });
+
+// ---------------------------------------------------------------- stage 4: codes, kept words, code fields
+const { codeIn, scrub } = await import('../apps/api/src/browser.ts');
+await ok('a sign-in code is found in an email next to words about codes, and years and plain numbers are not', () => {
+  assert.equal(codeIn('Your Pebble & Peak verification code is 482 913. It expires in 10 minutes.'), '482913');
+  assert.equal(codeIn('Use 7741 to sign in'), '7741');
+  assert.equal(codeIn('Enter this one-time code: 30481966'), '30481966');
+  assert.equal(codeIn('© 2026 Pebble & Peak. Your code is 552190'), '552190');
+  assert.equal(codeIn('Thanks for visiting in 2026! See you soon.'), null);
+  assert.equal(codeIn('Your table for 4 is booked at 7pm, 12 Main Street 238823'), null);
+});
+await ok('"What Niko did" never keeps email addresses or long numbers from Niko’s words', () => {
+  assert.equal(scrub('Signed you up as alex.tan@mail.com'), 'Signed you up as …');
+  assert.equal(scrub('Booked for +65 9123 4567 at 7'), 'Booked for … at 7');
+  assert.equal(scrub('Signed up at Pebble & Peak'), 'Signed up at Pebble & Peak');
+});
+await ok('a sign-in code field is treated like a password: no value, and it is the person’s (or the Inbox’s) to fill', () => {
+  const p = cleanOutline({ url: 'https://pebbleandpeak.com/verify', title: '', elements: [{ ref: 1, kind: 'input', type: 'text', name: 'Verification code', code: true, value: '482913' }, { ref: 2, kind: 'button', name: 'Verify', submit: true }], text: '', frames: {} });
+  const el = p.elements[0];
+  assert.equal(el.code, true); assert.equal(el.password, true); assert.equal(el.value, undefined);
+  const ctx2 = { knownSites: ['pebbleandpeak.com'], blocked: [], askNewSite: true, askDownloads: true };
+  assert.equal(judgeAction(p, { do: 'type', ref: 1, text: '000000' }, ctx2).handoff.kind, 'code');
+});

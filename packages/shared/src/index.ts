@@ -463,6 +463,8 @@ export interface Me {
   live?: boolean;
   /** AI options the admin has turned off for this account (hidden here, refused by the server). */
   aiOff?: string[];
+  /** Settings › Browser is shown: the plan includes Niko's browser. */
+  browser?: boolean;
   /** The admin's limits for new items on Home, as they apply to this account. */
   glanceLimits?: GlanceLimits;
   /** Whether this account may use Niko now (paid time, a plan, lifetime or admin), and the plans it can choose. */

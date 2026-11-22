@@ -1,14 +1,18 @@
 // The app's browser routes: open a browser, get a pass for its live picture, open tabs, check in, close.
 // Messages never mention the admin: limits read as Niko's own.
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
-import { browserSessions } from '@niko/db';
-import { cleanOutline, hostBlocked, judgeAction, lastRefill, openableHost, outlineText, pageGivesOrders, parseStep, siteOf, toAddress, type StepAnswer } from '@niko/shared';
+import { browserActivity, browserSessions, browserSignins, connections, users } from '@niko/db';
+import { cleanBrowserPrefs, cleanOutline, hostBlocked, judgeAction, lastRefill, openableHost, outlineText, pageGivesOrders, parseStep, siteOf, toAddress, type StepAnswer } from '@niko/shared';
 import type { AppEnv } from '../env';
-import { browserState, checkOk, keeper, logActivity, minutesFor, openSessionOf, signOk, type BrowserState } from '../browser';
+import { browserState, checkOk, codeIn, scrub, keeper, logActivity, minutesFor, openSessionOf, signOk, type BrowserState } from '../browser';
 import { CfError, cfCloseTab, cfConnection, cfOpen, cfPass, cfTab } from '../browserCf';
 import { audit } from '../lib/session';
 import { BrainFail, think } from '../brains';
+import { listMail } from '../providers';
+import { mailDetail } from '../details';
+import { seal, unseal } from '../lib/crypto';
+import { IMAP_PROVIDERS } from '../mailbox';
 import { offFor } from '../access';
 
 export const browser = new Hono<AppEnv>();
@@ -188,15 +192,16 @@ browser.post('/:id/step', async (c) => {
     throw e;
   }
   const step = parseStep(reply);
-  if (step.action?.do === 'done') { await logActivity(db, u.id, row.id, host ?? '', 'done', clip(step.say, 160) || 'Done'); return c.json(answer({ say: step.say || 'Done.', done: true })); }
+  if (step.action?.do === 'done') { await logActivity(db, u.id, row.id, host ?? '', 'done', scrub(clip(step.say, 160)) || 'Done'); return c.json(answer({ say: step.say || 'Done.', done: true })); }
   if (step.action?.do === 'ask') return c.json(answer({ say: step.say || 'I’m not sure what to do next. What should I do?', action: { do: 'ask' } }));
   const j = judgeAction(page, step.action, { knownSites: known, blocked: s.defaults.blocked, askNewSite: s.prefs.askNewSite, askDownloads: s.prefs.askDownloads });
   if (j.refused) return c.json(answer({ say: j.refused, action: { do: 'ask' } }));
   const site = siteOf(host ?? row.site ?? '');
   const say = j.handoff?.kind === 'password' ? `Your turn: type a password for ${site}. I can’t see that field.`
+    : j.handoff?.kind === 'code' ? `Your turn: type the sign-in code ${site} sent you. I can’t see that field.`
     : j.handoff?.kind === 'payment' ? 'Payment is yours to finish. I can’t see card fields, and I never press Pay.'
     : step.say;
-  if (j.handoff) await logActivity(db, u.id, row.id, host ?? '', 'handoff', j.handoff.kind === 'password' ? 'You typed the password' : j.handoff.kind === 'payment' ? 'You finished the payment' : 'You did the “are you human?” check');
+  if (j.handoff) await logActivity(db, u.id, row.id, host ?? '', 'handoff', j.handoff.kind === 'password' ? 'You typed the password' : j.handoff.kind === 'code' ? 'You entered a sign-in code' : j.handoff.kind === 'payment' ? 'You finished the payment' : 'You did the “are you human?” check');
   // A held action carries the server's signed token: the person's OK for exactly this action, once.
   const gate = j.gate && j.action ? { ...j.gate, token: await signOk(c.env.ENCRYPTION_KEY, row.id, j.action, j.gate.kind) } : j.gate;
   return c.json(answer({ say, action: j.action, handoff: j.handoff, gate }));
@@ -246,4 +251,116 @@ browser.post('/:id/download', async (c) => {
   await logActivity(c.get('db'), c.get('user').id, row.id, clip(b.site, 200), 'download', `Downloaded ${clip(b.name, 80) || 'a file'}`);
   await audit(c, 'browser.download', { site: clip(b.site, 200) }, c.get('user').id);
   return c.json({ ok: true });
+});
+
+
+// ---------------------------------------------------------------- Settings › Browser (stage 4)
+browser.put('/prefs', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  const b = await c.req.json<{ prefs?: unknown }>().catch(() => ({} as { prefs?: unknown }));
+  const s = await browserState(db, u);
+  const prefs = cleanBrowserPrefs({ ...s.prefs, ...(b.prefs && typeof b.prefs === 'object' ? b.prefs : {}) }, s.defaults.historyDays);
+  await db.update(users).set({ browserPrefs: prefs as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
+  // Switched off: an open browser closes now.
+  if (!prefs.on) { const open = await openSessionOf(db, u.id); if (open) await keeper(c.env, u.id, '/end', { sessionId: open.id, why: 'removed' }).catch(() => undefined); }
+  return c.json({ prefs });
+});
+
+browser.get('/activity', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  const sessions = await db.select({ id: browserSessions.id, site: browserSessions.site, startedAt: browserSessions.startedAt, endedAt: browserSessions.endedAt, seconds: browserSessions.seconds })
+    .from(browserSessions).where(eq(browserSessions.userId, u.id)).orderBy(desc(browserSessions.startedAt)).limit(30);
+  const steps = sessions.length ? await db.select({ at: browserActivity.at, site: browserActivity.site, kind: browserActivity.kind, text: browserActivity.text, sessionId: browserActivity.sessionId })
+    .from(browserActivity).where(and(eq(browserActivity.userId, u.id), inArray(browserActivity.sessionId, sessions.map((x) => x.id)))).orderBy(browserActivity.at).limit(600) : [];
+  // Only sessions with something kept (the daily trim removes old steps; a session with none left isn't listed).
+  return c.json({ sessions: sessions.map((x) => ({
+    id: x.id, site: x.site, at: x.startedAt,
+    seconds: x.endedAt ? x.seconds : Math.round((Date.now() - x.startedAt.getTime()) / 1000),
+    steps: steps.filter((y) => y.sessionId === x.id).map(({ at, site, kind, text }) => ({ at, site, kind, text })),
+  })).filter((x) => x.steps.length) });
+});
+browser.delete('/activity', async (c) => {
+  await c.get('db').delete(browserActivity).where(eq(browserActivity.userId, c.get('user').id));
+  return c.json({ ok: true });
+});
+
+// ---- Stay signed in: a site's cookies, sealed; given back only to this person's own device.
+const MAX_COOKIES_BYTES = 64 * 1024;
+const siteParam = (v: string | undefined) => { const h = openableHost(`https://${(v ?? '').slice(0, 200)}`); return h ? siteOf(h) : null; };
+browser.get('/signins', async (c) => {
+  const rows = await c.get('db').select({ site: browserSignins.site, createdAt: browserSignins.createdAt, usedAt: browserSignins.usedAt, uses: browserSignins.uses }).from(browserSignins).where(eq(browserSignins.userId, c.get('user').id)).orderBy(desc(browserSignins.createdAt));
+  return c.json({ signins: rows });
+});
+browser.delete('/signins', async (c) => { await c.get('db').delete(browserSignins).where(eq(browserSignins.userId, c.get('user').id)); return c.json({ ok: true }); });
+browser.delete('/signins/:site', async (c) => {
+  const site = siteParam(c.req.param('site'));
+  if (site) await c.get('db').delete(browserSignins).where(and(eq(browserSignins.userId, c.get('user').id), eq(browserSignins.site, site)));
+  return c.json({ ok: true });
+});
+// Keep the sign-in for the site the browser is on (the person chose "Stay signed in").
+browser.post('/:id/signin', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  const row = await mine(c);
+  if (!row) return c.json(GONE, 410);
+  const s = await browserState(db, u);
+  if (!s.defaults.staySignedIn) return c.json({ error: 'Staying signed in isn’t available.', code: 'off' }, 403);
+  const b = await c.req.json<{ site?: string; cookies?: unknown }>().catch(() => ({} as Record<string, never>));
+  const site = siteParam(b.site);
+  if (!site || hostBlocked(site, s.defaults.blocked)) return c.json({ error: 'That site can’t be kept.' }, 400);
+  const cookies = (Array.isArray(b.cookies) ? b.cookies : []).filter((x: any) => x && typeof x.name === 'string' && typeof x.value === 'string' && typeof x.domain === 'string'
+    && (siteOf(String(x.domain).replace(/^\./, '')) === site)).slice(0, 80)
+    .map((x: any) => ({ name: x.name.slice(0, 200), value: x.value.slice(0, 4096), domain: x.domain.slice(0, 200), path: typeof x.path === 'string' ? x.path.slice(0, 200) : '/', secure: !!x.secure, httpOnly: !!x.httpOnly, sameSite: ['Strict', 'Lax', 'None'].includes(x.sameSite) ? x.sameSite : undefined, expires: typeof x.expires === 'number' && x.expires > 0 ? x.expires : undefined }));
+  const json = JSON.stringify(cookies);
+  if (!cookies.length) return c.json({ error: 'There’s no sign-in to keep on this site yet.' }, 400);
+  if (json.length > MAX_COOKIES_BYTES) return c.json({ error: 'This site’s sign-in is too large to keep.' }, 400);
+  const sealed = await seal(c.env.ENCRYPTION_KEY, cookies);
+  await db.insert(browserSignins).values({ userId: u.id, site, cookiesEnc: sealed }).onConflictDoUpdate({ target: [browserSignins.userId, browserSignins.site], set: { cookiesEnc: sealed, createdAt: new Date() } });
+  await logActivity(db, u.id, row.id, site, 'done', `Stayed signed in on ${site}`);
+  return c.json({ ok: true });
+});
+// The kept sign-in for a site, to put into this browser before the site opens.
+browser.post('/:id/signin-for', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  const row = await mine(c);
+  if (!row) return c.json(GONE, 410);
+  const s = await browserState(db, u);
+  const b = await c.req.json<{ site?: string }>().catch(() => ({} as Record<string, never>));
+  const site = siteParam(b.site);
+  if (!site || !s.defaults.staySignedIn) return c.json({ cookies: [] });
+  const r = (await db.select().from(browserSignins).where(and(eq(browserSignins.userId, u.id), eq(browserSignins.site, site))).limit(1))[0];
+  if (!r) return c.json({ cookies: [] });
+  const cookies = await unseal<unknown[]>(c.env.ENCRYPTION_KEY, r.cookiesEnc).catch(() => null);
+  await db.update(browserSignins).set({ usedAt: new Date(), uses: sql`${browserSignins.uses} + 1` }).where(and(eq(browserSignins.userId, u.id), eq(browserSignins.site, site)));
+  return c.json({ cookies: cookies ?? [] });
+});
+
+// ---- Sign-in codes from the Inbox (codeIn, in ../browser): found in mail that arrived in the last 10 minutes from the site, shown only to this
+// person's device and entered only after their OK. Never stored, never sent to the AI.
+browser.post('/:id/code', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  const row = await mine(c);
+  if (!row) return c.json(GONE, 410);
+  const s = await browserState(db, u);
+  if (!s.prefs.inboxCodes) return c.json({ code: null });
+  const b = await c.req.json<{ site?: string }>().catch(() => ({} as Record<string, never>));
+  const site = siteParam(b.site);
+  if (!site) return c.json({ code: null });
+  const word = site.split('.')[0]!.toLowerCase();
+  const linked = await db.select({ provider: connections.provider }).from(connections).where(eq(connections.userId, u.id));
+  const mailProviders = [...new Set(linked.map((x) => x.provider).filter((p) => ['gmail', 'outlook-mail', ...IMAP_PROVIDERS].includes(p)))];
+  const since = Date.now() - 10 * 60_000;
+  for (const p of mailProviders) {
+    const items = await listMail(c.env, db, u.id, p).catch(() => []);
+    const match = items.filter((m) => `${m.from} ${m.subject}`.toLowerCase().replace(/[^a-z0-9]/g, '').includes(word.replace(/[^a-z0-9]/g, ''))).slice(0, 3);
+    for (const m of match) {
+      const d = await mailDetail(c.env, db, u.id, p, m.id).catch(() => null);
+      if (!d || !d.date || d.date < since) continue;
+      const code = codeIn(`${d.subject}\n${d.text}`);
+      if (code) {
+        await logActivity(db, u.id, row.id, site, 'handoff', 'Niko found a sign-in code in your Inbox');
+        return c.json({ code, from: m.source, subject: d.subject.slice(0, 120) });
+      }
+    }
+  }
+  return c.json({ code: null });
 });

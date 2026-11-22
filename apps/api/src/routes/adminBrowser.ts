@@ -1,14 +1,15 @@
 // Admin portal › Browser: connecting Cloudflare Browser Run, and a test the admin can run from the portal.
 // Saving or removing the connection asks for a fresh code from the admin's authenticator app, so an admin session
 // left open somewhere can't swap the token. Every change is written to the audit log (never the token).
-import { and, eq, lt } from 'drizzle-orm';
+import { and, eq, isNull, lt } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
-import { users } from '@niko/db';
-import { isCfAccountId, isCfToken, openableHost } from '@niko/shared';
+import { browserSessions, browserSignins, users } from '@niko/db';
+import { browserFor, cleanBrowserAccess, cleanBrowserDefaults, isCfAccountId, isCfToken, openableHost } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { totpStep, unseal } from '../lib/crypto';
 import { audit, clientIp, requireAdmin } from '../lib/session';
 import { clearThrottle, lockedMessage, recordFailure, throttleMinutes } from '../lib/throttle';
+import { browserDefaults, keeper, saveBrowserDefaults } from '../browser';
 import { cfClose, CfError, cfConnection, cfInfo, cfOpen, cfPass, cfTab, cfTest, forgetCf, saveCf } from '../browserCf';
 
 export const adminBrowser = new Hono<AppEnv>();
@@ -34,7 +35,50 @@ export async function confirmAdminCode(c: Ctx, code: unknown): Promise<Response 
   return null;
 }
 
-adminBrowser.get('/', async (c) => c.json({ cloudflare: await cfInfo(c.get('db')) }));
+adminBrowser.get('/', async (c) => {
+  const db = c.get('db');
+  const people = await db.select({ id: users.id, name: users.name, email: users.email, role: users.role, browserAccess: users.browserAccess }).from(users).orderBy(users.createdAt);
+  return c.json({ cloudflare: await cfInfo(db), defaults: await browserDefaults(db, true), users: people.map((p) => ({ ...p, browserAccess: cleanBrowserAccess(p.browserAccess) })) });
+});
+
+/** Closes the open browsers of people who may no longer use one (after the default or their own setting changed). */
+async function closeForbidden(c: Ctx, only?: string): Promise<void> {
+  const db = c.get('db');
+  const d = await browserDefaults(db, true);
+  const open = await db.select({ id: browserSessions.id, userId: browserSessions.userId, role: users.role, access: users.browserAccess })
+    .from(browserSessions).innerJoin(users, eq(users.id, browserSessions.userId))
+    .where(only ? and(isNull(browserSessions.endedAt), eq(browserSessions.userId, only)) : isNull(browserSessions.endedAt));
+  for (const o of open) if (!browserFor(d, (o.access ?? {}) as Record<string, unknown>, o.role === 'admin').on) await keeper(c.env, o.userId, '/end', { sessionId: o.id, why: 'removed' }).catch(() => undefined);
+}
+
+// The default for everyone (the limits, "Stay signed in", the longest history and blocked sites apply to everyone).
+adminBrowser.put('/default', async (c) => {
+  const db = c.get('db');
+  const b = await c.req.json<{ defaults?: unknown }>().catch(() => ({} as { defaults?: unknown }));
+  const before = await browserDefaults(db, true);
+  const next = cleanBrowserDefaults({ ...before, ...(b.defaults && typeof b.defaults === 'object' ? b.defaults : {}) });
+  await saveBrowserDefaults(db, next);
+  // "Stay signed in" switched off: every kept sign-in is deleted now.
+  let forgot = 0;
+  if (before.staySignedIn && !next.staySignedIn) forgot = (await db.delete(browserSignins).returning({ u: browserSignins.userId })).length;
+  if (before.on && !next.on) await closeForbidden(c);
+  const changed = (Object.keys(next) as (keyof typeof next)[]).filter((k) => JSON.stringify(next[k]) !== JSON.stringify(before[k]));
+  await audit(c, 'admin.browser.default', { changed, ...(forgot ? { forgotSignins: forgot } : {}) });
+  return c.json({ defaults: next, forgot });
+});
+
+// One person's changes (only what differs is kept; an empty set means they follow the default).
+adminBrowser.put('/users/:id', async (c) => {
+  const db = c.get('db'), id = c.req.param('id');
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return c.json({ error: 'Not found.' }, 404);
+  const b = await c.req.json<{ access?: unknown }>().catch(() => ({} as { access?: unknown }));
+  const access = cleanBrowserAccess(b.access);
+  const r = await db.update(users).set({ browserAccess: access as unknown as Record<string, unknown> }).where(eq(users.id, id)).returning({ id: users.id });
+  if (!r.length) return c.json({ error: 'Not found.' }, 404);
+  await closeForbidden(c, id);
+  await audit(c, 'admin.browser.user', { user: id, changed: Object.keys(access) });
+  return c.json({ access });
+});
 
 // Connect (or replace) Cloudflare Browser Run. Tested before it is saved.
 adminBrowser.put('/cloudflare', async (c) => {

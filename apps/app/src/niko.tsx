@@ -1065,9 +1065,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     });
     b.onEnded = (text) => { if (browserRef.current === b) say(text); };
     void (async () => {
-      const st = await api<{ allowed: boolean; ready: boolean; blocked: string[] }>('/browser').catch(() => null);
+      const st = await api<{ allowed: boolean; ready: boolean; blocked: string[]; staySignedIn: boolean; prefs: { inboxCodes: boolean } }>('/browser').catch(() => null);
       if (browserRef.current !== b) return;
-      if (st) b.blocked = st.blocked;
+      if (st) { b.blocked = st.blocked; b.staySignedIn = st.staySignedIn; b.inboxCodes = st.prefs.inboxCodes; }
       try {
         await b.open(url);
         if (task && browserRef.current === b) { await new Promise((r) => setTimeout(r, 1200)); driverRef.current?.start(task); }

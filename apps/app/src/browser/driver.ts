@@ -34,6 +34,7 @@ export class Driver {
     if (!this.task) return;
     const id = ++this.runId;
     this.s.setNeed(null);
+    this.s.keepBrowsing();
     this.s.setDriver('niko');
     void this.loop(id);
   }
@@ -73,12 +74,24 @@ export class Driver {
       this.note = '';
       if (id !== this.runId) return;
       if (step.ignored) this.s.flagIgnored();
-      if (step.done) { this.s.setCursor(null); this.s.setDriver('you'); this.task = ''; this.hooks.say(step.say); return; }
+      if (step.done) { this.s.setCursor(null); this.s.setDriver('you'); this.task = ''; this.s.finish(siteOf(host ?? '')); this.hooks.say(step.say); return; }
       if (step.handoff) {
         this.s.setCursor(null);
         // Their part is lit up on the page (the field is focused for them; Niko never reads what they type).
         const rect = step.handoff.ref !== undefined ? await this.rectOf(step.handoff.ref) : null;
-        if (step.handoff.kind === 'password' && step.handoff.ref !== undefined) await cdp.send('Runtime.evaluate', { expression: focusOf(step.handoff.ref) }).catch(() => undefined);
+        // A sign-in code: Niko looks in the Inbox (mail from this site in the last 10 minutes) and asks before entering it.
+        if (step.handoff.kind === 'code' && step.handoff.ref !== undefined && this.s.inboxCodes) {
+          this.hooks.status('Looking for the code in your Inbox…');
+          const found = await api<{ code: string | null; from?: string }>(`/browser/${this.s.view.id}/code`, { body: { site: siteOf(host ?? '') } }).catch(() => ({ code: null }));
+          if (id !== this.runId) return;
+          if (found.code) {
+            this.s.setNeed({ kind: 'code', code: found.code, from: found.from ?? '', ref: step.handoff.ref, site: siteOf(host ?? ''), ...(rect ? { rect } : {}) });
+            this.s.setDriver('you');
+            this.hooks.say('I found the code in your Inbox. Shall I enter it?');
+            return;
+          }
+        }
+        if ((step.handoff.kind === 'password' || step.handoff.kind === 'code') && step.handoff.ref !== undefined) await cdp.send('Runtime.evaluate', { expression: focusOf(step.handoff.ref) }).catch(() => undefined);
         this.s.setNeed({ kind: 'handoff', handoff: step.handoff.kind, ref: step.handoff.ref, say: step.say, site: siteOf(host ?? ''), ...(rect ? { rect } : {}) });
         this.s.setDriver('you');
         this.hooks.say(step.say);
@@ -202,6 +215,23 @@ export class Driver {
     const did = await this.act(a);
     this.history.push({ say: 'The user said OK', did });
     this.resume();
+  }
+
+  /** "Enter code": types the code from the Inbox into its field, then carries on. The code isn't kept anywhere. */
+  async enterCode(ref: number, code: string) {
+    const cdp = this.s.connection;
+    this.s.setNeed(null);
+    if (!cdp) return;
+    this.s.setDriver('niko');
+    const p = await this.point(ref);
+    if (p) { await this.click(p); await cdp.send('Runtime.evaluate', { expression: focusOf(ref) }).catch(() => undefined); await cdp.send('Input.insertText', { text: code }).catch(() => undefined); }
+    this.history.push({ say: 'Entered the sign-in code from the Inbox', did: `typed the code into [${ref}]` });
+    this.resume();
+  }
+  /** "I'll type it": the code field is the person's. */
+  async typeCodeYourself(ref: number, site: string, rect?: { x: number; y: number; w: number; h: number }) {
+    await this.s.connection?.send('Runtime.evaluate', { expression: focusOf(ref) }).catch(() => undefined);
+    this.s.setNeed({ kind: 'handoff', handoff: 'code', ref, say: '', site, ...(rect ? { rect } : {}) });
   }
 
   /** "Not now": Niko stops; the choice is kept in "What Niko did". */

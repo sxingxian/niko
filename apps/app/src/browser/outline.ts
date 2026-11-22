@@ -15,7 +15,8 @@ export const OUTLINE_JS = `(() => {
     return el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('name') || '';
   };
   const CARD = /(cc-|card.?num|cardnumber|cc.?num|credit|debit|cvc|cvv|csc|security.?code|expir|exp.?date|exp.?month|exp.?year|name.?on.?card)/i;
-  const PW = /(current-password|new-password|one-time-code)/i;
+  const PW = /(current-password|new-password)/i;
+  const CODE = /(one-time-code|\\botp\\b|one.?time|verification.?code|verify.?code|confirm(ation)?.?code|sign.?in.?code|log.?in.?code|passcode|2fa|two.?factor|auth(entication)?.?code)/i;
   const els = [];
   const seen = new Set();
   const pick = 'a[href], button, input, select, textarea, [role=button], [role=link], [role=checkbox], [role=radio], [role=tab], [role=option], [role=menuitem], [role=switch], [role=combobox], [role=textbox], [contenteditable=true], summary';
@@ -35,13 +36,15 @@ export const OUTLINE_JS = `(() => {
     const type = (el.getAttribute('type') || '').toLowerCase();
     const auto = el.getAttribute('autocomplete') || '';
     const hint = [el.name, el.id, auto, el.getAttribute('placeholder'), labelOf(el)].join(' ');
-    const password = type === 'password' || PW.test(auto);
+    const code = tag === 'input' && type !== 'checkbox' && type !== 'radio' && (auto === 'one-time-code' || CODE.test(hint));
+    const password = type === 'password' || PW.test(auto) || code;
     const card = !password && (tag === 'input' || tag === 'select') && CARD.test(hint);
     const ref = window.__nikoEls.length; window.__nikoEls.push(el);
     const kind = role || (tag === 'input' ? (type === 'checkbox' || type === 'radio' ? type : 'input') : tag);
     const e = { ref, kind, name: clip(tag === 'input' || tag === 'textarea' || tag === 'select' ? labelOf(el) : (el.innerText || labelOf(el)), 120), visible: inView(el) };
     if (tag === 'input') e.type = type || 'text';
     if (password) e.password = true;
+    if (code) e.code = true;
     if (card) e.card = true;
     if ((password || card) && el.value && el.value.length > 0) e.filled = true;
     if (!password && !card && (tag === 'input' || tag === 'textarea') && type !== 'checkbox' && type !== 'radio' && el.value) e.value = clip(el.value, 120);

@@ -32,7 +32,7 @@ type MyApp = AppDef & { configured: boolean; hint: string | null; uses: string[]
 type Note = { ok: boolean; text: string } | null;
 
 // ---------------------------------------------------------------- shell
-const SETTINGS: [string, string, string][] = [['/appearance', 'Appearance', 'palette'], ['/voice', 'Voice', 'wave'], ['/engine', 'Engine', 'spark'], ['/connections', 'Connections', 'plug'], ['/knowledge', 'Knowledge', 'note'], ['/account', 'Account', 'user']];
+const SETTINGS: [string, string, string][] = [['/appearance', 'Appearance', 'palette'], ['/voice', 'Voice', 'wave'], ['/engine', 'Engine', 'spark'], ['/connections', 'Connections', 'plug'], ['/knowledge', 'Knowledge', 'note'], ['/browser', 'Browser', 'globe'], ['/account', 'Account', 'user']];
 
 /** Route layout: the sidebar stays put while the page beside it changes. */
 export function SettingsLayout() {
@@ -57,7 +57,7 @@ export function SettingsLayout() {
         <div className="set-brand"><span className="wordmark">NIKO</span><span className="k pill">Settings</span></div>
         <nav ref={navRef} aria-label="Settings sections" className="set-nav">
           {/* Knowledge shows only for accounts that have it, with no word about why for those that don't. */}
-          {SETTINGS.filter(([to]) => to !== '/knowledge' || (({ files, learning }) => files || learning)(knowledgeAccess((k) => aiAllowed(me?.aiOff ?? [], k)))).map(([to, name]) => <NavLink key={to} to={to} className="nv">{name}</NavLink>)}
+          {SETTINGS.filter(([to]) => (to !== '/knowledge' || (({ files, learning }) => files || learning)(knowledgeAccess((k) => aiAllowed(me?.aiOff ?? [], k)))) && (to !== '/browser' || !!me?.browser)).map(([to, name]) => <NavLink key={to} to={to} className="nv">{name}</NavLink>)}
         </nav>
         <div className="set-foot">
           <span>Signed in as {me?.name || me?.email}</span>

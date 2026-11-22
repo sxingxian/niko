@@ -20,16 +20,17 @@ export async function browserDefaults(db: Db, fresh = false): Promise<BrowserDef
   return v;
 }
 export const forgetBrowserDefaults = () => { cache = null; };
-
-/** Until the browser is switched on for everyone (stage 4 of the plan), only admins have it, whatever the settings say. */
-export const BROWSER_RELEASED = false;
+export async function saveBrowserDefaults(db: Db, v: BrowserDefaults): Promise<void> {
+  await db.insert(appSettings).values({ key: BROWSER_DEFAULT_KEY, value: v as unknown as Record<string, unknown> })
+    .onConflictDoUpdate({ target: appSettings.key, set: { value: v as unknown as Record<string, unknown> } });
+  cache = { at: Date.now(), v };
+}
 
 type BUser = { id: string; role: string; browserAccess?: unknown; browserPrefs?: unknown };
 export interface BrowserState { defaults: BrowserDefaults; allowance: BrowserAllowance; prefs: BrowserPrefs }
 export async function browserState(db: Db, user: BUser): Promise<BrowserState> {
   const defaults = await browserDefaults(db);
   const allowance = browserFor(defaults, (user.browserAccess ?? {}) as Record<string, unknown>, user.role === 'admin');
-  if (!BROWSER_RELEASED && user.role !== 'admin') allowance.on = false;
   const prefs = cleanBrowserPrefs(user.browserPrefs ?? DEFAULT_BROWSER_PREFS, defaults.historyDays);
   return { defaults, allowance, prefs };
 }
@@ -125,4 +126,24 @@ export async function checkOk(secret: string, sessionId: string, token: unknown,
   if (exp < now || exp > now + OK_MS + 5000) return null;
   const want = await hmacSha256Hex(secret, okMessage(sessionId, exp, m[2]!, action, kind));
   return safeEqual(want, m[3]!) ? { nonce: m[2]!, exp } : null;
+}
+
+// ---------------------------------------------------------------- words kept and codes found
+/** "What Niko did" keeps steps, never what was typed: email addresses and long numbers in Niko's words are left out. */
+export const scrub = (t: string) => t.replace(/\S+@\S+\.\S+/g, '…').replace(/\+?\d[\d\s-]{3,}\d/g, '…');
+
+/** A sign-in code in an email: 4 to 8 digits ("482913" or "482 913") next to words about codes. Years are skipped. */
+const CODE_NEAR = /(code|verif|one[- ]time|otp|passcode|pin|confirm|security|sign[- ]?in|log[- ]?in)/i;
+export function codeIn(text: string): string | null {
+  const t = text.replace(/\s+/g, ' ');
+  // A code written with a space in the middle ("482 913") or plain ("482913"), next to words about codes.
+  const re = /\b(\d{3}[ -]?\d{3}|\d{4,8})\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(t))) {
+    const around = t.slice(Math.max(0, m.index - 80), m.index + m[0].length + 40);
+    const digits = m[1]!.replace(/[ -]/g, '');
+    if (/^(19|20)\d{2}$/.test(digits) && digits.length === 4) continue; // a year
+    if (CODE_NEAR.test(around)) return digits;
+  }
+  return null;
 }
