@@ -7,6 +7,10 @@
   "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "none", "html_handling": "none" },
   "ai": { "binding": "AI" },
+  // Niko's browser: one BrowserKeeper per person keeps their open browser and closes it when the day's minutes run out
+  // or the device goes. SQLite-backed (the only kind on the Workers free plan; free there, within its daily limits).
+  "durable_objects": { "bindings": [{ "name": "BROWSER_KEEPER", "class_name": "BrowserKeeper" }] },
+  "migrations": [{ "tag": "browser-keeper-v1", "new_sqlite_classes": ["BrowserKeeper"] }],
   // No cron triggers: the Workers free plan allows only 5 per account. The daily job runs from traffic (maybeDaily).
   "triggers": { "crons": [] },
   "observability": { "enabled": true },

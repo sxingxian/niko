@@ -64,6 +64,10 @@ export const users = pgTable('users', {
   dataAccess: jsonb('data_access').notNull().default({}).$type<Record<string, unknown>>(),
   /** This person's own choices on Engine · Data sources. */
   dataPrefs: jsonb('data_prefs').notNull().default({}).$type<Record<string, unknown>>(),
+  /** The admin's changes for this account to the browser defaults (on, own service, daily minutes). Set by an admin only. */
+  browserAccess: jsonb('browser_access').notNull().default({}).$type<Record<string, unknown>>(),
+  /** This account's own browser choices (Settings › Browser). */
+  browserPrefs: jsonb('browser_prefs').notNull().default({}).$type<Record<string, unknown>>(),
   createdAt: ts('created_at').notNull().defaultNow(),
   lastActiveAt: ts('last_active_at'),
 });
@@ -383,4 +387,19 @@ export const backgroundCheckouts = pgTable('background_checkouts', {
   mode: text('mode').notNull(),
   paidAt: ts('paid_at'),
   createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+/** Browsers people opened in Niko: which service, the first site (host only) and for how long. Never page contents. */
+export const browserSessions = pgTable('browser_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  service: text('service').notNull(),
+  serviceId: uuid('service_id'),
+  remoteId: text('remote_id').notNull(),
+  site: text('site').notNull().default(''),
+  startedAt: ts('started_at').notNull().defaultNow(),
+  lastSeenAt: ts('last_seen_at').notNull().defaultNow(),
+  endedAt: ts('ended_at'),
+  seconds: integer('seconds').notNull().default(0),
+  endedWhy: text('ended_why').notNull().default(''),
 });

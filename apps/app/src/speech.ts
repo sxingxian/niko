@@ -257,6 +257,18 @@ export function takeMapTag(reply: string): { text: string; map: { how: MapHow | 
   return to.length >= 2 ? { text, map: { how, to, ...(from && from.length >= 2 ? { from } : {}) } } : { text, map: null };
 }
 
+// ---- The browser
+/** The AI opens a website with [[browser:<address or search words>|<what to do>]] (what to do may be empty). */
+export function takeBrowserTag(reply: string): { text: string; browser: { to: string; task: string } | null } {
+  const m = /\[\[\s*browser\s*:\s*([^|\]]{1,300}?)\s*(?:\|\s*([^\]]{0,400}?)\s*)?\]\]/i.exec(reply);
+  const text = reply.replace(/\s*\[\[\s*browser\s*:[^\]]*\]\]\s*/gi, ' ').replace(/\s+/g, ' ').trim();
+  if (!m) return { text, browser: null };
+  const to = m[1]!.replace(/\s+/g, ' ').trim(), task = (m[2] ?? '').replace(/\s+/g, ' ').trim();
+  return to.length >= 2 ? { text, browser: { to, task } } : { text, browser: null };
+}
+/** "Close the browser", "hide the browser". */
+export const BROWSER_CLOSE = /^(please )?(close|hide|shut|exit)( the| this)? (browser|web ?page|website|site)( please)?$/;
+
 const MODE_WORDS: [Exclude<MapHow, 'place'>, string][] = [
   ['transit', 'trains?|mrt|lrt|subway|metro|buse?s?|public transport|public transit|transit|tube|underground|trams?'],
   ['walk', 'walking|walk|on foot|foot'],

@@ -114,3 +114,37 @@ await ok('each kind of refusal is worded for the admin', async () => {
   answer = () => new Response('', { status: 404 });
   await cfClose(conn, 'gone-session-1'); // a session that already closed is fine
 });
+
+// ---- Stage 1: the keeper, today's time, and the AI's browser tag
+const { keeperNext, countedSeconds, capFor } = await import('../apps/api/src/browser.ts');
+const { takeBrowserTag, BROWSER_CLOSE } = await import('../apps/app/src/speech.ts');
+
+await ok('the keeper closes the browser when the day’s time runs out or the device stops checking in', () => {
+  const t = 1_000_000;
+  assert.deepEqual(keeperNext({ capAt: t + 5000, lastSeen: t, idleMs: 90_000 }, t), { at: t + 5000 });
+  assert.deepEqual(keeperNext({ capAt: t + 5000, lastSeen: t, idleMs: 90_000 }, t + 5000), { end: 'limit' });
+  assert.deepEqual(keeperNext({ capAt: null, lastSeen: t, idleMs: 90_000 }, t + 10_000), { at: t + 90_000 });
+  assert.deepEqual(keeperNext({ capAt: null, lastSeen: t, idleMs: 90_000 }, t + 90_000), { end: 'idle' });
+  assert.deepEqual(keeperNext({ capAt: t + 200_000, lastSeen: t, idleMs: 90_000 }, t + 1000), { at: t + 90_000 });
+});
+
+await ok('time counts from the refill, and each kind of service has its own daily limit', () => {
+  const refill = 10_000_000;
+  assert.equal(countedSeconds(refill - 60_000, refill + 30_000, refill), 30);
+  assert.equal(countedSeconds(refill + 1000, refill + 61_000, refill), 60);
+  const a = { on: true, ownService: true, mins: 10, ownMins: 0, hostMins: 30 };
+  assert.equal(capFor('cloudflare', a), 600);
+  assert.equal(capFor('hosted', a), 1800);
+  assert.equal(capFor('own', a), 0);
+  assert.equal(capFor('server', a), 0);
+});
+
+await ok('the AI opens a website with [[browser:…|…]]; the tag is never spoken', () => {
+  assert.deepEqual(takeBrowserTag('Opening Pebble & Peak. [[browser:pebbleandpeak.com|sign me up]]'), { text: 'Opening Pebble & Peak.', browser: { to: 'pebbleandpeak.com', task: 'sign me up' } });
+  assert.deepEqual(takeBrowserTag('Here it is. [[browser:pebbleandpeak.com|]]').browser, { to: 'pebbleandpeak.com', task: '' });
+  assert.deepEqual(takeBrowserTag('Here. [[browser:best ramen in Tanjong Pagar]]').browser, { to: 'best ramen in Tanjong Pagar', task: '' });
+  assert.equal(takeBrowserTag('No tag here.').browser, null);
+  assert.ok(BROWSER_CLOSE.test('close the browser'));
+  assert.ok(BROWSER_CLOSE.test('please hide this website'));
+  assert.ok(!BROWSER_CLOSE.test('close the map'));
+});

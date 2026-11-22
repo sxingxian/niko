@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { startAuthentication } from '@simplewebauthn/browser';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { type KnHabit, type KnTarget, KN_HABITS, meetingNow, speakable, stripTags, aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, isTransportQuestion, voiceOrder, minutesText, MAP_MODES, type MapAskMode, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
+import { type KnHabit, type KnTarget, KN_HABITS, meetingNow, speakable, stripTags, toAddress, aiAllowed, mapsOn, hearOption, voiceOption, hearOrder, isWeatherQuestion, isTransportQuestion, voiceOrder, minutesText, MAP_MODES, type MapAskMode, type Brief, type EnginePrefs, type MapMode, type MapResult, type Me, type VoiceSource, type WeatherCard } from '@niko/shared';
 
 /** Where an answer came from in the person's files (from /chat). `ask`: the closest piece is only similar, so Home asks
  *  "Is this the one?". `taught`: the piece that leads is one the person taught. */
@@ -17,7 +17,8 @@ export type FollowUp = { for: string; question: string } & (
 /** A habit Niko noticed and is suggesting once (say yes or no, or tap). */
 export type HabitAsk = { id: string; habit: string; ask: string; device: boolean };
 import { enterFullscreen, exitFullscreen, fullscreenSupported } from './fullscreen';
-import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag, takeStepsTag } from './speech';
+import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag, takeStepsTag, takeBrowserTag, BROWSER_CLOSE } from './speech';
+import { BrowserSession } from './browser/session';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, startRing, transcribe, wavSamples, type Capture, type Ring } from './listen';
 import { trimSilence } from './voiceFeatures';
@@ -176,6 +177,11 @@ interface NikoState {
   closeMap: () => void;
   /** Opens or closes the steps of the route on the card. */
   setMapSteps: (open: boolean) => void;
+  /** Niko's browser on Home, when one is open (or opening). */
+  browser: BrowserSession | null;
+  /** Opens a site (an address or words to search for) in Niko's browser; `task` is what Niko does there. */
+  openBrowser: (to?: string, task?: string) => void;
+  closeBrowser: () => void;
   /** Asked for full screen by voice, which browsers allow only after a tap: Niko shows a button to tap. */
   fullscreenAsk: boolean;
   answerFullscreen: (go: boolean) => void;
@@ -355,6 +361,10 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const [pendingOpen, setPendingOpen] = useState<NikoState['pendingOpen']>(null);
   const [pictures, setPictures] = useState<PictureItem[]>([]);
   const [map, setMap] = useState<MapView | null>(null);
+  const [browserS, setBrowserS] = useState<BrowserSession | null>(null);
+  const browserRef = useRef<BrowserSession | null>(null);
+  /** What Niko was asked to do on the site (stage 2 acts on it). */
+  const browserTask = useRef<string>('');
   const [fullscreenAsk, setFullscreenAsk] = useState(false);
   const fsTimer = useRef<number | undefined>(undefined);
   const mapRef = useRef<MapView | null>(null);
@@ -800,6 +810,13 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 1400);
       return;
     }
+    // 3c. The browser: "close the browser".
+    if (browserRef.current && BROWSER_CLOSE.test(lower)) {
+      closeBrowserFn();
+      setMode('speaking'); setLabel('Heard'); setLine('Closed the browser.');
+      window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 1200);
+      return;
+    }
     // 4. Changing screen by voice: "switch to calendar", "can you open my notes", "back to home", "go back".
     const screen = screenFor(text);
     if (screen) { goTo(screen); return; }
@@ -837,7 +854,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // …or a picture ([[image:<prompt>]]), which is painted on Home while Niko says what it is making.
       const { text: noImage, image } = takeImageTag(noMove);
       // …or a map ([[map:transit|Changi Airport]]), which shows on Home.
-      const { text: tagless, map: wantMap } = takeMapTag(noImage);
+      const { text: noMap, map: wantMap } = takeMapTag(noImage);
+      // …or a website ([[browser:pebbleandpeak.com|sign me up]]), which opens in Niko's browser on Home.
+      const { text: tagless, browser: wantBrowser } = takeBrowserTag(noMap);
       // Any tag the app didn't act on (a misspelt or unknown one) is never shown or spoken.
       const answer = stripTags(tagless);
       if (last.current?.question === text) last.current.answer = answer;
@@ -845,7 +864,13 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       // Stopped while Niko was thinking (or a newer question came): keep the answer for "continue", don't speak it.
       if (mine !== askId.current) { if (last.current?.question === text) setResumable({ canContinue: true }); return; }
       setBrief(r.brief);
-      if (opts.silent && (wantMap || image || item || asked)) return;
+      if (opts.silent && (wantMap || image || item || asked || wantBrowser)) return;
+      if (wantBrowser) {
+        say(answer || 'Opening it.', 0);
+        if (here.current !== '/') navigate('/');
+        openBrowserFn(wantBrowser.to, wantBrowser.task);
+        return;
+      }
       if (wantMap && mapsOn(meRef.current?.aiOff ?? [])) {
         if (wantMap.to.toLowerCase() === 'same' && mapRef.current) { say(answer || 'Changing the route.', 0); if (wantMap.how !== 'any' && wantMap.how !== 'place') setMapModeFn(wantMap.how); return; }
         say(answer || 'Here’s the map.', 0);
@@ -973,7 +998,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     })();
   };
   const showMapFn = (to: string, from?: string, how: MapAskMode | 'any' = 'any') => {
-    picCtl.current?.abort(); setPictureId(null); setReply(null);
+    picCtl.current?.abort(); setPictureId(null); setReply(null); closeBrowserFn();
     const v: MapView = { id: ++mapSeq.current, to, from, mode: how === 'any' ? lastMode(meRef.current?.id) : how, auto: how === 'any', status: 'loading', times: {}, located: false };
     mapRef.current = v; setMap(v);
     loadMap(v);
@@ -997,11 +1022,30 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     loadMap(v);
   };
   const setMapStepsFn = (open: boolean) => { const m = mapRef.current; if (!m || !!m.steps === open) return; const next = { ...m, steps: open }; mapRef.current = next; setMap(next); };
+  /** Closes Niko's browser (and the browser on its service). */
+  const closeBrowserFn = () => { const b = browserRef.current; browserRef.current = null; browserTask.current = ''; setBrowserS(null); void b?.close(); };
+  const openBrowserFn = (to?: string, task?: string) => {
+    setReply(null); mapCtl.current?.abort(); mapRef.current = null; setMap(null); setPictureId(null);
+    const url = to ? toAddress(to) ?? `https://duckduckgo.com/?q=${encodeURIComponent(to)}` : undefined;
+    browserTask.current = task ?? '';
+    const cur = browserRef.current;
+    if (cur && cur.view.phase !== 'ended' && cur.view.phase !== 'failed') { if (url) void cur.go(url); return; }
+    const b = new BrowserSession();
+    browserRef.current = b; setBrowserS(b);
+    b.onEnded = (text) => { if (browserRef.current === b) say(text); };
+    void (async () => {
+      const st = await api<{ allowed: boolean; ready: boolean; blocked: string[] }>('/browser').catch(() => null);
+      if (browserRef.current !== b) return;
+      if (st) b.blocked = st.blocked;
+      try { await b.open(url); }
+      catch (e) { if (browserRef.current === b) say((e as Error).message); }
+    })();
+  };
   const closeMapFn = () => { mapCtl.current?.abort(); mapCtl.current = null; locationWait.current?.(false); locationWait.current = null; mapRef.current = null; setMap(null); };
 
   /** Paints a picture with the first image service that will (the server goes down the Engine screen's order). */
   const paintPicture = (prompt: string, shape: PictureItem['shape'], more = false, words?: string) => {
-    picCtl.current?.abort();
+    picCtl.current?.abort(); closeBrowserFn();
     const ctl = new AbortController();
     picCtl.current = ctl;
     const id = ++picSeq.current;
@@ -1465,7 +1509,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     pictures,
     picture: pictures.find((x) => x.id === pictureId) ?? null,
     paintPicture,
-    showPicture: (id: number) => { setReply(null); mapCtl.current?.abort(); mapRef.current = null; setMap(null); setPictureId(id); },
+    showPicture: (id: number) => { setReply(null); mapCtl.current?.abort(); mapRef.current = null; setMap(null); closeBrowserFn(); setPictureId(id); },
     closePicture: () => setPictureId(null),
     map, mapCountry,
     showMap: showMapFn,
@@ -1473,6 +1517,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     setMapCountry: setMapCountryFn,
     answerLocation: (allow: boolean) => { const w = locationWait.current; locationWait.current = null; w?.(allow); },
     closeMap: closeMapFn,
+    browser: browserS,
+    openBrowser: openBrowserFn,
+    closeBrowser: closeBrowserFn,
     setMapSteps: setMapStepsFn,
     fullscreenAsk,
     answerFullscreen: (go: boolean) => { setFullscreenAsk(false); window.clearTimeout(fsTimer.current); if (go) void enterFullscreen(); },
@@ -1485,7 +1532,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     unlock: unlockFn,
     unlockWithPasskey: unlockWithPasskeyFn,
     lockNow: lockNowFn,
-  }), [me, refreshMe, mode, label, line, reply, weather, knowledge, nextStep, quiet, habitAsk, brief, micOn, talking, followUntil, typingPaused, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, fullscreenAsk, locked, lockAsk, voiceChip, voiceNote, dataUsed, vmOn, vmHere, bannerLater]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [me, refreshMe, mode, label, line, reply, weather, knowledge, nextStep, quiet, habitAsk, brief, micOn, talking, followUntil, typingPaused, SR, toggleMic, stop, ask, say, voiceProblem, idle, pendingOpen, listenForFollowUp, resumable, pictures, pictureId, map, mapCountry, browserS, fullscreenAsk, locked, lockAsk, voiceChip, voiceNote, dataUsed, vmOn, vmHere, bannerLater]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
