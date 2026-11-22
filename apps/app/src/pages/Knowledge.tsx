@@ -168,6 +168,32 @@ export function Knowledge() {
     return [...counts.entries()].sort((a, b) => (a[0] === 'General' ? -1 : b[0] === 'General' ? 1 : a[0].localeCompare(b[0])));
   }, [files, extraCols]);
 
+  // Hooks stay above the early returns below: the number of them must not change between renders.
+  // The copy is looked at once when this page opens (a bullet added, changed or removed there becomes a note), and a copy
+  // that was never written, with no problem recorded (a write that was cut off), is written now instead of saying
+  // "Writing the copy…" for ever. If that fails the problem shows, with a button to try again.
+  const [lWriting, setLWriting] = useState(false);
+  const lLooked = useRef('');
+  const lTries = useRef(0);
+  const [notesKey, setNotesKey] = useState(0);
+  const writeCopy = useCallback(async () => {
+    setLWriting(true);
+    try {
+      const r = await api<{ copy?: { picked?: PickedUp | null } }>('/knowledge/learned/copy', { method: 'POST' });
+      const pk = r.copy?.picked;
+      if (pk && (pk.added || pk.removed) && Date.now() - Date.parse(pk.at) < 60_000) setNotesKey((n) => n + 1);
+    } catch (e) { setNote({ ok: false, text: (e as Error).message }); }
+    finally { setLWriting(false); await load(); }
+  }, [load]);
+  useEffect(() => {
+    const lCopy = st?.learnedCopy && st.learnedCopy.place === knLearnPlaceOf(st.prefs, st.access) ? st.learnedCopy : null;
+    if (!lCopy || lWriting || lMoving) return;
+    const open = lLooked.current !== lCopy.place;
+    const stuck = !lCopy.syncedAt && !lCopy.error && lTries.current < 4;
+    if (!open && !stuck) return;
+    if (open) { lLooked.current = lCopy.place; lTries.current = 0; } else lTries.current++;
+    void writeCopy();
+  }, [st, lWriting, lMoving, writeCopy]);
   if (!me) return null;
   const filesSub = 'Give Niko your own files. Niko keeps doing everything it does now, and when a file is a confident match it leads the answer, with what Niko knows, finds online and sees in your apps added after.';
   if (!st) return <SettingsPage title="Knowledge" sub={filesSub}><NoteLine note={note} /></SettingsPage>;
@@ -416,30 +442,6 @@ export function Knowledge() {
   const lShown: KnPlace = lPicked ?? learnNow;
   const notesPlace: Place = learnNow === 'device' ? 'device' : 'niko';
   const lCopy = st.learnedCopy && st.learnedCopy.place === learnNow ? st.learnedCopy : null;
-  // The copy is looked at once when this page opens (a bullet added, changed or removed there becomes a note), and a copy
-  // that was never written, with no problem recorded (a write that was cut off), is written now instead of saying
-  // "Writing the copy…" for ever. If that fails the problem shows, with a button to try again.
-  const [lWriting, setLWriting] = useState(false);
-  const lLooked = useRef('');
-  const lTries = useRef(0);
-  const [notesKey, setNotesKey] = useState(0);
-  const writeCopy = useCallback(async () => {
-    setLWriting(true);
-    try {
-      const r = await api<{ copy?: { picked?: PickedUp | null } }>('/knowledge/learned/copy', { method: 'POST' });
-      const pk = r.copy?.picked;
-      if (pk && (pk.added || pk.removed) && Date.now() - Date.parse(pk.at) < 60_000) setNotesKey((n) => n + 1);
-    } catch (e) { setNote({ ok: false, text: (e as Error).message }); }
-    finally { setLWriting(false); await load(); }
-  }, [load]);
-  useEffect(() => {
-    if (!lCopy || lWriting || lMoving) return;
-    const open = lLooked.current !== lCopy.place;
-    const stuck = !lCopy.syncedAt && !lCopy.error && lTries.current < 4;
-    if (!open && !stuck) return;
-    if (open) { lLooked.current = lCopy.place; lTries.current = 0; } else lTries.current++;
-    void writeCopy();
-  }, [lCopy, lWriting, lMoving, writeCopy]);
   const lStatus = (p: KnPlace) => p === learnNow ? 'In use' : p === 'niko' ? 'All your devices' : p === 'device' ? 'Stays on this computer'
     : lInfo(p)?.connected ? `${p === 's3' || p === 'obsidian' ? 'Set up' : 'Connected'}${lInfo(p)?.label ? ` · ${lInfo(p)!.label}` : ''}` : p === 's3' || p === 'obsidian' ? 'Set it up on the Files tab' : 'Not connected yet';
   const lCanMove = !isRemotePlace(lShown) || !!lInfo(lShown)?.connected;
