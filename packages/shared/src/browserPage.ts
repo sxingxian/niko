@@ -22,6 +22,8 @@ export interface PageElement {
   options?: string[];
   /** A password field (type password, or a password autocomplete). Its value is never read. */
   password?: boolean;
+  /** A sign-in code field (one-time code). Treated like a password: its value is never read. */
+  code?: boolean;
   /** A card field (card number, expiry, security code, name on card). Its value is never read. */
   card?: boolean;
   /** For password and card fields: something is in it (its length only is known, never its value). */
@@ -43,7 +45,7 @@ export interface PageOutline {
 
 export type BrowserActionKind = 'click' | 'type' | 'choose' | 'check' | 'scroll' | 'go' | 'wait' | 'done' | 'ask';
 export interface BrowserAction { do: BrowserActionKind; ref?: number; text?: string; url?: string }
-export type HandoffKind = 'password' | 'payment' | 'human';
+export type HandoffKind = 'password' | 'code' | 'payment' | 'human';
 export type GateKind = 'submit' | 'sign-in' | 'account' | 'terms' | 'download' | 'new-site';
 export interface Gate { kind: GateKind; title: string; details: [string, string][]; site: string; /** Signed by the server: the person's OK for exactly this action, once. */ token?: string }
 export interface StepAnswer {
@@ -70,7 +72,8 @@ export function cleanOutline(v: unknown): PageOutline | null {
   for (const e of Array.isArray(o.elements) ? o.elements.slice(0, MAX_ELEMENTS) : []) {
     if (!e || typeof e !== 'object' || !Number.isInteger(e.ref) || e.ref < 0 || e.ref > 100_000) continue;
     const type = str(e.type, 20).toLowerCase() || undefined;
-    const password = !!e.password || type === 'password';
+    const code = e.code === true;
+    const password = !!e.password || type === 'password' || code;
     const card = !!e.card;
     const el: PageElement = { ref: e.ref, kind: str(e.kind, 20).toLowerCase() || 'element', name: str(e.name, MAX_NAME) };
     if (type) el.type = type;
@@ -80,6 +83,7 @@ export function cleanOutline(v: unknown): PageOutline | null {
     if (typeof e.href === 'string' && e.href) el.href = str(e.href, 200);
     if (Array.isArray(e.options)) el.options = e.options.slice(0, 30).map((x: unknown) => str(x, 60)).filter(Boolean);
     if (password) el.password = true;
+    if (code) el.code = true;
     if (card) el.card = true;
     if ((password || card) && e.filled === true) el.filled = true;
     if (e.submit === true) el.submit = true;
@@ -137,7 +141,7 @@ export function judgeAction(p: PageOutline, a: BrowserAction | null, ctx: StepCo
   if (!a) return { action: null, handoff: null, gate: null };
   const el = a.ref !== undefined ? p.elements.find((e) => e.ref === a.ref) : undefined;
   if ((a.do === 'click' || a.do === 'type' || a.do === 'choose' || a.do === 'check') && !el) return { action: null, handoff: null, gate: null, refused: 'That isn’t on the page.' };
-  if (el?.password && !(el.filled && a.do === 'click')) return { action: null, handoff: { kind: 'password', ref: el.ref }, gate: null };
+  if (el?.password && !(el.filled && a.do === 'click')) return { action: null, handoff: { kind: el.code ? 'code' : 'password', ref: el.ref }, gate: null };
   if (el?.card) return { action: null, handoff: { kind: 'payment', ref: el.ref }, gate: null };
   const label = el ? `${el.name} ${el.value ?? ''}` : '';
   if (el && (a.do === 'click' || a.do === 'check') && (PAY_WORDS.test(label) || (p.frames.payment && el.submit))) return { action: null, handoff: { kind: 'payment', ref: el.ref }, gate: null };

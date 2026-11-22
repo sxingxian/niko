@@ -34,7 +34,7 @@ import { backgrounds } from './backgrounds';
 import { knowledge, syncNotes } from './knowledge';
 import { data } from './data';
 import { browser } from './browser';
-import { browserRuleFor } from '../browser';
+import { browserRuleFor, browserState } from '../browser';
 import { refreshUsed } from '../datasets';
 import { ownEmbedder } from '../ownEmbed';
 import { DataProblem, liveFor, noteLivePlace, openMeteoKey, runAction, sourcesFor, usableFor, weatherFor } from '../datasources';
@@ -90,7 +90,7 @@ app.get('/me', async (c) => {
   // Engine · Data sources is shown only when the plan includes a source or lets them add their own.
   const ds = hide ? null : await sourcesFor(c.get('db'), u).catch(() => null);
   const dataMe = ds && (ds.allowed.own || ds.offered.length || ds.mine.length) ? { data: true, ...(ds.allowed.own || ds.offered.some((x) => x.info.use === 'live') || ds.mine.some((x) => x.info.use === 'live') ? { live: true } : {}) } : {};
-  return c.json({ ...dataMe, id: u.id, email: hide ? '' : u.email, name: hide ? null : u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: off, glanceLimits: await limitsFor(c.get('db'), u), access: await accessFor(c.env, c.get('db'), u), lock: lockInfo(u), locked: !!c.get('locked'), design: await designFor(c.get('db'), u), background: await backgroundFor(c.get('db'), u), ...knowledgeMe });
+  return c.json({ ...dataMe, id: u.id, email: hide ? '' : u.email, name: hide ? null : u.name, role: u.role, appearance: u.appearance, engine: u.engine, permissions: u.permissions, weather, aiOff: off, glanceLimits: await limitsFor(c.get('db'), u), browser: (await browserState(c.get('db'), u)).allowance.on, access: await accessFor(c.env, c.get('db'), u), lock: lockInfo(u), locked: !!c.get('locked'), design: await designFor(c.get('db'), u), background: await backgroundFor(c.get('db'), u), ...knowledgeMe });
 });
 
 // Changing the password while signed in: the current one is needed. Every other session (other devices, the admin

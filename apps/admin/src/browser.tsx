@@ -1,7 +1,8 @@
 // Admin portal › Browser (as the Admin-Browser mockup): connecting Cloudflare Browser Run, and a test that opens a
 // browser and connects to it straight from this page with a short-lived pass, the way people's devices will.
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { api, ApiError, Cdp, settle } from '@niko/ui';
+import { api, ApiError, Cdp, settle, Switch } from '@niko/ui';
+import { BROWSER_BLOCKED_MAX, BROWSER_HISTORY_DAYS, BROWSER_MIN_STEPS, cleanSitePattern, type BrowserAccess, type BrowserDefaults } from '@niko/shared';
 
 type CfInfo = { connected: boolean; tail?: string; at?: string };
 const fmt = (d?: string) => (d ? new Date(d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '');
@@ -142,30 +143,164 @@ function BrowserTest({ guard }: { guard: (e: unknown) => void }) {
   </section>;
 }
 
+type BrowserUser = { id: string; name: string; email: string; role: string; browserAccess: BrowserAccess };
+/** − value +: steps through the allowed values. */
+function Stepper({ value, steps, label, show, onChange, disabled }: { value: number; steps: readonly number[]; label: string; show: (n: number) => string; onChange: (n: number) => void; disabled?: boolean }) {
+  const i = Math.max(0, steps.indexOf(value));
+  return <span className="br-step" role="group" aria-label={label}>
+    <button type="button" className="ib br-step-b" aria-label={`Less: ${label}`} disabled={disabled || i === 0} onClick={() => onChange(steps[i - 1]!)}>−</button>
+    <span className="br-step-v" aria-live="polite">{show(value)}</span>
+    <button type="button" className="ib br-step-b" aria-label={`More: ${label}`} disabled={disabled || i === steps.length - 1} onClick={() => onChange(steps[i + 1]!)}>+</button>
+  </span>;
+}
+const HOURS = Array.from({ length: 24 }, (_, h) => h);
+/** A UTC hour as this computer's local time ("8:00 am"). */
+const localHour = (utcHour: number) => { const d = new Date(); d.setUTCHours(utcHour, 0, 0, 0); return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); };
+
 export function BrowserAdmin({ guard }: { guard: (e: unknown) => void }) {
   const [cf, setCf] = useState<CfInfo | null>(null);
+  const [defaults, setDefaults] = useState<BrowserDefaults | null>(null);
+  const [people, setPeople] = useState<BrowserUser[]>([]);
+  const [sel, setSel] = useState('all');
+  const [draftAll, setDraftAll] = useState<BrowserDefaults | null>(null);
+  const [draftOne, setDraftOne] = useState<BrowserAccess>({});
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [find, setFind] = useState('');
+  const [site, setSite] = useState<string | null>(null);
   const [dialog, setDialog] = useState<'connect' | 'remove' | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const load = useCallback(async () => {
-    try { const r = await api<{ cloudflare: CfInfo }>('/admin/browser'); setCf(r.cloudflare); } catch (e) { guard(e); }
+    try { const r = await api<{ cloudflare: CfInfo; defaults: BrowserDefaults; users: BrowserUser[] }>('/admin/browser'); setCf(r.cloudflare); setDefaults(r.defaults); setPeople(r.users); } catch (e) { guard(e); }
   }, [guard]);
   useEffect(() => { void load(); }, [load]);
+  const person = people.find((p) => p.id === sel) ?? null;
+  useEffect(() => { if (defaults) { setDraftAll({ ...defaults }); setDraftOne(person ? { ...person.browserAccess } : {}); setDirty(false); setSite(null); } }, [sel, defaults, people]); // eslint-disable-line react-hooks/exhaustive-deps
   const close = useCallback(() => setDialog(null), []);
-  if (!cf) return null;
+  if (!cf || !defaults || !draftAll) return null;
+  type PK = keyof BrowserAccess;
+  const val = <K extends PK>(k: K): NonNullable<BrowserAccess[K]> => (person ? (draftOne[k] ?? defaults[k]) : draftAll[k]) as NonNullable<BrowserAccess[K]>;
+  const changed = (k: PK) => !!person && k in draftOne && draftOne[k] !== defaults[k];
+  const setP = (k: PK, v: boolean | number) => {
+    setNote(null); setDirty(true);
+    if (person) { const next = { ...draftOne }; if (v === defaults[k]) delete next[k]; else (next as Record<string, unknown>)[k] = v; setDraftOne(next); }
+    else setDraftAll({ ...draftAll, [k]: v });
+  };
+  const setAll = <K extends keyof BrowserDefaults>(k: K, v: BrowserDefaults[K]) => { setNote(null); setDirty(true); setDraftAll({ ...draftAll, [k]: v }); };
+  const reset = (k: PK) => { const next = { ...draftOne }; delete next[k]; setDraftOne(next); setDirty(true); };
+  const count = (p: BrowserUser) => Object.keys(p.browserAccess).length;
+  const mark = (k: PK) => changed(k) ? <><span className="chg">Changed</span><button className="lnk" onClick={() => reset(k)}>Reset</button></> : null;
+  const save = async () => {
+    setBusy(true); setNote(null);
+    try {
+      if (person) await api(`/admin/browser/users/${person.id}`, { method: 'PUT', body: { access: draftOne } });
+      else {
+        const r = await api<{ forgot: number }>('/admin/browser/default', { method: 'PUT', body: { defaults: draftAll } });
+        if (r.forgot) setNote({ ok: true, text: `Saved. ${r.forgot} kept ${r.forgot === 1 ? 'sign-in was' : 'sign-ins were'} deleted.` });
+      }
+      await load();
+      setNote((n) => n ?? { ok: true, text: person ? `Saved for ${person.name || person.email}.` : 'Saved. It applies to everyone without their own changes within a minute.' });
+    } catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
+  };
+  const addSite = () => {
+    const clean = cleanSitePattern(site ?? '');
+    if (!clean) { setNote({ ok: false, text: 'Enter a site, such as bank.com or *.bank.com.' }); return; }
+    if (!draftAll.blocked.includes(clean)) setAll('blocked', [...draftAll.blocked, clean]);
+    setSite(null);
+  };
+  const on = val('on');
+  const first = person ? (person.name || person.email).split(' ')[0] : '';
+  const q = find.trim().toLowerCase();
+  const minSub = person ? (changed('mins') ? `Default is ${defaults.mins} min` : 'Per person. Counted only while a browser is open.') : 'Per person. Counted only while a browser is open.';
   return <>
-    <header><h1>Browser</h1><p className="sub" style={{ fontSize: 15, maxWidth: 880 }}>Who can let Niko use a browser, which browser services run it, and how much time each person gets.</p></header>
+    <header><h1>Browser</h1><p className="sub" style={{ fontSize: 15, maxWidth: 880 }}>Who can let Niko use a browser, which browser services run it, and how much time each person gets. Set the default for everyone, then change it for anyone who needs something different.</p></header>
     {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
-    <section className="g card" aria-label="Browser services, in order">
-      <span className="br-shead"><span className="k" style={{ color: '#fff' }}>Browser services, in order</span><span className="sub small">Niko uses the first one that works and moves to the next when one runs out or can’t be reached.</span></span>
-      <div className="br-svc">
-        <span className="br-num">1</span>
-        <span className="br-svc-txt"><span className="br-svc-name">Cloudflare Browser Run <span className="pill">Built in</span></span>
-          <span className="sub">{cf.connected ? `Account …${cf.tail} · token saved ${fmt(cf.at)}. Free plan: 10 minutes a day for the whole account, 3 browsers at once.` : 'Not connected. Connect your Cloudflare account to use the built-in browser.'}</span></span>
-        {cf.connected ? <><span className="pill-ok">Connected</span><button className="bt" onClick={() => setDialog('connect')}>Change</button><button className="lnk" onClick={() => setDialog('remove')}>Remove</button></>
-          : <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={() => setDialog('connect')}>Connect</button>}
+    <div className="ai-grid">
+      <section className="g card ai-people" aria-label="Applies to">
+        <span className="k" style={{ padding: '0 6px' }}>Applies to</span>
+        <input className="in lim-find" type="search" aria-label="Find a person" placeholder="Find a person" value={find} onChange={(e) => setFind(e.target.value)} />
+        <div className="ai-list">
+          {[{ id: 'all', name: 'Everyone', sub: 'The default for all accounts', badge: 'Default', tone: '' }, ...people.filter((p) => !q || `${p.name} ${p.email}`.toLowerCase().includes(q)).map((p) => ({ id: p.id, name: p.name || p.email, sub: p.email, badge: p.role === 'admin' ? 'Admin' : count(p) ? `${count(p)} ${count(p) === 1 ? 'change' : 'changes'}` : 'Default', tone: p.role === 'admin' ? ' is-free' : count(p) ? ' is-chg' : '' }))].map((p) => (
+            <button key={p.id} className="who-row" aria-pressed={p.id === sel} onClick={() => { if (dirty && !window.confirm('Leave without saving these changes?')) return; setSel(p.id); setNote(null); }}>
+              <span className="who-txt"><b>{p.name}</b><span>{p.sub}</span></span><span className={'lim-badge' + p.tone}>{p.badge}</span>
+            </button>
+          ))}
+          {q && !people.some((p) => `${p.name} ${p.email}`.toLowerCase().includes(q)) && <p className="sub small" style={{ padding: '6px' }}>No one matches “{find.trim()}”.</p>}
+        </div>
+        <p className="sub" style={{ fontSize: 12, padding: '0 6px' }}>People see limits as Niko’s own (“Niko can’t open this site”), never as set by someone else.</p>
+      </section>
+      <div className="br-col">
+      <section className="g card ai-options" aria-label="Browser settings">
+        <div className="ai-head">
+          <div><h2>{person ? person.name || person.email : 'Everyone · default'}</h2>
+            <p className="sub" style={{ fontSize: 13 }}>{person ? (person.role === 'admin' ? 'Admins always have the browser; the time limit still applies.' : Object.keys(draftOne).length ? 'Different from the default where marked. Everything else follows the default.' : `Follows the default. Change anything to change it for ${first} only.`) : 'What every account gets, unless it is changed for that person.'}</p></div>
+          <div className="ai-acts">
+            {person && <button className="bt" onClick={() => { setDraftOne({}); setDirty(true); }} disabled={!Object.keys(draftOne).length}>Reset to default</button>}
+            <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={() => void save()} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+        <div className="ai-row">
+          <span className="ai-txt"><span>Browser</span><span className="sub">{changed('on') ? `Default is ${defaults.on ? 'on' : 'off'}` : 'Off: Niko can still look things up, but can’t open websites or act on them.'}</span></span>
+          {mark('on')}
+          <Switch on={on} onChange={(v) => setP('on', v)} label="Browser" disabled={person?.role === 'admin'} />
+        </div>
+
+        {!person && <div className="br-group">
+          <span className="br-shead"><span className="k" style={{ color: '#fff' }}>Browser services, in order</span><span className="sub small">Niko uses the first one that works and moves to the next when one runs out or can’t be reached.</span></span>
+          <div className="br-svc">
+            <span className="br-num">1</span>
+            <span className="br-svc-txt"><span className="br-svc-name">Cloudflare Browser Run <span className="pill">Built in</span></span>
+              <span className="sub">{cf.connected ? `Account …${cf.tail} · token saved ${fmt(cf.at)}. Free plan: 10 minutes a day for the whole account, 3 browsers at once.` : 'Not connected. Connect your Cloudflare account to use the built-in browser.'}</span></span>
+            {cf.connected ? <><span className="pill-ok">Connected</span><button className="bt" onClick={() => setDialog('connect')}>Change</button><button className="lnk" onClick={() => setDialog('remove')}>Remove</button></>
+              : <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={() => setDialog('connect')}>Connect</button>}
+          </div>
+        </div>}
+
+        <div className={'br-group' + (on ? '' : ' dim')}>
+          <span className="br-shead"><span className="k" style={{ color: '#fff' }}>Limits</span><span className="sub small">Counted only while a browser is open.</span></span>
+          <div className="ai-row">
+            <span className="ai-txt"><span>Built-in browser time a day</span><span className="sub">{minSub}</span></span>
+            {mark('mins')}
+            <Stepper value={val('mins')} steps={BROWSER_MIN_STEPS} label="Built-in browser time a day" show={(n) => `${n} min`} onChange={(n) => setP('mins', n)} disabled={!on} />
+          </div>
+          {!person && <div className="ai-row">
+            <span className="ai-txt"><span>Minutes refill at</span><span className="sub">Your time ({Intl.DateTimeFormat().resolvedOptions().timeZone}), {String(draftAll.refillHourUtc).padStart(2, '0')}:00 UTC. Cloudflare’s free minutes reset at midnight UTC.</span></span>
+            <Stepper value={draftAll.refillHourUtc} steps={HOURS} label="Minutes refill at" show={localHour} onChange={(n) => setAll('refillHourUtc', n)} />
+          </div>}
+        </div>
+
+        {!person && <div className="br-group">
+          <span className="br-shead"><span className="k" style={{ color: '#fff' }}>Sign-ins and history</span></span>
+          <div className="ai-row">
+            <span className="ai-txt"><span>Allow “Stay signed in”</span><span className="sub">{draftAll.staySignedIn ? 'People can keep a site’s sign-in, encrypted, for their account only.' : 'Off: every sign-in is forgotten when the browser closes.'}{defaults.staySignedIn && !draftAll.staySignedIn ? ' Saving deletes every kept sign-in.' : ''}</span></span>
+            <Switch on={draftAll.staySignedIn} onChange={(v) => setAll('staySignedIn', v)} label="Allow Stay signed in" />
+          </div>
+          <div className="ai-row">
+            <span className="ai-txt"><span>Longest activity history</span><span className="sub">People can choose less. Sites and steps only.</span></span>
+            <select className="in br-sel" aria-label="Longest activity history" value={draftAll.historyDays} onChange={(e) => setAll('historyDays', Number(e.target.value) as BrowserDefaults['historyDays'])}>
+              {BROWSER_HISTORY_DAYS.map((d) => <option key={d} value={d}>{d} days</option>)}
+            </select>
+          </div>
+        </div>}
+
+        {!person && <div className="br-group">
+          <span className="br-shead"><span className="k" style={{ color: '#fff' }}>Sites Niko can’t open</span><span className="sub small">Applies to everyone. A site also covers its subdomains; use * for every page on a site.</span></span>
+          <div className="br-sites">
+            {draftAll.blocked.map((b) => <span key={b} className="br-site">{b}<button type="button" className="br-site-x" aria-label={`Unblock ${b}`} onClick={() => setAll('blocked', draftAll.blocked.filter((x) => x !== b))}>✕</button></span>)}
+            {site === null
+              ? <button type="button" className="bt br-add" onClick={() => setSite('')} disabled={draftAll.blocked.length >= BROWSER_BLOCKED_MAX}>+ Add site</button>
+              : <form className="br-addf" onSubmit={(e) => { e.preventDefault(); addSite(); }}>
+                  <input className="in" autoFocus value={site} maxLength={300} placeholder="bank.com" aria-label="Site Niko can’t open" onChange={(e) => setSite(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') setSite(null); }} />
+                  <button className="pri" style={{ height: 44, fontSize: 14 }} disabled={!site.trim()}>Add</button><button type="button" className="bt" onClick={() => setSite(null)}>Cancel</button>
+                </form>}
+          </div>
+        </div>}
+        {person && <p className="sub small br-foot">Browser services, the refill time, “Stay signed in”, history and blocked sites apply to everyone. Choose Everyone to change them.</p>}
+        <p className="sub small br-foot">Every change is written to the audit log. Turning the browser off for someone closes a browser they have open.</p>
+      </section>
+      {cf.connected && !person && <BrowserTest guard={guard} />}
       </div>
-    </section>
-    {cf.connected && <BrowserTest guard={guard} />}
+    </div>
     {dialog === 'connect' && <ConnectCloudflare replacing={cf.connected} onClose={close} onDone={(i) => { setCf(i); setDialog(null); setNote({ ok: true, text: 'Cloudflare Browser Run is connected. The token is saved encrypted and won’t be shown again.' }); }} />}
     {dialog === 'remove' && <RemoveCloudflare onClose={close} onDone={(i) => { setCf(i); setDialog(null); setNote({ ok: true, text: 'The Cloudflare connection was removed.' }); }} />}
   </>;

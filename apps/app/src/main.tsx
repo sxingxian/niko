@@ -17,6 +17,7 @@ import { DataSources } from './pages/DataSources';
 import { LiveInfo } from './pages/LiveInfo';
 import { Weather } from './pages/WeatherSettings';
 import { Knowledge } from './pages/Knowledge';
+import { BrowserSettings } from './pages/BrowserSettings';
 
 function Private({ children }: { children: ReactNode }) {
   const { me, locked } = useNiko();
@@ -125,6 +126,7 @@ function Screens() {
           <Route path="/engine/data" element={<DataSources />} />
           <Route path="/engine/live" element={<LiveInfo />} />
           <Route path="/knowledge" element={<Knowledge />} />
+          <Route path="/browser" element={<BrowserOnly />} />
           <Route path="/account" element={<Account />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
@@ -136,6 +138,13 @@ function Screens() {
   );
 }
 
+
+/** Settings › Browser shows only for accounts whose plan includes Niko's browser (others go to Appearance, with no word why). */
+function BrowserOnly() {
+  const { me } = useNiko();
+  if (!me) return null;
+  return me.browser ? <BrowserSettings /> : <Navigate to="/appearance" replace />;
+}
 
 function App() {
   return (

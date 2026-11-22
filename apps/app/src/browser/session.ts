@@ -2,7 +2,7 @@
 // pass; from then on the live picture, taps and typing go straight between this device and the browser service.
 // The server only hears from this device every 30 seconds (so it can close the browser when time runs out).
 import { api, ApiError, Cdp } from '@niko/ui';
-import { hostBlocked, openableHost, toAddress, type BrowserAction, type Gate, type HandoffKind } from '@niko/shared';
+import { hostBlocked, openableHost, siteOf, toAddress, type BrowserAction, type Gate, type HandoffKind } from '@niko/shared';
 
 export type BrowserPhase = 'opening' | 'live' | 'reconnecting' | 'ended' | 'failed';
 export type BrowserDriver = 'you' | 'niko';
@@ -12,7 +12,9 @@ export interface BrowserMinutes { used: number; cap: number; left: number | null
 export type BrowserNeed =
   | { kind: 'handoff'; handoff: HandoffKind; ref?: number; say: string; site: string; rect?: { x: number; y: number; w: number; h: number } }
   | { kind: 'gate'; gate: Gate; action: BrowserAction; say: string }
-  | { kind: 'ask'; say: string };
+  | { kind: 'ask'; say: string }
+  /** A sign-in code found in the Inbox: entered only if the person says so. */
+  | { kind: 'code'; code: string; from: string; ref: number; site: string; rect?: { x: number; y: number; w: number; h: number } };
 export interface BrowserView {
   phase: BrowserPhase;
   id: string | null;
@@ -38,6 +40,8 @@ export interface BrowserView {
   need: BrowserNeed | null;
   /** When the page last tried to give Niko orders (shown as "Ignored"). */
   ignoredAt: number | null;
+  /** Niko finished a task: "Stay signed in" (when they signed in there), Keep browsing or Close browser. */
+  finished: { site: string; signedIn: boolean; stay: boolean } | null;
 }
 
 const BEAT_MS = 30_000;
@@ -68,7 +72,7 @@ const KEYS: Record<string, [string, number]> = {
 const modsOf = (e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
 
 export class BrowserSession {
-  private v: BrowserView = { phase: 'opening', id: null, tabs: [], active: null, url: '', title: '', canBack: false, canForward: false, loading: true, driver: 'you', notice: null, error: null, minutes: null, idleAsk: false, cursor: null, page: { width: 800, height: 520 }, need: null, ignoredAt: null };
+  private v: BrowserView = { phase: 'opening', id: null, tabs: [], active: null, url: '', title: '', canBack: false, canForward: false, loading: true, driver: 'you', notice: null, error: null, minutes: null, idleAsk: false, cursor: null, page: { width: 800, height: 520 }, need: null, ignoredAt: null, finished: null };
   private subs = new Set<() => void>();
   private cdp: Cdp | null = null;
   private canvas: HTMLCanvasElement | null = null;
@@ -82,6 +86,14 @@ export class BrowserSession {
   private resizeTimer = 0;
   /** Sites the admin blocked (from the server): the panel refuses them before the page even asks. */
   blocked: string[] = [];
+  /** "Stay signed in" is allowed, and "Offer sign-in codes from my Inbox" is on (from the server). */
+  staySignedIn = false;
+  inboxCodes = false;
+  /** Sites signed in to in this browser (the person typed a password there). */
+  private signedIn = new Set<string>();
+  /** Sites whose kept sign-in was already put back in this browser. */
+  private restored = new Set<string>();
+  private topFrame = '';
   /** Called when the browser ends, with why (for Niko to say). */
   onEnded: ((text: string) => void) | null = null;
 
@@ -151,6 +163,28 @@ export class BrowserSession {
   setDriver(d: BrowserDriver) { this.lastInput = Date.now(); this.set({ driver: d, ...(d === 'you' ? { cursor: null } : {}) }); }
   setCursor(p: { x: number; y: number } | null) { this.set({ cursor: p }); }
   setNeed(n: BrowserNeed | null) { this.set({ need: n }); }
+  /** The person typed a password on this site (so "Stay signed in" can be offered when Niko finishes). */
+  markSignedIn(site: string) { if (site) this.signedIn.add(site); }
+  /** Niko finished: show the closing bar. */
+  finish(site: string) { this.set({ finished: site ? { site, signedIn: this.staySignedIn && this.signedIn.has(site), stay: false } : null }); }
+  keepBrowsing() { this.set({ finished: null }); }
+  /** "Stay signed in on this site": keeps (or forgets) the site's sign-in, sealed on Niko's server for this person only. */
+  async setStay(on: boolean): Promise<void> {
+    const f = this.v.finished, cdp = this.cdp;
+    if (!f || !this.v.id) return;
+    this.set({ finished: { ...f, stay: on } });
+    try {
+      if (!on) { await api(`/browser/signins/${encodeURIComponent(f.site)}`, { method: 'DELETE' }); return; }
+      if (!cdp) throw new Error('The browser isn’t connected.');
+      const all = await cdp.send<{ cookies: any[] }>('Network.getAllCookies').catch(() => cdp.send<{ cookies: any[] }>('Storage.getCookies'));
+      const mine = (all.cookies ?? []).filter((c) => siteOf(String(c.domain ?? '').replace(/^\./, '')) === f.site)
+        .map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, secure: c.secure, httpOnly: c.httpOnly, sameSite: c.sameSite, expires: c.session ? undefined : c.expires }));
+      await api(`/browser/${this.v.id}/signin`, { body: { site: f.site, cookies: mine } });
+    } catch (e) {
+      this.set({ finished: { ...f, stay: false } });
+      this.say(e instanceof ApiError ? e.message : 'That sign-in couldn’t be kept.');
+    }
+  }
   flagIgnored() { this.set({ ignoredAt: Date.now() }); }
 
   // ---------------------------------------------------------------- the connection to one tab
@@ -169,9 +203,26 @@ export class BrowserSession {
     // Page loads are checked before they are sent, and files the page sends back as downloads come to this device.
     await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Request' }, { urlPattern: '*', resourceType: 'Document', requestStage: 'Response' }] }).catch(() => undefined);
     await this.applySize(cdp);
+    const tree = await cdp.send<{ frameTree?: { frame?: { id?: string; url?: string } } }>('Page.getFrameTree').catch(() => null);
+    this.topFrame = tree?.frameTree?.frame?.id ?? '';
     this.reconnects = 0;
     this.set({ phase: 'live', active: targetId });
     await this.refreshPlace(cdp);
+    // The first page opened before this device was connected: put back a kept sign-in and load it again.
+    const first = openableHost(tree?.frameTree?.frame?.url ?? '');
+    if (first && await this.restoreFor(cdp, first)) await cdp.send('Page.reload').catch(() => undefined);
+  }
+
+  /** Puts back the sign-in the person kept for a site ("Stay signed in"), once per browser. True when there was one. */
+  private async restoreFor(cdp: Cdp, host: string): Promise<boolean> {
+    const site = siteOf(host);
+    if (!this.staySignedIn || !this.v.id || this.restored.has(site)) return false;
+    this.restored.add(site);
+    const r = await api<{ cookies: unknown[] }>(`/browser/${this.v.id}/signin-for`, { body: { site } }).catch(() => ({ cookies: [] as unknown[] }));
+    if (!r.cookies.length) return false;
+    await cdp.send('Network.setCookies', { cookies: r.cookies }).catch(() => undefined);
+    this.signedIn.add(site);
+    return true;
   }
 
   private async reconnect() {
@@ -210,6 +261,12 @@ export class BrowserSession {
     const url = String(p.request?.url ?? '');
     const host = url === 'about:blank' ? 'about' : openableHost(url);
     const ok = url === 'about:blank' || (!!host && !hostBlocked(host, this.blocked));
+    if (ok && host !== 'about' && host && (!this.topFrame || p.frameId === this.topFrame) && await this.restoreFor(cdp, host)) {
+      // The kept sign-in is back: load the page again so it's sent with it.
+      await cdp.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'Aborted' }).catch(() => undefined);
+      await cdp.send('Page.navigate', { url }).catch(() => undefined);
+      return;
+    }
     if (ok) { await cdp.send('Fetch.continueRequest', { requestId: p.requestId }).catch(() => undefined); return; }
     await cdp.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' }).catch(() => undefined);
     this.say(host ? 'Niko can’t open this site.' : 'That isn’t a website Niko can open.');
