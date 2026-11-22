@@ -498,3 +498,24 @@ body { background: #07090d; }
 /* Saving that deletes something (Admin · Knowledge, Kept in Niko off for what Niko learns). */
 .pri.danger { background: #ff9b9b; border-color: #ff9b9b; color: #1a0505; }
 .kn-krow-t .sub.warn-t { color: #ffd38a; }
+
+/* ---- Browser (Admin-Browser mockup) */
+.br-shead { display: flex; flex-direction: column; gap: 3px; }
+.br-svc { display: flex; align-items: center; gap: 14px; min-height: 64px; border-top: 1px solid rgba(255,255,255,.1); padding: 8px 0; flex-wrap: wrap; }
+.br-num { width: 28px; height: 28px; border-radius: 50%; border: 1px solid rgba(255,255,255,.3); display: flex; align-items: center; justify-content: center; font: 500 12px 'JetBrains Mono', monospace; color: #b9c2cf; flex: none; }
+.br-svc-txt { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 3px; }
+.br-svc-name { display: flex; align-items: center; gap: 8px; font-size: 15px; flex-wrap: wrap; }
+.pill-ok { font: 500 11px 'JetBrains Mono', monospace; letter-spacing: .12em; text-transform: uppercase; color: #a8f0c6; border: 1px solid rgba(168,240,198,.5); border-radius: 999px; padding: 3px 8px; white-space: nowrap; flex: none; }
+.br-dialog { width: min(620px, 100%); }
+.br-dhead { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.br-dhead h2 { margin: 0; }
+.br-x { min-width: 0; width: 40px; padding: 0; }
+.br-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; line-height: 1.45; }
+.br-form { display: flex; flex-direction: column; gap: 14px; }
+.br-ms { display: block; font: 500 12px 'JetBrains Mono', monospace; opacity: .85; margin-top: 6px; }
+.br-shot { width: 100%; max-width: 640px; border-radius: 16px; border: 1px solid rgba(255,255,255,.18); }
+.br-checks { display: flex; flex-direction: column; gap: 10px; }
+.br-check { display: flex; align-items: center; gap: 14px; border-top: 1px solid rgba(255,255,255,.1); padding-top: 10px; }
+.br-check img, .br-noshot { width: 120px; height: 75px; object-fit: cover; object-position: top; border-radius: 10px; border: 1px solid rgba(255,255,255,.15); background: rgba(255,255,255,.04); flex: none; }
+.br-ctxt { display: flex; flex-direction: column; gap: 3px; }
+.br-ctxt .warn { color: #ffb86b; }
