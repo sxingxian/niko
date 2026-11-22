@@ -73,10 +73,34 @@ export interface KeeperStart { sessionId: string; userId: string; service: Brows
 function stub(env: Env, userId: string) {
   return env.BROWSER_KEEPER.get(env.BROWSER_KEEPER.idFromName(userId));
 }
-export async function keeper<T = any>(env: Env, userId: string, path: '/start' | '/beat' | '/end' | '/state' | '/once', body: unknown = {}): Promise<T> {
+export class KeeperError extends Error {
+  constructor(readonly status: number, readonly data: { error?: string; code?: string }) { super(data.error ?? `keeper answered ${status}`); }
+}
+export async function keeper<T = any>(env: Env, userId: string, path: '/start' | '/beat' | '/end' | '/state' | '/once' | '/tab' | '/close-tab', body: unknown = {}): Promise<T> {
   const res = await stub(env, userId).fetch(`https://keeper${path}`, { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } });
-  if (!res.ok) throw new Error(`keeper ${path} answered ${res.status}`);
+  if (!res.ok) throw new KeeperError(res.status, ((await res.json().catch(() => ({}))) ?? {}) as { error?: string; code?: string });
   return res.json() as Promise<T>;
+}
+/** Passes a device's WebSocket for one tab of a relayed browser to the person's keeper. */
+export function keeperRelay(env: Env, userId: string, sessionId: string, targetId: string, req: Request): Promise<Response> {
+  const u = new URL('https://keeper/relay');
+  u.searchParams.set('session', sessionId); u.searchParams.set('target', targetId);
+  return stub(env, userId).fetch(u.toString(), { headers: { Upgrade: 'websocket' }, signal: req.signal });
+}
+
+// A pass to a relayed tab: like Cloudflare's, good for starting a connection for a minute. It names the browser and the
+// tab, and the Worker checks it (and that the person is signed in) before passing the connection to the keeper.
+const RELAY_MS = 60_000;
+export async function relayPass(secret: string, sessionId: string, targetId: string, now = Date.now()): Promise<string> {
+  const exp = now + RELAY_MS;
+  return `${exp}.${await hmacSha256Hex(secret, `relay|${sessionId}|${targetId}|${exp}`)}`;
+}
+export async function checkRelayPass(secret: string, sessionId: string, targetId: string, pass: string, now = Date.now()): Promise<boolean> {
+  const m = /^(\d{13})\.([0-9a-f]{64})$/.exec(pass);
+  if (!m) return false;
+  const exp = Number(m[1]);
+  if (exp < now || exp > now + RELAY_MS + 5000) return false;
+  return safeEqual(await hmacSha256Hex(secret, `relay|${sessionId}|${targetId}|${exp}`), m[2]!);
 }
 
 /** What the keeper does next: close the browser (and why), or check again at `at`. */

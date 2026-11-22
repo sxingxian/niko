@@ -4,12 +4,13 @@
 import { and, eq, isNull, lt } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { browserSessions, browserSignins, users } from '@niko/db';
-import { browserFor, cleanBrowserAccess, cleanBrowserDefaults, isCfAccountId, isCfToken, openableHost } from '@niko/shared';
+import { browserFor, cleanBrowserAccess, keyParamFor, cleanBrowserDefaults, isCfAccountId, isCfToken, openableHost } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { totpStep, unseal } from '../lib/crypto';
 import { audit, clientIp, requireAdmin } from '../lib/session';
 import { clearThrottle, lockedMessage, recordFailure, throttleMinutes } from '../lib/throttle';
 import { browserDefaults, keeper, saveBrowserDefaults } from '../browser';
+import { accountConn, accountServices, cleanServiceInput, removeService, saveService, ServiceError, testService, type ServiceKind } from '../browserServices';
 import { cfClose, CfError, cfConnection, cfInfo, cfOpen, cfPass, cfTab, cfTest, forgetCf, saveCf } from '../browserCf';
 
 export const adminBrowser = new Hono<AppEnv>();
@@ -38,7 +39,7 @@ export async function confirmAdminCode(c: Ctx, code: unknown): Promise<Response 
 adminBrowser.get('/', async (c) => {
   const db = c.get('db');
   const people = await db.select({ id: users.id, name: users.name, email: users.email, role: users.role, browserAccess: users.browserAccess }).from(users).orderBy(users.createdAt);
-  return c.json({ cloudflare: await cfInfo(db), defaults: await browserDefaults(db, true), users: people.map((p) => ({ ...p, browserAccess: cleanBrowserAccess(p.browserAccess) })) });
+  return c.json({ cloudflare: await cfInfo(db), services: await accountServices(db), defaults: await browserDefaults(db, true), users: people.map((p) => ({ ...p, browserAccess: cleanBrowserAccess(p.browserAccess) })) });
 });
 
 /** Closes the open browsers of people who may no longer use one (after the default or their own setting changed). */
@@ -150,5 +151,43 @@ adminBrowser.post('/test/close', async (c) => {
   const b = await c.req.json<{ sessionId?: string }>().catch(() => ({} as Record<string, string>));
   const conn = await cfConnection(c.env, c.get('db'));
   if (conn && /^[A-Za-z0-9-]{8,80}$/.test(String(b.sessionId ?? ''))) await cfClose(conn, String(b.sessionId)).catch(() => undefined);
+  return c.json({ ok: true });
+});
+
+// ---- The account's own browser server and hosted service (Browser services 2 and 3). Saved with a fresh code from
+// the admin's authenticator app, tested first; the key is sealed and never shown again.
+adminBrowser.put('/service', async (c) => {
+  const b = await c.req.json<{ kind?: string; name?: string; url?: string; key?: string; code?: string }>().catch(() => ({} as Record<string, string>));
+  const v = cleanServiceInput(b, false);
+  if ('error' in v) return c.json(v, 400);
+  const bad = await confirmAdminCode(c, b.code);
+  if (bad) return bad;
+  const probe = new URL(v.url);
+  if (v.key) probe.searchParams.set(keyParamFor(v.url), v.key);
+  if (probe.protocol === 'https:') probe.protocol = 'wss:';
+  let product: string;
+  try { product = await testService(probe.toString()); }
+  catch (e) {
+    await audit(c, 'admin.browser.service.test_failed', { kind: v.kind, why: e instanceof ServiceError ? e.code : 'other' });
+    return c.json({ error: e instanceof ServiceError ? `${e.message} Check the address${v.key ? ' and key' : ''}.` : 'The browser service couldn’t be tested.', field: e instanceof ServiceError && e.code === 'refused' ? 'key' : 'url' }, 400);
+  }
+  const info = await saveService(c.env, c.get('db'), null, v);
+  await audit(c, 'admin.browser.service.saved', { kind: v.kind, host: info.host, product });
+  return c.json({ service: info, product });
+});
+adminBrowser.post('/service/:kind/test', async (c) => {
+  const kind = c.req.param('kind') === 'hosted' ? 'hosted' : 'server';
+  const conn = await accountConn(c.env, c.get('db'), kind);
+  if (!conn) return c.json({ error: 'Set it up first.' }, 404);
+  try { return c.json({ ok: true, product: await testService(conn.wsUrl) }); }
+  catch (e) { return c.json({ error: e instanceof ServiceError ? e.message : 'The browser service couldn’t be tested.' }, 400); }
+});
+adminBrowser.delete('/service/:kind', async (c) => {
+  const kind: ServiceKind = c.req.param('kind') === 'hosted' ? 'hosted' : 'server';
+  const b = await c.req.json<{ code?: string }>().catch(() => ({} as Record<string, string>));
+  const bad = await confirmAdminCode(c, b.code);
+  if (bad) return bad;
+  await removeService(c.get('db'), null, kind);
+  await audit(c, 'admin.browser.service.removed', { kind });
   return c.json({ ok: true });
 });

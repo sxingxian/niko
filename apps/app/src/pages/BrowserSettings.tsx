@@ -1,13 +1,14 @@
 // Settings › Browser, as the Settings-Browser mockup draws it: whether Niko may use a browser, what it always asks
 // first, the browser services it uses, passwords and sign-in codes, sites kept signed in, "What Niko did" and the
 // day's browser time.
-import { useCallback, useEffect, useState } from 'react';
-import { api, Meter, Segmented, SettingRow, Switch } from '@niko/ui';
-import { BROWSER_HISTORY_DAYS, type BrowserPrefs } from '@niko/shared';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { api, ApiError, Meter, Segmented, SettingRow, Switch } from '@niko/ui';
+import { Sheet } from './Designs';
+import { BROWSER_HISTORY_DAYS, type BrowserPrefs, type BrowserServiceInfo } from '@niko/shared';
 import { SettingsPage, NoteLine } from './Settings';
 
 interface Minutes { used: number; cap: number; left: number | null; refillAt: string }
-interface BrowserInfo { offered: boolean; allowed: boolean; ready: boolean; prefs: BrowserPrefs; minutes: Minutes; staySignedIn: boolean; maxHistoryDays: number }
+interface BrowserInfo { offered: boolean; allowed: boolean; ready: boolean; prefs: BrowserPrefs; minutes: Minutes; staySignedIn: boolean; maxHistoryDays: number; ownService: boolean; own: BrowserServiceInfo | null; ownMinutes: number }
 interface Signin { site: string; createdAt: string; usedAt: string | null; uses: number }
 interface Step { at: string; site: string; kind: string; text: string }
 interface Visit { id: string; site: string; at: string; seconds: number; steps: Step[] }
@@ -48,6 +49,7 @@ export function BrowserSettings() {
   const [open, setOpen] = useState<string | null>(null);
   const [note, setNote] = useState<Note>(null);
   const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState(false);
 
   const load = useCallback(async () => {
     const [i, s, a] = await Promise.all([
@@ -59,8 +61,18 @@ export function BrowserSettings() {
   }, []);
   useEffect(() => { void load().catch((e) => setNote({ ok: false, text: (e as Error).message })); }, [load]);
 
+  const testOwn = async () => {
+    setBusy(true); setNote(null);
+    try { const r = await api<{ product: string }>('/browser/service/test', { method: 'POST' }); setNote({ ok: true, text: `Your browser service works (${r.product}).` }); }
+    catch (e) { setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
+  };
+  const removeOwn = async () => {
+    setBusy(true); setNote(null);
+    try { await api('/browser/service', { method: 'DELETE' }); setInfo((x) => (x ? { ...x, own: null } : x)); setNote({ ok: true, text: 'Your browser service was removed.' }); }
+    catch (e) { setNote({ ok: false, text: (e as Error).message }); } finally { setBusy(false); }
+  };
   const save = async (p: Partial<BrowserPrefs>) => {
-    if (!info) return;
+  if (!info) return;
     const before = info;
     setInfo({ ...info, prefs: { ...info.prefs, ...p }, allowed: info.offered && (p.on ?? info.prefs.on) });
     try { const r = await api<{ prefs: BrowserPrefs }>('/browser/prefs', { method: 'PUT', body: { prefs: p } }); setInfo((x) => (x ? { ...x, prefs: r.prefs } : x)); }
@@ -113,8 +125,16 @@ export function BrowserSettings() {
 
           {on && <section className="g kn-card" aria-label="Browser services">
             <span className="bs-head"><span className="k bs-k">Browser services</span><span className="srow-hint">Niko uses the first one that works, and moves to the next if it can’t be reached.</span></span>
+            {info.ownService && info.own && <div className="bs-svc">
+              <span className="bs-svc-l"><span className="bs-num">1</span><span className="srow-t"><span className="srow-name">{info.own.name}</span><span className="srow-hint">{info.own.host} · {info.own.kind === 'hosted' ? 'hosted service' : 'your own server'}</span></span></span>
+              <span className="bs-svc-b"><span className="bs-fix">{info.ownMinutes ? `${info.ownMinutes} min a day` : 'No daily limit'}</span><button type="button" className="bt md" disabled={busy} onClick={() => void testOwn()}>Test</button><button type="button" className="bt md danger" disabled={busy} onClick={() => void removeOwn()}>Remove</button></span>
+            </div>}
+            {info.ownService && !info.own && <div className="bs-svc">
+              <span className="bs-svc-l"><span className="bs-num add" aria-hidden="true">+</span><span className="srow-t"><span className="srow-name">Add your own browser service</span><span className="srow-hint">Your own server, such as a NAS, or a hosted browser service you have a key for. Time on it doesn’t use your daily minutes.</span></span></span>
+              <button type="button" className="bt md" onClick={() => setAdding(true)}>Add</button>
+            </div>}
             <div className="bs-svc">
-              <span className="bs-svc-l"><span className="bs-num">1</span><span className="srow-t"><span className="srow-name">Niko’s browser</span><span className="srow-hint">{builtSub}</span></span></span>
+              <span className="bs-svc-l"><span className="bs-num">{info.ownService && info.own ? 2 : 1}</span><span className="srow-t"><span className="srow-name">Niko’s browser</span><span className="srow-hint">{builtSub}</span></span></span>
               <span className="bs-fix">Built in</span>
             </div>
           </section>}
@@ -174,6 +194,37 @@ export function BrowserSettings() {
           <p>Your password manager can’t fill Niko’s browser. Type or paste it at the hand-off.</p>
         </aside>
       </div>
+      {adding && <AddService onClose={() => setAdding(false)} onAdded={(own) => { setInfo((x) => (x ? { ...x, own } : x)); setAdding(false); setNote({ ok: true, text: `${own.name} is added and works. Niko uses it first.` }); }} />}
     </SettingsPage>
+  );
+}
+
+/** "Add a browser service" (as the mockup's sheet): your own server, or a hosted service with your key. */
+function AddService({ onClose, onAdded }: { onClose: () => void; onAdded: (own: BrowserServiceInfo) => void }) {
+  const [kind, setKind] = useState<'server' | 'hosted'>('server');
+  const [name, setName] = useState(''), [url, setUrl] = useState(''), [key, setKey] = useState('');
+  const [busy, setBusy] = useState(false), [err, setErr] = useState<{ text: string; field?: string } | null>(null);
+  const submit = async (e: FormEvent) => {
+    e.preventDefault(); setBusy(true); setErr(null);
+    try { const r = await api<{ own: BrowserServiceInfo }>('/browser/service', { method: 'PUT', body: { kind, name, url, key } }); setKey(''); onAdded(r.own); }
+    catch (x) { setErr({ text: (x as Error).message, field: x instanceof ApiError ? x.data?.field : undefined }); }
+    finally { setBusy(false); }
+  };
+  const server = kind === 'server';
+  return (
+    <Sheet onClose={onClose} labelledBy="bs-add-h">
+      <form className="kn-dlg" onSubmit={submit}>
+        <b id="bs-add-h" className="kn-dlg-h">Add a browser service</b>
+        <Segmented value={kind} options={[['server', 'Your own server'], ['hosted', 'Hosted service']] as const} label="Kind of service" onChange={(k) => { setKind(k); setErr(null); }} />
+        <label className="fld"><span className="k">Name</span><input className="in" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} placeholder={server ? 'Home NAS' : 'Browserless'} autoComplete="off" /></label>
+        <label className="fld"><span className="k">{server ? 'Address' : 'Service address'}</span><input className="in" value={url} onChange={(e) => setUrl(e.target.value)} placeholder={server ? 'wss://browser.example.com' : 'wss://production-sfo.browserless.io'} inputMode="url" autoComplete="off" autoCapitalize="off" spellCheck={false} aria-invalid={err?.field === 'url'} required /></label>
+        <label className="fld"><span className="k">{server ? 'Token (if it has one)' : 'API key'}</span><input className="in" type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={server ? 'The server’s token' : 'Paste the key'} autoComplete="off" spellCheck={false} aria-invalid={err?.field === 'key'} required={!server} /></label>
+        <span className="srow-hint">{server
+          ? 'It must be reachable over HTTPS, for example through a Cloudflare Tunnel. Home network addresses can’t be used. The token is stored encrypted.'
+          : 'The company running this service can see the pages Niko opens on it, including anything you type in a hand-off, such as a password. The key is stored encrypted.'}</span>
+        {err && <p className="err" role="alert">{err.text}</p>}
+        <div className="kn-dlg-b"><button type="button" className="bt" onClick={onClose}>Cancel</button><button className="pri md" disabled={busy || !url.trim() || (!server && !key.trim())}>{busy ? 'Testing…' : 'Test and add'}</button></div>
+      </form>
+    </Sheet>
   );
 }

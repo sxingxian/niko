@@ -184,3 +184,14 @@ export function cleanServiceUrl(raw: unknown): { url: string } | { problem: stri
   u.hash = '';
   return { url: u.toString() };
 }
+
+/** Where a key goes in a service's address: Browserless takes ?token=, Steel ?apiKey=, others ?token= by default. */
+export function keyParamFor(url: string): string {
+  try { const h = new URL(url).hostname; if (/(^|\.)steel\.dev$/.test(h)) return 'apiKey'; } catch { /* default */ }
+  return 'token';
+}
+/** A browser service as shown in the admin portal and Settings (never its key). */
+export interface BrowserServiceInfo { id: string; kind: 'server' | 'hosted'; name: string; host: string; hasKey: boolean; at: string; testedAt: string | null }
+/** The order Niko tries services in: the person's own, then the built-in browser, the account's own server, the hosted service. */
+export const BROWSER_SERVICE_ORDER: readonly BrowserServiceKind[] = ['own', 'cloudflare', 'server', 'hosted'];
+export const isServiceKey = (v: unknown): v is string => typeof v === 'string' && v.length >= 8 && v.length <= 400 && /^[\x21-\x7e]+$/.test(v);

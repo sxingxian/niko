@@ -424,3 +424,16 @@ export const browserSignins = pgTable('browser_signins', {
   usedAt: ts('used_at'),
   uses: integer('uses').notNull().default(0),
 }, (t) => [primaryKey({ columns: [t.userId, t.site] })]);
+
+/** A browser service besides Cloudflare: the account's own server or hosted service (userId null), or a person's own. */
+export const browserServices = pgTable('browser_services', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull(),
+  name: text('name').notNull().default(''),
+  url: text('url').notNull(),
+  keyEnc: text('key_enc'),
+  keyParam: text('key_param').notNull().default('token'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  testedAt: ts('tested_at'),
+});

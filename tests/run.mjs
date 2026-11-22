@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const here = fileURLToPath(new URL('.', import.meta.url));
 let failed = false;
-for (const name of (process.env.ONLY ? process.env.ONLY.split(',') : ['mail', 'ical', 'voice', 'brains', 'weather', 'voices', 'lists', 'hears', 'images', 'maps', 'speechtext', 'provided', 'listen', 'rest', 'lock', 'access', 'glance', 'billing', 'designs', 'backgrounds', 'payments', 'knowledgedb', 'knowledge', 'knowledgesplit', 'knowledgeanswer', 'knowledgedevice', 'learned', 'situations', 'voicematch', 'datasources', 'ownsearch', 'knowledgeplaces', 'knowledgestorage', 'knowledgeobsidian', 'knowledgesecurity', 'learnplace', 'transitnear', 'browser', 'browserpage'])) {
+for (const name of (process.env.ONLY ? process.env.ONLY.split(',') : ['mail', 'ical', 'voice', 'brains', 'weather', 'voices', 'lists', 'hears', 'images', 'maps', 'speechtext', 'provided', 'listen', 'rest', 'lock', 'access', 'glance', 'billing', 'designs', 'backgrounds', 'payments', 'knowledgedb', 'knowledge', 'knowledgesplit', 'knowledgeanswer', 'knowledgedevice', 'learned', 'situations', 'voicematch', 'datasources', 'ownsearch', 'knowledgeplaces', 'knowledgestorage', 'knowledgeobsidian', 'knowledgesecurity', 'learnplace', 'transitnear', 'browser', 'browserpage', 'browserrelay'])) {
   const out = `${here}.out-${name}.mjs`;
   await build({
     entryPoints: [`${here}${name}.test.mjs`], bundle: true, platform: 'node', format: 'esm', outfile: out, logLevel: 'error',

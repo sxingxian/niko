@@ -2,7 +2,7 @@
 // browser and connects to it straight from this page with a short-lived pass, the way people's devices will.
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, ApiError, Cdp, settle, Switch } from '@niko/ui';
-import { BROWSER_BLOCKED_MAX, BROWSER_HISTORY_DAYS, BROWSER_MIN_STEPS, cleanSitePattern, type BrowserAccess, type BrowserDefaults } from '@niko/shared';
+import { BROWSER_AT_ONCE_MAX, BROWSER_BLOCKED_MAX, BROWSER_HISTORY_DAYS, BROWSER_MIN_STEPS, BROWSER_OPEN_STEPS, cleanSitePattern, type BrowserAccess, type BrowserDefaults, type BrowserServiceInfo } from '@niko/shared';
 
 type CfInfo = { connected: boolean; tail?: string; at?: string };
 const fmt = (d?: string) => (d ? new Date(d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '');
@@ -61,6 +61,61 @@ function RemoveCloudflare({ onClose, onDone }: { onClose: () => void; onDone: (i
   return <div className="scrim" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
     <div ref={box} className="dialog" role="dialog" aria-modal="true" aria-labelledby="cfrh">
       <div><h2 id="cfrh">Remove the Cloudflare connection?</h2><p className="sub">Niko’s built-in browser stops working for everyone until it is connected again. Browsers open right now close within a few minutes.</p></div>
+      <form onSubmit={submit} className="br-form">
+        <label className="fld"><span className="k">Your sign-in code</span><input className="in" value={code} onChange={(e) => setCode(e.target.value.replace(/[^\d ]/g, ''))} inputMode="numeric" autoComplete="one-time-code" required /></label>
+        {err && <p className="err" role="alert">{err}</p>}
+        <div className="dialog-acts"><button type="button" className="bt" onClick={onClose}>Cancel</button><button className="pri danger" style={{ height: 44, fontSize: 14 }} disabled={busy}>{busy ? 'Removing…' : 'Remove'}</button></div>
+      </form>
+    </div>
+  </div>;
+}
+
+// ---- The account's own browser server, and a hosted service with a key
+type SvcInfo = BrowserServiceInfo;
+const SVC_COPY = {
+  server: { title: 'Your own browser server', add: 'Set up your own browser server', addr: 'Address', addrPh: 'wss://browser.example.com', key: 'Token (if it has one)', keyPh: 'The server’s token',
+    note: 'A browser server you run, such as Browserless or Chrome on a NAS. It must be reachable over HTTPS, for example through a Cloudflare Tunnel. Home network addresses can’t be used. Each person gets their own browser on it, with its own sign-ins.' },
+  hosted: { title: 'Browser service with a key', add: 'Add a browser service with a key', addr: 'Service address', addrPh: 'wss://production-sfo.browserless.io', key: 'API key', keyPh: 'Paste the key',
+    note: 'A hosted service you have an account with, usually billed by the hour. The company running it can see the pages Niko opens on it, including anything typed in a hand-off, such as a password.' },
+} as const;
+function ServiceDialog({ kind, replacing, onClose, onDone }: { kind: 'server' | 'hosted'; replacing: boolean; onClose: () => void; onDone: (s: SvcInfo, product: string) => void }) {
+  const box = useDialog(onClose);
+  const t = SVC_COPY[kind];
+  const [name, setName] = useState(''), [url, setUrl] = useState(''), [key, setKey] = useState(''), [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false), [err, setErr] = useState<{ text: string; field?: string } | null>(null);
+  const submit = async (e: FormEvent) => {
+    e.preventDefault(); setBusy(true); setErr(null);
+    try { const r = await api<{ service: SvcInfo; product: string }>('/admin/browser/service', { method: 'PUT', body: { kind, name, url, key, code } }); setKey(''); onDone(r.service, r.product); }
+    catch (x) { setErr({ text: (x as Error).message, field: x instanceof ApiError ? x.data?.field : undefined }); setCode(''); }
+    finally { setBusy(false); }
+  };
+  return <div className="scrim" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div ref={box} className="dialog br-dialog" role="dialog" aria-modal="true" aria-labelledby="svch">
+      <div className="br-dhead"><h2 id="svch">{replacing ? `Replace ${t.title.toLowerCase()}` : t.add}</h2><button className="bt br-x" onClick={onClose} aria-label="Close">✕</button></div>
+      <p className="sub">{t.note}</p>
+      <form onSubmit={submit} className="br-form">
+        <label className="fld"><span className="k">Name (optional)</span><input className="in" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} placeholder={kind === 'server' ? 'Home NAS' : 'Browserless'} autoComplete="off" /></label>
+        <label className="fld"><span className="k">{t.addr}</span><input className="in" value={url} onChange={(e) => setUrl(e.target.value)} placeholder={t.addrPh} inputMode="url" autoComplete="off" spellCheck={false} aria-invalid={err?.field === 'url'} required /></label>
+        <label className="fld"><span className="k">{t.key}</span><input className="in" type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={t.keyPh} autoComplete="off" spellCheck={false} aria-invalid={err?.field === 'key'} required={kind === 'hosted'} /></label>
+        <label className="fld"><span className="k">Your sign-in code</span><input className="in" value={code} onChange={(e) => setCode(e.target.value.replace(/[^\d ]/g, ''))} inputMode="numeric" autoComplete="one-time-code" placeholder="From your authenticator app" aria-invalid={err?.field === 'code'} required /></label>
+        <p className="sub small">Saved encrypted on Niko’s server, never sent to anyone’s device, and never shown again. Niko connects to it for people and relays the live picture. Niko tests it before saving.</p>
+        {err && <p className="err" role="alert">{err.text}</p>}
+        <div className="dialog-acts"><button type="button" className="bt" onClick={onClose}>Cancel</button><button className="pri" style={{ height: 44, fontSize: 14 }} disabled={busy}>{busy ? 'Testing…' : 'Test and save'}</button></div>
+      </form>
+    </div>
+  </div>;
+}
+function RemoveService({ kind, onClose, onDone }: { kind: 'server' | 'hosted'; onClose: () => void; onDone: () => void }) {
+  const box = useDialog(onClose);
+  const [code, setCode] = useState(''), [busy, setBusy] = useState(false), [err, setErr] = useState('');
+  const submit = async (e: FormEvent) => {
+    e.preventDefault(); setBusy(true); setErr('');
+    try { await api(`/admin/browser/service/${kind}`, { method: 'DELETE', body: { code } }); onDone(); }
+    catch (x) { setErr((x as Error).message); setCode(''); } finally { setBusy(false); }
+  };
+  return <div className="scrim" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div ref={box} className="dialog" role="dialog" aria-modal="true" aria-labelledby="svrh">
+      <div><h2 id="svrh">Remove {SVC_COPY[kind].title.toLowerCase()}?</h2><p className="sub">Niko stops using it. Browsers open on it right now keep working until they close.</p></div>
       <form onSubmit={submit} className="br-form">
         <label className="fld"><span className="k">Your sign-in code</span><input className="in" value={code} onChange={(e) => setCode(e.target.value.replace(/[^\d ]/g, ''))} inputMode="numeric" autoComplete="one-time-code" required /></label>
         {err && <p className="err" role="alert">{err}</p>}
@@ -159,6 +214,9 @@ const localHour = (utcHour: number) => { const d = new Date(); d.setUTCHours(utc
 
 export function BrowserAdmin({ guard }: { guard: (e: unknown) => void }) {
   const [cf, setCf] = useState<CfInfo | null>(null);
+  const [services, setServices] = useState<SvcInfo[]>([]);
+  const [svcDialog, setSvcDialog] = useState<{ kind: 'server' | 'hosted'; remove?: boolean } | null>(null);
+  const [testing, setTesting] = useState<string | null>(null);
   const [defaults, setDefaults] = useState<BrowserDefaults | null>(null);
   const [people, setPeople] = useState<BrowserUser[]>([]);
   const [sel, setSel] = useState('all');
@@ -171,7 +229,7 @@ export function BrowserAdmin({ guard }: { guard: (e: unknown) => void }) {
   const [dialog, setDialog] = useState<'connect' | 'remove' | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const load = useCallback(async () => {
-    try { const r = await api<{ cloudflare: CfInfo; defaults: BrowserDefaults; users: BrowserUser[] }>('/admin/browser'); setCf(r.cloudflare); setDefaults(r.defaults); setPeople(r.users); } catch (e) { guard(e); }
+    try { const r = await api<{ cloudflare: CfInfo; services: SvcInfo[]; defaults: BrowserDefaults; users: BrowserUser[] }>('/admin/browser'); setCf(r.cloudflare); setServices(r.services); setDefaults(r.defaults); setPeople(r.users); } catch (e) { guard(e); }
   }, [guard]);
   useEffect(() => { void load(); }, [load]);
   const person = people.find((p) => p.id === sel) ?? null;
@@ -209,6 +267,13 @@ export function BrowserAdmin({ guard }: { guard: (e: unknown) => void }) {
     setSite(null);
   };
   const on = val('on');
+  const svc = (k: 'server' | 'hosted') => services.find((x) => x.kind === k) ?? null;
+  const test = async (k: 'server' | 'hosted') => {
+    setTesting(k); setNote(null);
+    try { const r = await api<{ product: string }>(`/admin/browser/service/${k}/test`, { method: 'POST' }); setNote({ ok: true, text: `${SVC_COPY[k].title} works: ${r.product}.` }); }
+    catch (e) { if (e instanceof ApiError && e.status === 401) guard(e); else setNote({ ok: false, text: (e as Error).message }); } finally { setTesting(null); }
+  };
+  const openLabel = (n: number) => (n === 0 ? 'No limit' : `${n} min`);
   const first = person ? (person.name || person.email).split(' ')[0] : '';
   const q = find.trim().toLowerCase();
   const minSub = person ? (changed('mins') ? `Default is ${defaults.mins} min` : 'Per person. Counted only while a browser is open.') : 'Per person. Counted only while a browser is open.';
@@ -244,6 +309,11 @@ export function BrowserAdmin({ guard }: { guard: (e: unknown) => void }) {
           {mark('on')}
           <Switch on={on} onChange={(v) => setP('on', v)} label="Browser" disabled={person?.role === 'admin'} />
         </div>
+        <div className={'ai-row' + (on ? '' : ' dim')}>
+          <span className="ai-txt"><span>May add their own browser service</span><span className="sub">{changed('ownService') ? `Default is ${defaults.ownService ? 'on' : 'off'}` : 'Their own server or a hosted service with their key, in Settings › Browser. Used before the services below.'}</span></span>
+          {mark('ownService')}
+          <Switch on={val('ownService')} onChange={(v) => setP('ownService', v)} label="May add their own browser service" disabled={!on} />
+        </div>
 
         {!person && <div className="br-group">
           <span className="br-shead"><span className="k" style={{ color: '#fff' }}>Browser services, in order</span><span className="sub small">Niko uses the first one that works and moves to the next when one runs out or can’t be reached.</span></span>
@@ -254,6 +324,17 @@ export function BrowserAdmin({ guard }: { guard: (e: unknown) => void }) {
             {cf.connected ? <><span className="pill-ok">Connected</span><button className="bt" onClick={() => setDialog('connect')}>Change</button><button className="lnk" onClick={() => setDialog('remove')}>Remove</button></>
               : <button className="pri" style={{ height: 44, fontSize: 14 }} onClick={() => setDialog('connect')}>Connect</button>}
           </div>
+          {(['server', 'hosted'] as const).map((k, i) => {
+            const x = svc(k);
+            return <div key={k} className="br-svc">
+              <span className="br-num">{i + 2}</span>
+              <span className="br-svc-txt"><span className="br-svc-name">{x ? x.name : SVC_COPY[k].title}</span>
+                <span className="sub">{x ? `${x.host} · ${x.hasKey ? 'key saved' : 'no token'} ${fmt(x.at)}. ${k === 'server' ? `No daily limit; at most ${draftAll.atOnce} at once.` : draftAll.hostMins ? `${draftAll.hostMins} min a day per person.` : 'No daily limit.'}`
+                  : k === 'server' ? 'A browser server you run, such as on a NAS. No daily limit.' : 'A hosted service you have an account with, usually billed by the hour. Not added.'}</span></span>
+              {x ? <><span className="pill-ok">Saved</span><button className="bt" onClick={() => void test(k)} disabled={testing === k}>{testing === k ? 'Testing…' : 'Test'}</button><button className="bt" onClick={() => setSvcDialog({ kind: k })}>Change</button><button className="lnk" onClick={() => setSvcDialog({ kind: k, remove: true })}>Remove</button></>
+                : <button className="bt" onClick={() => setSvcDialog({ kind: k })}>{k === 'server' ? 'Set up' : 'Add'}</button>}
+            </div>;
+          })}
         </div>}
 
         <div className={'br-group' + (on ? '' : ' dim')}>
@@ -262,6 +343,20 @@ export function BrowserAdmin({ guard }: { guard: (e: unknown) => void }) {
             <span className="ai-txt"><span>Built-in browser time a day</span><span className="sub">{minSub}</span></span>
             {mark('mins')}
             <Stepper value={val('mins')} steps={BROWSER_MIN_STEPS} label="Built-in browser time a day" show={(n) => `${n} min`} onChange={(n) => setP('mins', n)} disabled={!on} />
+          </div>
+          {!person && <div className="ai-row">
+            <span className="ai-txt"><span>Your own server: browsers at once</span><span className="sub">Applies to everyone. No daily limit; this protects the server. When it’s full, Niko uses the next service.</span></span>
+            <Stepper value={draftAll.atOnce} steps={Array.from({ length: BROWSER_AT_ONCE_MAX }, (_, n) => n + 1)} label="Your own server: browsers at once" show={(n) => String(n)} onChange={(n) => setAll('atOnce', n)} disabled={!on} />
+          </div>}
+          <div className="ai-row">
+            <span className="ai-txt"><span>Hosted service time a day</span><span className="sub">{changed('hostMins') ? `Default is ${openLabel(defaults.hostMins)}` : 'No limit unless you set one. That service bills you for the time used.'}</span></span>
+            {mark('hostMins')}
+            <Stepper value={val('hostMins')} steps={BROWSER_OPEN_STEPS} label="Hosted service time a day" show={openLabel} onChange={(n) => setP('hostMins', n)} disabled={!on} />
+          </div>
+          <div className="ai-row">
+            <span className="ai-txt"><span>Time on their own service</span><span className="sub">{changed('ownMins') ? `Default is ${openLabel(defaults.ownMins)}` : 'Doesn’t use the built-in minutes. The live picture still runs through Niko’s server, so limit it only if that needs one.'}</span></span>
+            {mark('ownMins')}
+            <Stepper value={val('ownMins')} steps={BROWSER_OPEN_STEPS} label="Time on their own service" show={openLabel} onChange={(n) => setP('ownMins', n)} disabled={!on || !val('ownService')} />
           </div>
           {!person && <div className="ai-row">
             <span className="ai-txt"><span>Minutes refill at</span><span className="sub">Your time ({Intl.DateTimeFormat().resolvedOptions().timeZone}), {String(draftAll.refillHourUtc).padStart(2, '0')}:00 UTC. Cloudflare’s free minutes reset at midnight UTC.</span></span>
@@ -295,13 +390,15 @@ export function BrowserAdmin({ guard }: { guard: (e: unknown) => void }) {
                 </form>}
           </div>
         </div>}
-        {person && <p className="sub small br-foot">Browser services, the refill time, “Stay signed in”, history and blocked sites apply to everyone. Choose Everyone to change them.</p>}
+        {person && <p className="sub small br-foot">Browser services, browsers at once on your own server, the refill time, “Stay signed in”, history and blocked sites apply to everyone. Choose Everyone to change them.</p>}
         <p className="sub small br-foot">Every change is written to the audit log. Turning the browser off for someone closes a browser they have open.</p>
       </section>
       {cf.connected && !person && <BrowserTest guard={guard} />}
       </div>
     </div>
     {dialog === 'connect' && <ConnectCloudflare replacing={cf.connected} onClose={close} onDone={(i) => { setCf(i); setDialog(null); setNote({ ok: true, text: 'Cloudflare Browser Run is connected. The token is saved encrypted and won’t be shown again.' }); }} />}
+    {svcDialog && !svcDialog.remove && <ServiceDialog kind={svcDialog.kind} replacing={!!svc(svcDialog.kind)} onClose={() => setSvcDialog(null)} onDone={(x, product) => { setServices((all) => [...all.filter((y) => y.kind !== x.kind), x]); setSvcDialog(null); setNote({ ok: true, text: `${SVC_COPY[x.kind].title} is saved and works (${product}). The ${x.kind === 'server' ? 'token' : 'key'} won’t be shown again.` }); }} />}
+    {svcDialog?.remove && <RemoveService kind={svcDialog.kind} onClose={() => setSvcDialog(null)} onDone={() => { const k = svcDialog.kind; setServices((all) => all.filter((y) => y.kind !== k)); setSvcDialog(null); setNote({ ok: true, text: `${SVC_COPY[k].title} was removed.` }); }} />}
     {dialog === 'remove' && <RemoveCloudflare onClose={close} onDone={(i) => { setCf(i); setDialog(null); setNote({ ok: true, text: 'The Cloudflare connection was removed.' }); }} />}
   </>;
 }
