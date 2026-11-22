@@ -43,6 +43,7 @@ export const OUTLINE_JS = `(() => {
     if (tag === 'input') e.type = type || 'text';
     if (password) e.password = true;
     if (card) e.card = true;
+    if ((password || card) && el.value && el.value.length > 0) e.filled = true;
     if (!password && !card && (tag === 'input' || tag === 'textarea') && type !== 'checkbox' && type !== 'radio' && el.value) e.value = clip(el.value, 120);
     if (tag === 'select') { e.options = Array.from(el.options).slice(0, 30).map((o) => clip(o.text, 60)); if (!card) e.value = clip(el.options[el.selectedIndex]?.text || '', 60); }
     if (type === 'checkbox' || type === 'radio' || role === 'checkbox' || role === 'radio' || role === 'switch') e.checked = el.checked ?? el.getAttribute('aria-checked') === 'true';

@@ -3,10 +3,11 @@
 // it and hands the person's device a short-lived pass; the live picture and their taps go straight to the service.
 // A Durable Object per person (BrowserKeeper) closes the browser when the day's minutes run out or the device goes.
 import { and, desc, eq, gte, isNull, or, sql } from 'drizzle-orm';
-import { appSettings, browserSessions, type Db } from '@niko/db';
+import { appSettings, browserActivity, browserSessions, type Db } from '@niko/db';
 import { browserFor, cleanBrowserDefaults, cleanBrowserPrefs, DEFAULT_BROWSER_PREFS, lastRefill, nextRefill, type BrowserAllowance, type BrowserDefaults, type BrowserPrefs, type BrowserServiceKind } from '@niko/shared';
 import type { Env } from './env';
 import { cfInfo } from './browserCf';
+import { hmacSha256Hex, randomToken, safeEqual } from './lib/crypto';
 
 export const BROWSER_DEFAULT_KEY = 'browser-defaults';
 // The default is read at most every 30 seconds per Worker instance; a change shows everywhere within that time.
@@ -71,7 +72,7 @@ export interface KeeperStart { sessionId: string; userId: string; service: Brows
 function stub(env: Env, userId: string) {
   return env.BROWSER_KEEPER.get(env.BROWSER_KEEPER.idFromName(userId));
 }
-export async function keeper<T = any>(env: Env, userId: string, path: '/start' | '/beat' | '/end' | '/state', body: unknown = {}): Promise<T> {
+export async function keeper<T = any>(env: Env, userId: string, path: '/start' | '/beat' | '/end' | '/state' | '/once', body: unknown = {}): Promise<T> {
   const res = await stub(env, userId).fetch(`https://keeper${path}`, { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } });
   if (!res.ok) throw new Error(`keeper ${path} answered ${res.status}`);
   return res.json() as Promise<T>;
@@ -92,4 +93,36 @@ export async function browserRuleFor(env: Env, db: Db, user: BUser): Promise<str
   const s = await browserState(db, user);
   if (!s.allowance.on || !s.prefs.on) return '';
   return (await cfInfo(db)).connected ? `\n${BROWSER_RULE}` : '';
+}
+
+// ---------------------------------------------------------------- what Niko did
+export type ActivityKind = 'opened' | 'handoff' | 'ok' | 'declined' | 'done' | 'download' | 'stopped';
+/** One line of "What Niko did". `text` is a short description chosen by the server: never typed text or page contents. */
+export async function logActivity(db: Db, userId: string, sessionId: string | null, site: string, kind: ActivityKind, text: string): Promise<void> {
+  await db.insert(browserActivity).values({ userId, sessionId, site: site.slice(0, 200), kind, text: text.slice(0, 200) }).catch((e) => console.warn(`browser activity not kept: ${String((e as Error)?.message ?? e).slice(0, 120)}`));
+}
+/** Removes "What Niko did" older than each person chose (and never older than the admin's longest), from the daily job. */
+export async function trimActivity(db: Db): Promise<void> {
+  const d = await browserDefaults(db, true);
+  await db.execute(sql`delete from browser_activity a using users u where a.user_id = u.id
+    and a.at < now() - make_interval(days => least(${d.historyDays}::int, coalesce(case when (u.browser_prefs->>'keepDays') ~ '^[0-9]+$' then (u.browser_prefs->>'keepDays')::int end, 30)))`);
+}
+
+// ---------------------------------------------------------------- the person's OK, once
+/** The person's OK for one held action is a token signed by the server: it covers exactly that action on that browser,
+ * for two minutes, once (the keeper remembers tokens it has seen). */
+const OK_MS = 120_000;
+const okMessage = (sessionId: string, exp: number, nonce: string, action: unknown, kind: string) => `browser-ok|${sessionId}|${exp}|${nonce}|${kind}|${JSON.stringify(action)}`;
+export async function signOk(secret: string, sessionId: string, action: unknown, kind: string): Promise<string> {
+  const exp = Date.now() + OK_MS, nonce = randomToken(12);
+  return `${exp}.${nonce}.${await hmacSha256Hex(secret, okMessage(sessionId, exp, nonce, action, kind))}`;
+}
+/** Checks a token against the action it is presented with. Returns its nonce (to be used once) or null. */
+export async function checkOk(secret: string, sessionId: string, token: unknown, action: unknown, kind: string, now = Date.now()): Promise<{ nonce: string; exp: number } | null> {
+  const m = typeof token === 'string' ? /^(\d{10,16})\.([A-Za-z0-9_-]{8,40})\.([0-9a-f]{64})$/.exec(token) : null;
+  if (!m) return null;
+  const exp = Number(m[1]);
+  if (exp < now || exp > now + OK_MS + 5000) return null;
+  const want = await hmacSha256Hex(secret, okMessage(sessionId, exp, m[2]!, action, kind));
+  return safeEqual(want, m[3]!) ? { nonce: m[2]!, exp } : null;
 }

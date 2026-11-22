@@ -47,13 +47,17 @@ export function BrowserPanel({ s, d, phone, onClose, onHandToNiko }: { s: Browse
   }, [v.notice]);
   const go = (e: FormEvent) => { e.preventDefault(); setEditing(false); (document.activeElement as HTMLElement | null)?.blur(); if (addr.trim()) void s.go(addr); };
   const youDrive = v.driver === 'you';
-  const pill = v.phase === 'reconnecting' ? ['Reconnecting', 'warn'] : youDrive ? ['You’re driving', 'you'] : ['Niko is driving', 'niko'];
+  const pill = v.phase === 'reconnecting' ? ['Reconnecting', 'warn']
+    : v.need?.kind === 'handoff' ? ['Your turn', 'turn'] : v.need?.kind === 'gate' ? ['Waiting for your OK', 'turn']
+    : youDrive ? ['You’re driving', 'you'] : ['Niko is driving', 'niko'];
   const live = v.phase === 'live' || v.phase === 'reconnecting';
   const focusTyper = () => typer.current?.focus({ preventScroll: true });
+  // A password hand-off: the field is focused in the page, so typing goes straight there.
+  useEffect(() => { if (v.need?.kind === 'handoff' && v.need.handoff === 'password') focusTyper(); }, [v.need]);
   return (
     <section className="g brw" aria-label="Niko’s browser">
       <div className="brw-head">
-        <span className={'brw-pill ' + pill[1]}>{pill[1] === 'niko' ? <i className="brw-dot" /> : <Svg d={hand} size={15} />}<span className="k">{pill[0]}</span></span>
+        <span className={'brw-pill ' + pill[1]}>{pill[1] === 'niko' || pill[1] === 'turn' ? <i className="brw-dot" /> : <Svg d={hand} size={15} />}<span className="k">{pill[0]}</span></span>
         <span className="brw-acts">
           {!phone && youDrive && !d?.currentTask && <span className="brw-min sub">{minutesText(v.minutes)}</span>}
           {d && !youDrive && <button className="bt brw-act" onClick={() => d.stop()}><Svg d={hand} size={17} />{phone ? 'Take over' : 'Take over'}</button>}
@@ -106,7 +110,7 @@ export function BrowserPanel({ s, d, phone, onClose, onHandToNiko }: { s: Browse
         {(v.phase === 'ended' || v.phase === 'failed') && v.error && <div className="brw-cover"><p className="brw-end">{v.error}</p><button className="sec" onClick={onClose}>Close</button></div>}
         {v.idleAsk && v.phase === 'live' && <div className="brw-sheet" role="dialog" aria-label="Still there?"><span className="k accent">Still there?</span><span className="brw-sheet-t">The browser closes in 30 seconds if it isn’t used.</span><span className="brw-sheet-b"><button className="pri" onClick={() => s.stillHere()}>Keep it open</button><button className="sec" onClick={onClose}>Close it</button></span></div>}
         {v.cursor && <span className="brw-cursor" aria-hidden="true" style={{ left: `${(v.cursor.x / v.page.width) * 100}%`, top: `${(v.cursor.y / v.page.height) * 100}%` }}><i /><b>NIKO</b></span>}
-        {v.need && v.phase === 'live' && d && <NeedSheet s={s} d={d} />}
+        {v.need && v.phase === 'live' && d && <NeedSheet s={s} d={d} phone={phone} />}
         {toast && <div className="brw-toast" role="status">{toast}</div>}
         {v.ignoredAt && Date.now() - v.ignoredAt < 8000 && <div className="brw-toast ignored" role="status"><span className="k">Ignored</span> This page tried to give Niko orders. Niko only follows you.</div>}
       </div>
@@ -115,21 +119,39 @@ export function BrowserPanel({ s, d, phone, onClose, onHandToNiko }: { s: Browse
   );
 }
 
-/** When Niko needs the person (stage 3 gives each kind its own look): their turn, an OK, or a question. */
-function NeedSheet({ s, d }: { s: BrowserSession; d: Driver }) {
-  const n = s.view.need!;
+const ALLOW: Record<string, string> = { account: 'Create account', 'sign-in': 'Sign in', submit: 'Send', terms: 'Agree', download: 'Download', 'new-site': 'Go there' };
+const SAFE_NOTE = 'Niko always asks before it submits a form, signs in, agrees to terms or downloads a file. It never pays for you.';
+
+/** When Niko needs the person, as the mockup draws each kind: their turn (a password, a payment, an "are you human?"
+ * check), an OK before an action, or a question. */
+function NeedSheet({ s, d, phone }: { s: BrowserSession; d: Driver; phone: boolean }) {
+  const v = s.view, n = v.need!;
   const [reply, setReply] = useState('');
   if (n.kind === 'gate') return <div className="brw-sheet" role="dialog" aria-label={n.gate.title}>
-    <span className="k accent">Niko needs your OK</span>
+    <span className="brw-sheet-top"><span className="k accent">Niko needs your OK</span>{!phone && <span className="k quiet">Nothing is sent until you choose</span>}</span>
     <span className="brw-sheet-t">{n.gate.title}</span>
-    {n.gate.details.length > 0 && <dl className="brw-dl">{n.gate.details.map(([k, v], i) => <div key={i}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>}
-    <span className="brw-sheet-b"><button className="sec" onClick={() => { s.setNeed(null); d.stop(); }}>Not now</button><button className="pri" onClick={() => void d.approve(n.action)}>Allow</button></span>
+    {n.gate.details.length > 0 && <dl className="brw-dl">{n.gate.details.map(([k, val], i) => <div key={i}><dt>{k}</dt><dd>{val}</dd></div>)}</dl>}
+    {!phone && <span className="brw-note">{SAFE_NOTE}</span>}
+    <span className="brw-sheet-b"><button className="sec" onClick={() => d.decline(n.gate)}>Not now</button><button className="pri" onClick={() => void d.approve(n.action, n.gate)}>{ALLOW[n.gate.kind] ?? 'Allow'}</button></span>
   </div>;
-  if (n.kind === 'handoff') return <div className="brw-sheet turn" role="dialog" aria-label="Your turn">
-    <span className="k">Your turn</span>
-    <span className="brw-sheet-t">{n.say}</span>
-    <span className="brw-sheet-b"><button className="pri" onClick={() => { s.setNeed(null); d.resume(); }}>Done, carry on</button><button className="sec" onClick={() => { s.setNeed(null); d.stop(); }}>I’ll finish myself</button></span>
-  </div>;
+  if (n.kind === 'handoff') {
+    const r = n.rect;
+    const spot = r && <i className="brw-spot" aria-hidden="true" style={{ left: `${(r.x / v.page.width) * 100}%`, top: `${(r.y / v.page.height) * 100}%`, width: `${(r.w / v.page.width) * 100}%`, height: `${(r.h / v.page.height) * 100}%` }} />;
+    const copy = n.handoff === 'password'
+      ? { k: 'Your turn', t: `Type a password for ${n.site || 'this site'}.`, p: 'What you type goes straight to the site. Niko can’t see this field, and never types or keeps your passwords.', go: 'Done, carry on', no: 'I’ll finish myself' }
+      : n.handoff === 'payment'
+        ? { k: 'Your turn · payment', t: 'Payment is yours to finish.', p: 'Niko filled in the order. Card fields are hidden from Niko, and it never presses Pay.', go: 'Done', no: 'Cancel order' }
+        : { k: 'Your turn', t: 'This site wants a person.', p: 'Tick the box yourself, then Niko carries on. Niko never tries to get past these checks.', go: 'Done, carry on', no: 'Stop here' };
+    return <>
+      {spot}
+      <div className={'brw-sheet turn' + (r && !phone ? ' side' : '')} role="dialog" aria-label={copy.t}>
+        <span className="k">{copy.k}</span>
+        <span className="brw-sheet-t">{copy.t}</span>
+        <span className="brw-note">{copy.p}</span>
+        <span className="brw-sheet-b"><button className="pri" onClick={() => { s.setNeed(null); d.resume(); }}>{copy.go}</button><button className="sec" onClick={() => { s.setNeed(null); d.stop(); }}>{copy.no}</button></span>
+      </div>
+    </>;
+  }
   return <form className="brw-sheet" role="dialog" aria-label="Niko asks" onSubmit={(e) => { e.preventDefault(); const t = reply.trim(); setReply(''); s.setNeed(null); d.resume(t); }}>
     <span className="k accent">Niko asks</span>
     <span className="brw-sheet-t">{n.say}</span>

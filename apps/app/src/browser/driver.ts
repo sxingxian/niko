@@ -2,7 +2,7 @@
 // or the person is needed. The server decides when Niko must stop (passwords, payments, "are you human?", sending a
 // form, agreeing to terms); this side only carries out what the server allows.
 import { api, ApiError, settle } from '@niko/ui';
-import { hostBlocked, openableHost, type BrowserAction, type PageOutline, type StepAnswer } from '@niko/shared';
+import { hostBlocked, openableHost, siteOf, type BrowserAction, type Gate, type PageOutline, type StepAnswer } from '@niko/shared';
 import type { BrowserSession } from './session';
 import { chooseIn, focusOf, OUTLINE_JS, pointOf } from './outline';
 
@@ -76,10 +76,12 @@ export class Driver {
       if (step.done) { this.s.setCursor(null); this.s.setDriver('you'); this.task = ''; this.hooks.say(step.say); return; }
       if (step.handoff) {
         this.s.setCursor(null);
-        this.s.setNeed({ kind: 'handoff', handoff: step.handoff.kind, ref: step.handoff.ref, say: step.say });
+        // Their part is lit up on the page (the field is focused for them; Niko never reads what they type).
+        const rect = step.handoff.ref !== undefined ? await this.rectOf(step.handoff.ref) : null;
+        if (step.handoff.kind === 'password' && step.handoff.ref !== undefined) await cdp.send('Runtime.evaluate', { expression: focusOf(step.handoff.ref) }).catch(() => undefined);
+        this.s.setNeed({ kind: 'handoff', handoff: step.handoff.kind, ref: step.handoff.ref, say: step.say, site: siteOf(host ?? ''), ...(rect ? { rect } : {}) });
         this.s.setDriver('you');
         this.hooks.say(step.say);
-        if (step.handoff.ref !== undefined) await this.point(step.handoff.ref, false);
         return;
       }
       if (step.gate && step.action) {
@@ -101,6 +103,15 @@ export class Driver {
       if (this.history.length > 12) this.history.shift();
     }
     if (id === this.runId) { this.stop(); this.hooks.say('That’s taking more steps than expected, so I stopped. You can carry on, or tell me what to do next.'); }
+  }
+
+  /** Where an element is on the page (scrolled into view), for lighting it up. */
+  private async rectOf(ref: number): Promise<{ x: number; y: number; w: number; h: number } | null> {
+    const cdp = this.s.connection;
+    if (!cdp) return null;
+    const r = await cdp.send<{ result?: { value?: { x: number; y: number; w: number; h: number } | null } }>('Runtime.evaluate', { expression: pointOf(ref), returnByValue: true }).catch(() => null);
+    const p = r?.result?.value;
+    return p ? { x: p.x - p.w / 2, y: p.y - p.h / 2, w: p.w, h: p.h } : null;
   }
 
   /** Moves Niko's cursor to an element (and returns where it is). */
@@ -181,13 +192,24 @@ export class Driver {
     await sleep(300);
   }
 
-  /** The person said OK to an action Niko was holding: Niko does it, then carries on. */
-  async approve(a: BrowserAction) {
+  /** The person said OK to an action Niko was holding: the server checks the OK (once, for exactly this action), then
+   * Niko does it and carries on. */
+  async approve(a: BrowserAction, gate: Gate) {
+    try { await api(`/browser/${this.s.view.id}/ok`, { body: { token: gate.token, action: a, kind: gate.kind, title: gate.title, site: gate.site, allow: true } }); }
+    catch (e) { this.s.setNeed(null); this.stop(); this.hooks.say(e instanceof ApiError ? e.message : 'That didn’t go through. Ask me again.'); return; }
     this.s.setNeed(null);
     this.s.setDriver('niko');
     const did = await this.act(a);
     this.history.push({ say: 'The user said OK', did });
     this.resume();
+  }
+
+  /** "Not now": Niko stops; the choice is kept in "What Niko did". */
+  decline(gate: Gate) {
+    void api(`/browser/${this.s.view.id}/ok`, { body: { kind: gate.kind, title: gate.title, site: gate.site, allow: false } }).catch(() => undefined);
+    this.s.setNeed(null);
+    this.stop();
+    this.task = '';
   }
 
   /** "Ask about this page": an answer from the page, or a task to start. */

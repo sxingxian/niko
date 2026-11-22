@@ -403,3 +403,14 @@ export const browserSessions = pgTable('browser_sessions', {
   seconds: integer('seconds').notNull().default(0),
   endedWhy: text('ended_why').notNull().default(''),
 });
+
+/** "What Niko did" in the browser: the site, the step, and the person's choices. Never typed text or page contents. */
+export const browserActivity = pgTable('browser_activity', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  sessionId: uuid('session_id'),
+  at: ts('at').notNull().defaultNow(),
+  site: text('site').notNull().default(''),
+  kind: text('kind').notNull(),
+  text: text('text').notNull().default(''),
+});

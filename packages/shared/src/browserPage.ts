@@ -24,6 +24,8 @@ export interface PageElement {
   password?: boolean;
   /** A card field (card number, expiry, security code, name on card). Its value is never read. */
   card?: boolean;
+  /** For password and card fields: something is in it (its length only is known, never its value). */
+  filled?: boolean;
   /** Sends its form (a submit button, or the only button of a form). */
   submit?: boolean;
   /** Inside the visible part of the page. */
@@ -43,7 +45,7 @@ export type BrowserActionKind = 'click' | 'type' | 'choose' | 'check' | 'scroll'
 export interface BrowserAction { do: BrowserActionKind; ref?: number; text?: string; url?: string }
 export type HandoffKind = 'password' | 'payment' | 'human';
 export type GateKind = 'submit' | 'sign-in' | 'account' | 'terms' | 'download' | 'new-site';
-export interface Gate { kind: GateKind; title: string; details: [string, string][]; site: string }
+export interface Gate { kind: GateKind; title: string; details: [string, string][]; site: string; /** Signed by the server: the person's OK for exactly this action, once. */ token?: string }
 export interface StepAnswer {
   say: string;
   action: BrowserAction | null;
@@ -79,6 +81,7 @@ export function cleanOutline(v: unknown): PageOutline | null {
     if (Array.isArray(e.options)) el.options = e.options.slice(0, 30).map((x: unknown) => str(x, 60)).filter(Boolean);
     if (password) el.password = true;
     if (card) el.card = true;
+    if ((password || card) && e.filled === true) el.filled = true;
     if (e.submit === true) el.submit = true;
     if (e.visible === true) el.visible = true;
     elements.push(el);
@@ -90,8 +93,8 @@ export function cleanOutline(v: unknown): PageOutline | null {
 export function outlineText(p: PageOutline): string {
   const lines = p.elements.map((e) => {
     const bits = [`[${e.ref}]`, e.kind + (e.type && e.type !== e.kind ? `:${e.type}` : ''), e.name ? `"${e.name}"` : ''];
-    if (e.password) bits.push('(password field: the user types it)');
-    else if (e.card) bits.push('(card field: the user types it)');
+    if (e.password) bits.push(e.filled ? '(password field: filled in by the user)' : '(password field: the user types it)');
+    else if (e.card) bits.push(e.filled ? '(card field: filled in by the user)' : '(card field: the user types it)');
     else if (e.value) bits.push(`value="${e.value}"`);
     if (e.checked !== undefined) bits.push(e.checked ? 'checked' : 'not checked');
     if (e.options?.length) bits.push(`options: ${e.options.join(' | ')}`);
@@ -134,7 +137,7 @@ export function judgeAction(p: PageOutline, a: BrowserAction | null, ctx: StepCo
   if (!a) return { action: null, handoff: null, gate: null };
   const el = a.ref !== undefined ? p.elements.find((e) => e.ref === a.ref) : undefined;
   if ((a.do === 'click' || a.do === 'type' || a.do === 'choose' || a.do === 'check') && !el) return { action: null, handoff: null, gate: null, refused: 'That isn’t on the page.' };
-  if (el?.password) return { action: null, handoff: { kind: 'password', ref: el.ref }, gate: null };
+  if (el?.password && !(el.filled && a.do === 'click')) return { action: null, handoff: { kind: 'password', ref: el.ref }, gate: null };
   if (el?.card) return { action: null, handoff: { kind: 'payment', ref: el.ref }, gate: null };
   const label = el ? `${el.name} ${el.value ?? ''}` : '';
   if (el && (a.do === 'click' || a.do === 'check') && (PAY_WORDS.test(label) || (p.frames.payment && el.submit))) return { action: null, handoff: { kind: 'payment', ref: el.ref }, gate: null };

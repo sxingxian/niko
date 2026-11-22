@@ -39,6 +39,13 @@ export class BrowserKeeper {
       if (s && (!body.sessionId || s.sessionId === body.sessionId)) await this.finish(s, (body.why as KeeperEnd) || 'closed');
       return Response.json({ ok: true });
     }
+    // An OK token is good once: the first time it is seen it is remembered (until it would have expired anyway).
+    if (path === '/once') {
+      const key = `ok:${String(body.nonce ?? '').slice(0, 64)}`;
+      if (!body.nonce || (await this.ctx.storage.get(key))) return Response.json({ used: true });
+      await this.ctx.storage.put(key, Number(body.exp) || Date.now() + 120_000);
+      return Response.json({ used: false });
+    }
     if (path === '/state') return Response.json(s ? { open: true, sessionId: s.sessionId, capAt: s.capAt } : { open: false });
     return new Response('not found', { status: 404 });
   }
@@ -60,6 +67,9 @@ export class BrowserKeeper {
   /** Closes the browser on its service and records the time it counted today. */
   private async finish(s: Kept, why: KeeperEnd) {
     await this.ctx.storage.delete('s');
+    // OK tokens belong to one browser: forget them with it.
+    const oks = await this.ctx.storage.list({ prefix: 'ok:' });
+    if (oks.size) await this.ctx.storage.delete([...oks.keys()]);
     await this.ctx.storage.put('last', { id: s.sessionId, why });
     await this.ctx.storage.deleteAlarm();
     const db = createDb(this.env.DATABASE_URL);
