@@ -104,6 +104,9 @@ export async function cfPass(conn: CfConn, sessionId: string, targetId: string |
 export function passHost(ws: string): boolean {
   try { const u = new URL(ws); return u.protocol === 'wss:' && (u.hostname === 'live.browser.run' || u.hostname.endsWith('.browser.run')); } catch { return false; }
 }
+export async function cfCloseTab(conn: CfConn, sessionId: string, targetId: string): Promise<void> {
+  await cf(conn, 'DELETE', `/${encodeURIComponent(sessionId)}/json/close/${encodeURIComponent(targetId)}`).catch((e) => { if (!(e instanceof CfError) || e.status !== 404) throw e; });
+}
 export async function cfClose(conn: CfConn, sessionId: string): Promise<void> {
   await cf(conn, 'DELETE', `/${encodeURIComponent(sessionId)}`).catch((e) => { if (!(e instanceof CfError) || e.status !== 404) throw e; });
 }

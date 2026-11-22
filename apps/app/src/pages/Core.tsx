@@ -11,6 +11,7 @@ import { pageRequest, pickItem, rewriteRequest, screenFor, scrollRequest } from 
 import { isStacked } from '../flow';
 import { PictureCard } from './Picture';
 import { MapCard } from './Map';
+import { BrowserPanel } from '../browser/BrowserPanel';
 import { WeatherCard } from './Weather';
 import type { WeatherCard as WxCard } from '@niko/shared';
 import { GlanceStack } from './Glance';
@@ -69,6 +70,18 @@ function HabitRow() {
       <button className="sec" onClick={() => n.answerHabit(false)}>No</button>
     </div>
   );
+}
+
+/** The window's width, kept up to date (the browser panel's size depends on it). */
+function useWinWidth() {
+  const [w, setW] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : 1440));
+  useEffect(() => { const f = () => setW(window.innerWidth); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);
+  return w;
+}
+/** How far the core moves aside for the browser panel: to the middle of the space left of it (as app.css sizes it). */
+function browseShift(w: number): number {
+  const bw = w <= 1240 ? w - 420 : Math.min(840, w - 600);
+  return -Math.round((bw + 72) / 2);
 }
 
 function useWide() {
@@ -259,7 +272,9 @@ export function Home() {
   const [text, setText] = useState('');
   const pic = n.picture;
   const mapv = n.map;
-  const open = !!n.reply || !!pic || !!mapv;
+  const brow = n.browser;
+  const open = !!n.reply || !!pic || !!mapv || !!brow;
+  const winW = useWinWidth();
   // Keep the last answer on screen while its cards close.
   const [shown, setShown] = useState<{ reply: string; chat: Brief['chats'][number] | null; id: number; wx: WxCard | null; kn: KnowledgeAnswer | null } | null>(null);
   const [closing, setClosing] = useState(false);
@@ -284,7 +299,7 @@ export function Home() {
   useEffect(() => { n.typing(typing); }, [typing]); // eslint-disable-line react-hooks/exhaustive-deps
   const submit = (e: FormEvent) => { e.preventDefault(); const t = text; setText(''); setTyping(false); void n.ask(t); };
   const cards = shown ? (shown.chat || shown.kn || followFor(n.followUp, shown.reply) ? 2 : 1) : 0;
-  const card = !!pic || !!mapv;
+  const card = !!pic || !!mapv || !!brow;
   // The caption always sits under the core: aside exactly when the core moves aside (an answer, a picture or a map is
   // open on a wide screen), back when it returns. Before, a new question asked over a map or picture sent the caption
   // back while the core stayed aside.
@@ -297,10 +312,10 @@ export function Home() {
     setCaption(aside ? 'aside' : wide ? 'back' : '');
   }, [aside, wide]);
   return (
-    <div className={'home' + (open ? ' open' : '') + (closing && !card ? ' closing' : '') + (pic ? ' picture' : '') + (mapv ? ' mapping' : '') + (locked ? ' locked' : '')}>
+    <div className={'home' + (open ? ' open' : '') + (closing && !card ? ' closing' : '') + (pic ? ' picture' : '') + (mapv ? ' mapping' : '') + (brow ? ' browsing' : '') + (locked ? ' locked' : '')}>
       <Backdrop background={n.me?.background} mode={n.mode} motion={n.me?.appearance?.bgMotion !== false} />
       <div className="stage">
-        <ParticleCore size="var(--s)" mode={n.mode} pad={wide ? 220 : 0} shift={wide && open ? -200 : 0} spot="home" design={n.me?.design} />
+        <ParticleCore size="var(--s)" mode={n.mode} pad={wide ? (brow ? Math.abs(browseShift(winW)) + 60 : 220) : 0} shift={wide && brow ? browseShift(winW) : wide && open ? -200 : 0} spot="home" design={n.me?.design} />
         {/* Locked: a tap anywhere on the core shows the code entry. */}
         {locked && !n.lockAsk && <button className="lock-tap" onClick={() => n.requestUnlock()} aria-label="Unlock Niko" />}
         <div className={'caption ' + caption} key={caption}>
@@ -354,7 +369,14 @@ export function Home() {
           <button className="sec" onClick={() => n.answerFullscreen(false)}>Not now</button>
         </div>
       )}
-      {mapv ? (
+      {brow ? (
+        <aside className="panels brow" aria-label="Niko’s browser" key="browser">
+          <div className="card-build" style={{ ['--d' as string]: '0s' }}>
+            <BrowserPanel s={brow} phone={!wide} onClose={n.closeBrowser} />
+            <Outline />
+          </div>
+        </aside>
+      ) : mapv ? (
         <aside className="panels mapp" aria-label="Map" key="map">
           <div className="card-build" style={{ ['--d' as string]: '0s' }}>
             <MapCard v={mapv} tabbable />

@@ -3,6 +3,8 @@ import type { Db, User } from '@niko/db';
 export interface Env {
   ASSETS: Fetcher;
   AI: Ai;
+  /** One BrowserKeeper per person: keeps their open browser and closes it when time runs out or the device goes. */
+  BROWSER_KEEPER: DurableObjectNamespace;
   DATABASE_URL: string;
   /** Knowledge's own Neon project (files, search pieces, what Niko learned). Without it, Knowledge stays off. */
   KNOWLEDGE_DATABASE_URL?: string;

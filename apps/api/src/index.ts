@@ -9,6 +9,9 @@ import { billing } from './routes/billing';
 import { maybeDaily } from './billing';
 import { hooks } from './routes/hooks';
 
+// The Durable Object class must be exported from the Worker's main module.
+export { BrowserKeeper } from './browserKeeper';
+
 const api = new Hono<AppEnv>().basePath('/api');
 
 // Secrets the API can't run without. A missing one is a deploy problem, so say so plainly in the
