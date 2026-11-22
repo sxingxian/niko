@@ -2,12 +2,17 @@
 // pass; from then on the live picture, taps and typing go straight between this device and the browser service.
 // The server only hears from this device every 30 seconds (so it can close the browser when time runs out).
 import { api, ApiError, Cdp } from '@niko/ui';
-import { hostBlocked, openableHost, toAddress } from '@niko/shared';
+import { hostBlocked, openableHost, toAddress, type BrowserAction, type Gate, type HandoffKind } from '@niko/shared';
 
 export type BrowserPhase = 'opening' | 'live' | 'reconnecting' | 'ended' | 'failed';
 export type BrowserDriver = 'you' | 'niko';
 export interface BrowserTab { targetId: string; title: string; url: string }
 export interface BrowserMinutes { used: number; cap: number; left: number | null; refillAt: string }
+/** When Niko needs the person: a hand-off (their part), an OK before an action, or a question. */
+export type BrowserNeed =
+  | { kind: 'handoff'; handoff: HandoffKind; ref?: number; say: string }
+  | { kind: 'gate'; gate: Gate; action: BrowserAction; say: string }
+  | { kind: 'ask'; say: string };
 export interface BrowserView {
   phase: BrowserPhase;
   id: string | null;
@@ -26,6 +31,13 @@ export interface BrowserView {
   minutes: BrowserMinutes | null;
   /** No taps or typing for a while: asks "Still there?" before closing. */
   idleAsk: boolean;
+  /** Niko's cursor on the page (page pixels), while Niko acts. */
+  cursor: { x: number; y: number } | null;
+  /** The page's size in the browser (page pixels), to place the cursor. */
+  page: { width: number; height: number };
+  need: BrowserNeed | null;
+  /** When the page last tried to give Niko orders (shown as "Ignored"). */
+  ignoredAt: number | null;
 }
 
 const BEAT_MS = 30_000;
@@ -56,7 +68,7 @@ const KEYS: Record<string, [string, number]> = {
 const modsOf = (e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
 
 export class BrowserSession {
-  private v: BrowserView = { phase: 'opening', id: null, tabs: [], active: null, url: '', title: '', canBack: false, canForward: false, loading: true, driver: 'you', notice: null, error: null, minutes: null, idleAsk: false };
+  private v: BrowserView = { phase: 'opening', id: null, tabs: [], active: null, url: '', title: '', canBack: false, canForward: false, loading: true, driver: 'you', notice: null, error: null, minutes: null, idleAsk: false, cursor: null, page: { width: 800, height: 520 }, need: null, ignoredAt: null };
   private subs = new Set<() => void>();
   private cdp: Cdp | null = null;
   private canvas: HTMLCanvasElement | null = null;
@@ -136,7 +148,10 @@ export class BrowserSession {
   /** "I'm still here" (or any tap or key): the idle question goes away. */
   stillHere() { this.lastInput = Date.now(); if (this.v.idleAsk) this.set({ idleAsk: false }); }
   /** Niko is acting (or stopped acting): the panel shows who drives, and idle time doesn't count while Niko works. */
-  setDriver(d: BrowserDriver) { this.lastInput = Date.now(); this.set({ driver: d }); }
+  setDriver(d: BrowserDriver) { this.lastInput = Date.now(); this.set({ driver: d, ...(d === 'you' ? { cursor: null } : {}) }); }
+  setCursor(p: { x: number; y: number } | null) { this.set({ cursor: p }); }
+  setNeed(n: BrowserNeed | null) { this.set({ need: n }); }
+  flagIgnored() { this.set({ ignoredAt: Date.now() }); }
 
   // ---------------------------------------------------------------- the connection to one tab
   /** The CDP connection for Niko's own actions (stage 2 onwards). */
@@ -218,6 +233,7 @@ export class BrowserSession {
     const next = { width: Math.max(320, Math.round(rect.width)), height: Math.max(240, Math.round(rect.height)), mobile, dsf };
     const changed = next.width !== this.size.width || next.height !== this.size.height || next.mobile !== this.size.mobile || next.dsf !== this.size.dsf;
     this.size = next;
+    if (changed) this.set({ page: { width: next.width, height: next.height } });
     el.width = Math.round(next.width * dsf); el.height = Math.round(next.height * dsf);
     if (this.lastFrame) this.paint(this.lastFrame);
     if (changed && this.cdp) { window.clearTimeout(this.resizeTimer); this.resizeTimer = window.setTimeout(() => { if (this.cdp) void this.applySize(this.cdp); }, 250); }
