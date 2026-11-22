@@ -19,6 +19,7 @@ export type HabitAsk = { id: string; habit: string; ask: string; device: boolean
 import { enterFullscreen, exitFullscreen, fullscreenSupported } from './fullscreen';
 import { countryCommand, fullscreenCommand, isEcho, matchWake, resumeIntent, sentenceStart, screenFor, screenName, scrollRequest, takeImageTag, takeItemTag, takeMapTag, takeMoveTags, takeScreenTag, takeStepsTag, takeBrowserTag, BROWSER_CLOSE } from './speech';
 import { BrowserSession } from './browser/session';
+import { Driver } from './browser/driver';
 import { scrollScreen } from './scroll';
 import { captureSupported, captureUtterance, startRing, transcribe, wavSamples, type Capture, type Ring } from './listen';
 import { trimSilence } from './voiceFeatures';
@@ -179,6 +180,10 @@ interface NikoState {
   setMapSteps: (open: boolean) => void;
   /** Niko's browser on Home, when one is open (or opening). */
   browser: BrowserSession | null;
+  /** Niko driving that browser (null until a browser is open). */
+  browserDriver: Driver | null;
+  /** "Hand to Niko": the next thing the person says becomes Niko's task on the page. */
+  handToNiko: () => void;
   /** Opens a site (an address or words to search for) in Niko's browser; `task` is what Niko does there. */
   openBrowser: (to?: string, task?: string) => void;
   closeBrowser: () => void;
@@ -197,6 +202,8 @@ interface NikoState {
 }
 export type UnlockResult = { ok: true } | { ok: false; error: string; left?: number; signedOut?: boolean };
 const ASK_CODE = 'Enter your code. Niko will answer once you’re in.';
+/** Questions about the page in Niko's browser: answered from the page (or done on it) rather than by the usual chat. */
+const PAGE_QUESTION = /\b(this|the) (page|site|website|form|article|list)\b|\bon (the )?(screen|page)\b|\bhere\b|\bsummari[sz]e\b|\bfill (it|this|that|in|out)\b|\bsign me (up|in)\b|\blog me in\b|\bclick\b|\bwhich (one|plan|option|is)\b|\bwhat does it say\b|\bread (it|this) (out|to me)\b/;
 /** "Niko, lock", "lock the screen", "lock up". */
 const LOCK_COMMAND = /^(please )?lock( (it|now|up|niko|the screen|the app|yourself|this))*( now)?( please)?$/;
 
@@ -365,6 +372,9 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   const browserRef = useRef<BrowserSession | null>(null);
   /** What Niko was asked to do on the site (stage 2 acts on it). */
   const browserTask = useRef<string>('');
+  const driverRef = useRef<Driver | null>(null);
+  /** "Hand to Niko" was pressed: the next thing said is Niko's task on the page. */
+  const awaitTask = useRef(false);
   const [fullscreenAsk, setFullscreenAsk] = useState(false);
   const fsTimer = useRef<number | undefined>(undefined);
   const mapRef = useRef<MapView | null>(null);
@@ -743,7 +753,7 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       return;
     }
     // Ending the conversation.
-    if (/^(that'?s all|that is all|thanks?( you)?|thank you niko|stop|never ?mind|cancel that|bye)\b[.!]?$/.test(lower)) { active.current = false; stopSpeech(); idle(); return; }
+    if (/^(that'?s all|that is all|thanks?( you)?|thank you niko|stop|never ?mind|cancel that|bye)\b[.!]?$/.test(lower)) { active.current = false; driverRef.current?.stop(); stopSpeech(); idle(); return; }
     // After a stop: "continue" carries on the answer, "try again" asks the question again, "repeat" says it again.
     const intent = resumeIntent(text);
     // Nothing to carry on (a new conversation, after opening Inbox, Calendar or Notes): said plainly, not sent to the AI.
@@ -810,7 +820,21 @@ export function NikoProvider({ children }: { children: ReactNode }) {
       window.setTimeout(() => (wantRec.current ? listenForFollowUp() : idle()), 1400);
       return;
     }
-    // 3c. The browser: "close the browser".
+    // 3c. The browser: Niko driving ("take over", "carry on"), a task after "Hand to Niko", a question about the page.
+    const bs = browserRef.current, dr = driverRef.current;
+    if (bs && dr && bs.view.phase === 'live') {
+      if (/^(take over|let me (do it|drive|take over)|i'?ll do it|stop (driving|there)|wait|pause)$/.test(lower)) { dr.stop(); say('Okay, you’re driving.'); return; }
+      if (dr.currentTask && /^(carry on|continue|go on|keep going|go ahead|done|i'?m done|ok(ay)? carry on)$/.test(lower)) { bs.setNeed(null); dr.resume(); return; }
+      if (bs.view.need?.kind === 'ask') { bs.setNeed(null); dr.resume(text); return; }
+      if (awaitTask.current) { awaitTask.current = false; dr.start(text); return; }
+      if (!dr.running && PAGE_QUESTION.test(lower)) {
+        setMode('thinking'); setLabel('Thinking'); setLine('Reading the page…');
+        const r: { say?: string; task?: string } | null = await dr.ask(text).catch((e) => ({ say: (e as Error).message }));
+        if (r?.task) { dr.start(r.task); return; }
+        if (r?.say) { say(r.say, 0); return; }
+      }
+    }
+    // The browser: "close the browser".
     if (browserRef.current && BROWSER_CLOSE.test(lower)) {
       closeBrowserFn();
       setMode('speaking'); setLabel('Heard'); setLine('Closed the browser.');
@@ -1023,22 +1047,31 @@ export function NikoProvider({ children }: { children: ReactNode }) {
   };
   const setMapStepsFn = (open: boolean) => { const m = mapRef.current; if (!m || !!m.steps === open) return; const next = { ...m, steps: open }; mapRef.current = next; setMap(next); };
   /** Closes Niko's browser (and the browser on its service). */
-  const closeBrowserFn = () => { const b = browserRef.current; browserRef.current = null; browserTask.current = ''; setBrowserS(null); void b?.close(); };
+  const closeBrowserFn = () => { const b = browserRef.current; driverRef.current?.stop(); driverRef.current = null; browserRef.current = null; browserTask.current = ''; awaitTask.current = false; setBrowserS(null); void b?.close(); };
   const openBrowserFn = (to?: string, task?: string) => {
     setReply(null); mapCtl.current?.abort(); mapRef.current = null; setMap(null); setPictureId(null);
     const url = to ? toAddress(to) ?? `https://duckduckgo.com/?q=${encodeURIComponent(to)}` : undefined;
     browserTask.current = task ?? '';
     const cur = browserRef.current;
-    if (cur && cur.view.phase !== 'ended' && cur.view.phase !== 'failed') { if (url) void cur.go(url); return; }
+    if (cur && cur.view.phase !== 'ended' && cur.view.phase !== 'failed') {
+      void (async () => { if (url) { await cur.go(url); await new Promise((r) => setTimeout(r, 1500)); } if (task) driverRef.current?.start(task); })();
+      return;
+    }
     const b = new BrowserSession();
     browserRef.current = b; setBrowserS(b);
+    driverRef.current = new Driver(b, {
+      say: (t) => { if (browserRef.current === b && t) say(t, 0); },
+      status: (t) => { if (browserRef.current === b) { setMode('thinking'); setLabel('Working'); setLine(t); } },
+    });
     b.onEnded = (text) => { if (browserRef.current === b) say(text); };
     void (async () => {
       const st = await api<{ allowed: boolean; ready: boolean; blocked: string[] }>('/browser').catch(() => null);
       if (browserRef.current !== b) return;
       if (st) b.blocked = st.blocked;
-      try { await b.open(url); }
-      catch (e) { if (browserRef.current === b) say((e as Error).message); }
+      try {
+        await b.open(url);
+        if (task && browserRef.current === b) { await new Promise((r) => setTimeout(r, 1200)); driverRef.current?.start(task); }
+      } catch (e) { if (browserRef.current === b) say((e as Error).message); }
     })();
   };
   const closeMapFn = () => { mapCtl.current?.abort(); mapCtl.current = null; locationWait.current?.(false); locationWait.current = null; mapRef.current = null; setMap(null); };
@@ -1518,6 +1551,8 @@ export function NikoProvider({ children }: { children: ReactNode }) {
     answerLocation: (allow: boolean) => { const w = locationWait.current; locationWait.current = null; w?.(allow); },
     closeMap: closeMapFn,
     browser: browserS,
+    browserDriver: browserS ? driverRef.current : null,
+    handToNiko: () => { if (!browserRef.current) return; awaitTask.current = true; say('What should I do on this page?', -1, { label: 'Listening', line: 'Tell me what to do on this page.', listen: true }); },
     openBrowser: openBrowserFn,
     closeBrowser: closeBrowserFn,
     setMapSteps: setMapStepsFn,

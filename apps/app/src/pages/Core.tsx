@@ -372,7 +372,7 @@ export function Home() {
       {brow ? (
         <aside className="panels brow" aria-label="Niko’s browser" key="browser">
           <div className="card-build" style={{ ['--d' as string]: '0s' }}>
-            <BrowserPanel s={brow} phone={!wide} onClose={n.closeBrowser} />
+            <BrowserPanel s={brow} d={n.browserDriver} phone={!wide} onClose={n.closeBrowser} onHandToNiko={n.handToNiko} />
             <Outline />
           </div>
         </aside>

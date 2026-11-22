@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from 'react';
 import { Icon } from '@niko/ui';
 import type { BrowserSession } from './session';
+import type { Driver } from './driver';
 
 const back = 'M19 12H5M11 6l-6 6 6 6';
 const fwd = 'M5 12h14M13 6l6 6-6 6';
@@ -19,7 +20,7 @@ function minutesText(m: { left: number | null } | null): string {
   return min >= 1 ? `${min} min left today` : 'Under a minute left';
 }
 
-export function BrowserPanel({ s, phone, onClose }: { s: BrowserSession; phone: boolean; onClose: () => void }) {
+export function BrowserPanel({ s, d, phone, onClose, onHandToNiko }: { s: BrowserSession; d: Driver | null; phone: boolean; onClose: () => void; onHandToNiko: () => void }) {
   const v = useBrowserView(s)!;
   const canvas = useRef<HTMLCanvasElement>(null);
   const typer = useRef<HTMLTextAreaElement>(null);
@@ -54,7 +55,10 @@ export function BrowserPanel({ s, phone, onClose }: { s: BrowserSession; phone: 
       <div className="brw-head">
         <span className={'brw-pill ' + pill[1]}>{pill[1] === 'niko' ? <i className="brw-dot" /> : <Svg d={hand} size={15} />}<span className="k">{pill[0]}</span></span>
         <span className="brw-acts">
-          {!phone && <span className="brw-min sub">{minutesText(v.minutes)}</span>}
+          {!phone && youDrive && !d?.currentTask && <span className="brw-min sub">{minutesText(v.minutes)}</span>}
+          {d && !youDrive && <button className="bt brw-act" onClick={() => d.stop()}><Svg d={hand} size={17} />{phone ? 'Take over' : 'Take over'}</button>}
+          {d && youDrive && d.currentTask && !v.need && <button className="bt brw-act" onClick={() => d.resume()}>Hand back to Niko</button>}
+          {d && youDrive && !d.currentTask && !phone && <button className="bt brw-act" onClick={onHandToNiko}><Icon name="spark" size={16} />Hand to Niko</button>}
           <button className="ib" style={{ width: 40, height: 40 }} onClick={onClose} aria-label="Close the browser"><Icon name="x" size={20} /></button>
         </span>
       </div>
@@ -101,9 +105,35 @@ export function BrowserPanel({ s, phone, onClose }: { s: BrowserSession; phone: 
         {v.phase === 'reconnecting' && <div className="brw-cover soft"><span className="k">Reconnecting…</span></div>}
         {(v.phase === 'ended' || v.phase === 'failed') && v.error && <div className="brw-cover"><p className="brw-end">{v.error}</p><button className="sec" onClick={onClose}>Close</button></div>}
         {v.idleAsk && v.phase === 'live' && <div className="brw-sheet" role="dialog" aria-label="Still there?"><span className="k accent">Still there?</span><span className="brw-sheet-t">The browser closes in 30 seconds if it isn’t used.</span><span className="brw-sheet-b"><button className="pri" onClick={() => s.stillHere()}>Keep it open</button><button className="sec" onClick={onClose}>Close it</button></span></div>}
+        {v.cursor && <span className="brw-cursor" aria-hidden="true" style={{ left: `${(v.cursor.x / v.page.width) * 100}%`, top: `${(v.cursor.y / v.page.height) * 100}%` }}><i /><b>NIKO</b></span>}
+        {v.need && v.phase === 'live' && d && <NeedSheet s={s} d={d} />}
         {toast && <div className="brw-toast" role="status">{toast}</div>}
+        {v.ignoredAt && Date.now() - v.ignoredAt < 8000 && <div className="brw-toast ignored" role="status"><span className="k">Ignored</span> This page tried to give Niko orders. Niko only follows you.</div>}
       </div>
       <p className="brw-foot sub">{phone ? minutesText(v.minutes) || 'Private session · closes when you’re done' : 'Typing into a page goes to the site, not to Niko. Private session · closes when you’re done.'}</p>
     </section>
   );
+}
+
+/** When Niko needs the person (stage 3 gives each kind its own look): their turn, an OK, or a question. */
+function NeedSheet({ s, d }: { s: BrowserSession; d: Driver }) {
+  const n = s.view.need!;
+  const [reply, setReply] = useState('');
+  if (n.kind === 'gate') return <div className="brw-sheet" role="dialog" aria-label={n.gate.title}>
+    <span className="k accent">Niko needs your OK</span>
+    <span className="brw-sheet-t">{n.gate.title}</span>
+    {n.gate.details.length > 0 && <dl className="brw-dl">{n.gate.details.map(([k, v], i) => <div key={i}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>}
+    <span className="brw-sheet-b"><button className="sec" onClick={() => { s.setNeed(null); d.stop(); }}>Not now</button><button className="pri" onClick={() => void d.approve(n.action)}>Allow</button></span>
+  </div>;
+  if (n.kind === 'handoff') return <div className="brw-sheet turn" role="dialog" aria-label="Your turn">
+    <span className="k">Your turn</span>
+    <span className="brw-sheet-t">{n.say}</span>
+    <span className="brw-sheet-b"><button className="pri" onClick={() => { s.setNeed(null); d.resume(); }}>Done, carry on</button><button className="sec" onClick={() => { s.setNeed(null); d.stop(); }}>I’ll finish myself</button></span>
+  </div>;
+  return <form className="brw-sheet" role="dialog" aria-label="Niko asks" onSubmit={(e) => { e.preventDefault(); const t = reply.trim(); setReply(''); s.setNeed(null); d.resume(t); }}>
+    <span className="k accent">Niko asks</span>
+    <span className="brw-sheet-t">{n.say}</span>
+    <span className="brw-reply"><input className="in" value={reply} onChange={(e) => setReply(e.target.value)} placeholder="Reply to Niko, or say it" aria-label="Reply to Niko" /><button className="pri" disabled={!reply.trim()}>Send</button></span>
+    <span className="brw-sheet-b"><button type="button" className="sec" onClick={() => { s.setNeed(null); d.stop(); }}>I’ll do it myself</button></span>
+  </form>;
 }

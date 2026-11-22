@@ -1414,3 +1414,20 @@ a.bt { text-decoration: none; display: inline-flex; align-items: center; justify
   .brw-addr { height: 36px; margin-left: 0; }
   .brw-view { border-radius: 16px; }
 }
+/* Niko driving: its cursor, the hand-back buttons, and what it needs from the person */
+.brw-act { height: 40px; min-width: 0; font-size: 13px; display: inline-flex; align-items: center; gap: 8px; }
+.brw-cursor { position: absolute; display: flex; align-items: center; gap: 6px; pointer-events: none; transition: left .7s cubic-bezier(.22,1,.36,1), top .7s cubic-bezier(.22,1,.36,1); z-index: 2; }
+.brw-cursor i { width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 50%; border: 2px solid hsl(var(--h) 90% 55%); background: hsl(var(--h) 100% 75% / .35); animation: brwPulse 1.6s ease-in-out infinite; }
+.brw-cursor b { font: 600 11px 'JetBrains Mono', monospace; letter-spacing: .12em; color: #fff; background: hsl(var(--h) 80% 30%); padding: 3px 7px; border-radius: 6px; margin-top: -11px; }
+.brw-sheet.turn { border-color: rgba(255,211,138,.6); }
+.brw-sheet.turn .k { color: #ffd38a; }
+.brw-dl { display: grid; grid-template-columns: minmax(90px, auto) minmax(0, 1fr); gap: 6px 14px; margin: 0; font: 400 14px/1.4 system-ui, sans-serif; }
+.brw-dl div { display: contents; }
+.brw-dl dt { color: var(--muted); }
+.brw-dl dd { margin: 0; color: #e6eaf1; overflow-wrap: anywhere; }
+.brw-reply { display: flex; gap: 8px; }
+.brw-reply .in { height: 44px; }
+.brw-reply .pri { height: 44px; padding: 0 20px; font-size: 14px; }
+.brw-toast.ignored { top: auto; bottom: 14px; border-color: hsl(var(--h) 100% 75% / .5); }
+.brw-toast.ignored .k { color: hsl(var(--h) 100% 75%); margin-right: 6px; font-size: 11px; }
+@media (prefers-reduced-motion: reduce) { .brw-cursor { transition: none; } .brw-cursor i { animation: none; } }
