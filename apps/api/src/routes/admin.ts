@@ -19,6 +19,7 @@ import { findUser, registrationMode } from './auth';
 import { includedByUser, nextReset } from '../usage';
 import { setup } from './setup';
 import { adminData } from './adminData';
+import { adminBrowser } from './adminBrowser';
 import { DEFAULT_DESIGN, DESIGNS, designInfo, designSettingsProblem, isDesign, nextDesignSettings } from '@niko/shared';
 import { DESIGNS_KEY, designSettings, forgetDesigns } from '../designs';
 import { BACKGROUNDS_KEY, backgroundSettings, forgetBackgrounds } from '../backgrounds';
@@ -26,6 +27,7 @@ import { BACKGROUNDS, DEFAULT_BACKGROUND, backgroundInfo, backgroundSettingsProb
 
 export const admin = new Hono<AppEnv>();
 admin.route('/setup', setup);
+admin.route('/browser', adminBrowser);
 type Ctx = Context<AppEnv>;
 
 // Step 1: password. The session it creates is useless until the second factor passes.

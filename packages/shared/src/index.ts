@@ -10,6 +10,7 @@ export * from './knowledgeDevice';
 export * from './knowledgeSplit';
 export * from './learned';
 export * from './dataSources';
+export * from './browser';
 import { MAP_PROVIDERS, mapPreset, type MapProvider, type MapSource } from './maps';
 
 export type ProviderGroup = 'mail' | 'calendar' | 'notes' | 'automation' | 'messaging' | 'weather' | 'ai';

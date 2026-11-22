@@ -77,7 +77,8 @@ const SECURITY_HEADERS: Record<string, string> = {
     // Hugging Face: only the on-device voice's model and voice files, which the app checks before use.
     // blob: shows the pictures Niko makes, which are kept only in the page's memory.
     // OpenFreeMap: the map picture (style, tiles, labels and icons) only; places and routes come through Niko's server.
-    "img-src 'self' data: blob:", "media-src 'self' blob:", "connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co https://tiles.openfreemap.org", "worker-src 'self'", "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'", "object-src 'none'",
+    // live.browser.run: the built-in browser's live picture, opened with a short-lived pass Niko's server hands out.
+    "img-src 'self' data: blob:", "media-src 'self' blob:", "connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co https://tiles.openfreemap.org wss://live.browser.run", "worker-src 'self'", "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'", "object-src 'none'",
   ].join('; '),
 };
 

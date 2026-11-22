@@ -7,6 +7,7 @@ import { AI_OPTION_GROUPS, AI_PRESETS, aiAllowed, defaultOn, KN_DB_FREE_BYTES, K
 import '@niko/ui/src/styles.css';
 import './admin.css';
 import { DataSourcesAdmin } from './dataSources';
+import { BrowserAdmin } from './browser';
 
 type Stage = 'loading' | 'password' | 'setup' | 'verify' | 'in';
 
@@ -2099,7 +2100,7 @@ function AuditTab({ guard, person, onPerson }: { guard: (e: unknown) => void; pe
 }
 
 function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?: { name: string; email: string } | null }) {
-  const [tab, setTab] = useState<'users' | 'payments' | 'designs' | 'backgrounds' | 'ai' | 'keys' | 'glance' | 'limits' | 'knowledge' | 'data' | 'security' | 'audit'>('users');
+  const [tab, setTab] = useState<'users' | 'payments' | 'designs' | 'backgrounds' | 'ai' | 'keys' | 'glance' | 'limits' | 'knowledge' | 'data' | 'browser' | 'security' | 'audit'>('users');
   const [me, setMe] = useState<{ name: string; email: string } | null>(initialMe ?? null);
   const [auditFor, setAuditFor] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -2129,6 +2130,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
           <button className="nv" aria-current={tab === 'limits' ? 'page' : undefined} onClick={() => setTab('limits')}>Limits</button>
           <button className="nv" aria-current={tab === 'knowledge' ? 'page' : undefined} onClick={() => setTab('knowledge')}>Knowledge</button>
           <button className="nv" aria-current={tab === 'data' ? 'page' : undefined} onClick={() => setTab('data')}>Data sources</button>
+          <button className="nv" aria-current={tab === 'browser' ? 'page' : undefined} onClick={() => setTab('browser')}>Browser</button>
           <button className="nv" aria-current={tab === 'security' ? 'page' : undefined} onClick={() => setTab('security')}>Security</button>
           <button className="nv" aria-current={tab === 'audit' ? 'page' : undefined} onClick={() => { setAuditFor(null); setTab('audit'); }}>Audit log</button>
         </nav>
@@ -2136,7 +2138,7 @@ function Users({ onSignedOut, initialMe }: { onSignedOut: () => void; initialMe?
       </aside>
       <main key={tab} className="hud-in">
         {tab === 'users' ? <PeopleTab onSignedOut={onSignedOut} onOpenPayments={() => setTab('payments')} onAudit={(id) => { setAuditFor(id); setTab('audit'); }} />
- : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'designs' ? <DesignsAdmin guard={guard} /> : tab === 'backgrounds' ? <BackgroundsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'keys' ? <KeysLibrary guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'knowledge' ? <KnowledgeAdmin guard={guard} /> : tab === 'data' ? <DataSourcesAdmin guard={guard} /> : tab === 'security' ? <>
+ : tab === 'payments' ? <PaymentsAdmin guard={guard} /> : tab === 'designs' ? <DesignsAdmin guard={guard} /> : tab === 'backgrounds' ? <BackgroundsAdmin guard={guard} /> : tab === 'ai' ? <AiOptions guard={guard} /> : tab === 'keys' ? <KeysLibrary guard={guard} /> : tab === 'glance' ? <GlanceAdmin guard={guard} /> : tab === 'limits' ? <LimitsAdmin guard={guard} /> : tab === 'knowledge' ? <KnowledgeAdmin guard={guard} /> : tab === 'data' ? <DataSourcesAdmin guard={guard} /> : tab === 'browser' ? <BrowserAdmin guard={guard} /> : tab === 'security' ? <>
           <header><h1>Security</h1><p className="sub" style={{ fontSize: 15 }}>Your own admin sign-in: authenticator app and recovery codes.</p></header>
           {note && <p className={note.ok ? 'ok' : 'err'} role="status">{note.text}</p>}
           <div className="two">

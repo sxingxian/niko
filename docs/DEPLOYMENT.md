@@ -86,6 +86,17 @@ Accounts that existed before this update keep using Niko as before: the update m
 
 The daily job (removing open sign-ups that haven't paid within 7 days, and sending the reminder emails) runs from ordinary traffic, not a Cloudflare cron trigger: the Workers free plan allows only 5 cron triggers per account, shared by all your Workers. After any API request is answered, Niko runs the job in the background if an hour has passed since the last run; one database update decides which request runs it, so it never runs twice at once. If nobody visits for a while, it runs on the next visit. `wrangler.jsonc` sets `"crons": []`, so Niko uses none of the 5.
 
+## 1d. Browser (Cloudflare Browser Run)
+
+Niko's built-in browser runs on Cloudflare Browser Run. It is connected in the **admin portal**, not as a Worker secret:
+
+1. In Cloudflare, open **My Profile › API Tokens › Create Token**, choose a custom token and give it **one** permission: **Account · Browser Rendering · Edit**. Nothing else.
+2. Copy your **Account ID** from your account's overview page.
+3. In the admin portal, open **Browser › Connect**, paste both and confirm with a code from your authenticator app. Niko tests the token (a few seconds of browser time), saves it sealed with `ENCRYPTION_KEY`, and never shows it again; it can only be replaced or removed, each time with a fresh code.
+4. **Browser › Run the test** opens a browser, connects to it straight from the portal with a short-lived pass (the way people's devices will), and tries common sign-in pages.
+
+The Workers free plan includes 10 minutes of browser time a day and 3 browsers at once, for the whole Cloudflare account.
+
 ## 2. Secrets
 
 Make the two random values once, on your own computer (nothing is written to disk):
@@ -318,6 +329,7 @@ Every change is written to the audit log as "via command line". There is no way 
 - **Neon free plan** pauses the database when idle; the first request after a pause takes a second or two longer.
 - **Resend free plan** limits emails per day; invitations beyond it fail until the next day.
 - **Files** sent or received through Niko pass through the Worker's memory (20 MB each) and are never stored.
+- **Browser Run** (the built-in browser) has 10 minutes of browser time a day and 3 browsers at once on the Workers free plan, shared by everyone; it refills at midnight UTC (8:00 am in Singapore).
 - **Wake word** works only while Niko is open in a browser that supports speech recognition (Chrome, Edge, Safari) and the microphone is allowed.
 
 ## Local development
