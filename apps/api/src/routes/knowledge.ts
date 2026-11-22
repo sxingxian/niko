@@ -4,16 +4,16 @@
 import { eq } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { users } from '@niko/db';
-import { aiAllowed, cleanKnowledgePrefs, cleanTarget, isHabit, isRemotePlace, KN_HABITS, KN_PLACE_NAMES, KN_REMOTE_PLACES, knowledgeAccess, knLearnPlaceOf, knPlaceOf, cleanFolder, knFolder, knFolderIsPath, KN_DEFAULT_FOLDER, knRemoteOf, knSearchOf, type KnowledgeAccess, type KnowledgePrefs, type KnRemotePlace } from '@niko/shared';
+import { aiAllowed, cleanKnowledgePrefs, cleanTarget, isHabit, isRemotePlace, splitFacts, KN_HABITS, KN_PLACE_NAMES, KN_REMOTE_PLACES, knowledgeAccess, knLearnPlaceOf, knPlaceOf, cleanFolder, knFolder, knFolderIsPath, KN_DEFAULT_FOLDER, knRemoteOf, knSearchOf, type KnowledgeAccess, type KnowledgePrefs, type KnRemotePlace } from '@niko/shared';
 import type { AppEnv } from '../env';
 import { audit, tooMany } from '../lib/session';
 import { hmacSha256Hex } from '../lib/crypto';
-import { binLearnedCopy, learnedCopyOf, markLearnedDirty, setLearnedCopy, syncLearnedCopy } from '../knLearnedCopy';
+import { binLearnedCopy, learnedCopyOf, markLearnedDirty, noteLearnedError, setLearnedCopy, syncLearnedCopy } from '../knLearnedCopy';
 import { confirmHabit, declineHabit, editNote, forgetAll, forgetAllFileMatches, forgetFileMatches, forgetNote, forgetNotesOnly, habitsOn, keepHabit, learnedCount, listLearned, noticeHabit, saveNote } from '../learned';
 import { offFor } from '../access';
 import { ownEmbedder, ownSearchSources } from '../ownEmbed';
 import { notionPage, notionPages, PlaceError, placeConnections, remoteFor } from '../knPlaces';
-import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile, relocate, roots, rootsMade, setRoot } from '../knPlacesStore';
+import { copiesOf, copyStep, dueForCheck, leavePlaces, learnedPending, notCopied, placeRoot, refreshFile, relocate, roots, rootsMade, setRoot } from '../knPlacesStore';
 import { credentials, notionBot } from '../providers';
 import { isKnowledgeNotion, knowledgeNotionIds } from '../knNotes';
 import { cleanStorage, loadStorage, saveStorage, shownStorage, testStorage } from '../knStorage';
@@ -47,14 +47,14 @@ async function syncCount(c: C, k: Kdb) {
   await c.get('db').update(users).set({ knowledge: prefs as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
 }
 /** Keeps the number of learned notes with the account, so answering only looks notes up for someone who has some. */
-export async function syncNotes(c: C, k: Kdb) {
+export async function syncNotes(c: C, k: Kdb, markCopy = true) {
   const u = c.get('user');
   const [notes, habits] = await Promise.all([learnedCount(k, u.id), habitsOn(k, u.id)]);
   const fresh = await c.get('db').select({ knowledge: users.knowledge }).from(users).where(eq(users.id, u.id)).limit(1);
   const prefs = { ...cleanKnowledgePrefs(fresh[0]?.knowledge), notes, habits };
   await c.get('db').update(users).set({ knowledge: prefs as unknown as Record<string, unknown> }).where(eq(users.id, u.id));
   // A copy of what Niko learned in their own app is rewritten on its next sync.
-  await markLearnedDirty(k, u.id);
+  if (markCopy) await markLearnedDirty(k, u.id);
 }
 /** Notes learned in Niko need the Knowledge database, learning in the person's plan (it works without files), and Kept in
  *  Niko allowed for what Niko learns. */
@@ -361,7 +361,7 @@ knowledge.put('/places/notion', async (c) => {
   if (b.page === null) {
     const name = b.name === undefined ? KN_DEFAULT_FOLDER.notion : cleanFolder('notion', b.name);
     if (!name) return c.json({ error: 'Give the page a name.' }, 400);
-    if (now && now.made !== false && now.root_name === name) return c.json({ ok: true, root: null, relocated: { files: 0, learned: false } });
+    if (now && now.made !== false && now.root_name === name) return c.json({ ok: true, root: null, relocated: { files: 0, learned: await learnedPending(s.k, u.id, 'notion') } });
     await saveFolder(c, 'notion', name);
     await setRoot(s.k, u.id, 'notion', null);
     return c.json({ ok: true, root: null, relocated: await relocate(s.k, u.id, 'notion') });
@@ -370,7 +370,7 @@ knowledge.put('/places/notion', async (c) => {
   if (!cred?.accessToken) return c.json({ error: 'Connect Notion first.', connect: 'notion' }, 409);
   try {
     const p = await notionPage(cred.accessToken, typeof b.page === 'string' ? b.page : '');
-    if (now && now.made === false && nid(now.root_id) === nid(p.id)) return c.json({ ok: true, root: p.title, relocated: { files: 0, learned: false } });
+    if (now && now.made === false && nid(now.root_id) === nid(p.id)) return c.json({ ok: true, root: p.title, relocated: { files: 0, learned: await learnedPending(s.k, u.id, 'notion') } });
     const relocated = await relocate(s.k, u.id, 'notion');
     await setRoot(s.k, u.id, 'notion', { id: p.id, name: p.title });
     return c.json({ ok: true, root: p.title, relocated });
@@ -387,7 +387,7 @@ knowledge.put('/places/:place/folder', async (c) => {
   if (!name) return c.json({ error: knFolderIsPath(place) ? 'Enter a folder, such as Areas/Niko Knowledge.' : 'Give the folder a name.' }, 400);
   const before = knFolder(s.prefs, place);
   await saveFolder(c, place, name);
-  return c.json({ ok: true, folder: name, relocated: name === before ? { files: 0, learned: false } : await relocate(s.k, c.get('user').id, place) });
+  return c.json({ ok: true, folder: name, relocated: name === before ? { files: 0, learned: await learnedPending(s.k, c.get('user').id, place) } : await relocate(s.k, c.get('user').id, place) });
 });
 
 // Their own S3 storage: tried before it's saved, keys never sent back. A new address needs its keys again.
@@ -520,7 +520,9 @@ knowledge.post('/learned', async (c) => {
   const how = (['told', 'corrected', 'chose', 'remember', 'confirmed', 'agreed'] as const).find((h) => h === b.how) ?? 'told';
   const place = knPlaceOf(s.prefs, s.access);
   try {
-    const item = await saveNote(s.k, c.env, u.id, { kind, said: b.said, means: b.means, how }, { cloudflare: knSearchOf(s.prefs, s.access, place) === 'cloudflare' });
+    const facts = kind === 'remembered' ? splitFacts(b.said).slice(0, 12) : [null];
+    let item: Awaited<ReturnType<typeof saveNote>> | undefined;
+    for (const f of facts) item = await saveNote(s.k, c.env, u.id, { kind, said: f ?? b.said, means: f ?? b.means, how }, { cloudflare: knSearchOf(s.prefs, s.access, place) === 'cloudflare' });
     await syncNotes(c, s.k);
     return c.json({ ok: true, item });
   } catch (e) { return fail(c, e); }
@@ -560,10 +562,19 @@ knowledge.post('/learned/copy', async (c) => {
   const u = c.get('user'), lp = knLearnPlaceOf(s.prefs, s.access);
   if (!isRemotePlace(lp)) return c.json({ error: 'What Niko learns isn’t copied anywhere.' }, 409);
   if (await tooMany(c, 'kn-lcopy:' + u.id, 60, 3600)) return c.json({ error: 'That’s a lot of updates. Niko will catch up in a little while.' }, 429);
-  const remote = await remoteFor(c.env, c.get('db'), u.id, lp);
-  if (!remote) return c.json({ error: (lp === 's3' ? 'Add your storage first, on the Files tab.' : lp === 'obsidian' ? 'Set up Obsidian again, on the Files tab.' : `Connect ${KN_PLACE_NAMES[lp]} again.`), connect: lp }, 409);
-  try { return c.json({ ok: true, copy: await syncLearnedCopy(s.k, remote, u.id) }); }
-  catch (e) { return placeFail(c, e); }
+  const remote = await remoteFor(c.env, c.get('db'), u.id, lp).catch(() => null);
+  if (!remote) {
+    const msg = lp === 's3' ? 'Add your storage first, on the Files tab.' : lp === 'obsidian' ? 'Set up Obsidian again, on the Files tab.' : `Connect ${KN_PLACE_NAMES[lp]} again.`;
+    await noteLearnedError(s.k, u.id, msg);
+    return c.json({ error: msg, connect: lp }, 409);
+  }
+  // The copy is looked at for edits first: a bullet added, changed or removed there is picked up as a note.
+  const started = Date.now();
+  try {
+    const copy = await syncLearnedCopy(s.k, remote, u.id, started, { look: { env: c.env, how: { cloudflare: knSearchOf(s.prefs, s.access, knPlaceOf(s.prefs, s.access)) === 'cloudflare' } } });
+    if (copy.picked && (copy.picked.added || copy.picked.removed) && Date.parse(copy.picked.at) >= started - 1000) await syncNotes(c, s.k, false);
+    return c.json({ ok: true, copy });
+  } catch (e) { return placeFail(c, e); }
 });
 // Habits Niko notices: one sighting from the app's watcher (a short trip switched to walking, the inbox opened first
 // thing on a weekday morning). Suggested once, after enough sightings; kept only with a yes.

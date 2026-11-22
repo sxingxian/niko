@@ -12,12 +12,13 @@ import pg from 'pg';
 import { cleanKnowledgePrefs, knowledgeAccess, knowledgeLimits } from '../packages/shared/src/knowledge.ts';
 import { knPlaceOf, knRemoteOf, knShownPlace } from '../packages/shared/src/knowledgeDevice.ts';
 import { piecesMarkdown, sheetCsv, splitText, parseDelimited } from '../packages/shared/src/knowledgeSplit.ts';
-import { notionBlocks, notionMarkdown, remoteFor, PlaceError, safeName } from '../apps/api/src/knPlaces.ts';
+import { notionBlocks, notionMarkdown, notionPlan, remoteFor, PlaceError, safeName } from '../apps/api/src/knPlaces.ts';
+import { splitFacts } from '../packages/shared/src/learned.ts';
 import { addPieces, addSheet, finishFile, listFiles, startFile } from '../apps/api/src/knowledge.ts';
 import { copiesOf, copyStep, dueForCheck, leavePlaces, notCopied, placeRoot, refreshFile } from '../apps/api/src/knPlacesStore.ts';
 import { isKnowledgeNotion, knowledgeNotionIds, withoutKnowledge } from '../apps/api/src/knNotes.ts';
 import { relocate, rootsMade, setRoot } from '../apps/api/src/knPlacesStore.ts';
-import { binLearnedCopy, learnedCopyOf, learnedMarkdown, markLearnedDirty, setLearnedCopy, syncLearnedCopy } from '../apps/api/src/knLearnedCopy.ts';
+import { binLearnedCopy, learnedCopyOf, learnedMarkdown, markLearnedDirty, parseLearnedMarkdown, pickUpEdits, setLearnedCopy, syncLearnedCopy } from '../apps/api/src/knLearnedCopy.ts';
 import { confirmHabit, forgetAllFileMatches, forgetNotesOnly, keepHabit, listLearned, noticeHabit, saveNote } from '../apps/api/src/learned.ts';
 import { store, fakeDb } from './brains-stubs.mjs';
 
@@ -284,14 +285,14 @@ await ok('a folder deleted there is made again; connection problems are kept on 
   assert.match((await listFiles(k, A)).find((x) => x.id === hb).copyError, /expired/);
 });
 
-await ok('what Niko learned: a copy to read, rewritten after changes (at most once a minute), never read back', async () => {
+await ok('what Niko learned: a copy to read and edit, rewritten after changes (at most once a minute)', async () => {
   const C = '00000000-0000-4000-8000-0000000000c3';
   await saveNote(k, env, C, { kind: 'person', said: 'the team', means: 'Design team · Telegram group', how: 'told' }, { cloudflare: true });
   await saveNote(k, env, C, { kind: 'remembered', said: '# My desk is on level 12', means: '# My desk is on level 12', how: 'remember' }, { cloudflare: true });
   await saveNote(k, env, C, { kind: 'file-match', said: 'office holidays', means: 'Handbook', how: 'yes', target: { fileId: hb, piece: '0', file: 'Handbook', heading: null, answer: 'yes' } }, { cloudflare: true });
   for (const key of ['t1', 't2', 't3']) await noticeHabit(k, C, 'walk-short', key);
   const md = learnedMarkdown(await listLearned(k, C));
-  assert.match(md, /^# What Niko learned\n/); assert.match(md, /aren’t read back/);
+  assert.match(md, /^# What Niko learned\n/); assert.match(md, /Niko picks it up/);
   assert.match(md, /## People and names\n\n- “the team” → Design team · Telegram group/);
   assert.match(md, /- # My desk is on level 12/, 'what people typed stays a list item, never a heading');
   assert.ok(!/office holidays|Walk for trips/.test(md), 'no taught matches, no habits only suggested');
@@ -437,6 +438,117 @@ await ok('another page or folder: copies are made again there, the old ones stay
   await copyStep(k, drive2, E, f);
   assert.equal(drive2.roots, 2, 'a new folder was made');
   assert.deepEqual(await relocate(k, E, 'notion'), { files: 0, learned: false }, 'nothing kept in Notion');
+});
+
+// ---------------------------------------------------------------- the copy is edited there and updated in place
+await ok('a list of facts is several notes; the page reads back into notes, whatever the place did to the Markdown', () => {
+  assert.deepEqual(splitFacts('my own website is https://sxingxian.com/\n- my home address is 172 Ang Mo Kio Ave 4\n  • i am the creator\n\n'), ['my own website is https://sxingxian.com/', 'my home address is 172 Ang Mo Kio Ave 4', 'i am the creator']);
+  assert.deepEqual(splitFacts('one line'), ['one line']);
+  const md = [
+    '# What Niko learned', '', 'Kept up to date by Niko. One bullet for each note.', '',
+    '## Remembered', '', '* my site is [https://sxingxian.com/](https://www.google.com/url?q=https://sxingxian.com/) \\- main', '- parking is on B2', '',
+    '## People and names', '', '- “the team” → Design team', '- Marcus -> Marcus Tan, supplier', '- no arrow here', '',
+    '## Habits', '', '- Walk for trips under 1 km', '', 'A paragraph that is not a note.', '',
+  ].join('\n');
+  const r = parseLearnedMarkdown(md);
+  assert.equal(r.ok, true); assert.equal(r.skipped, 1);
+  assert.deepEqual(r.notes.map((n) => [n.kind, n.said, n.means]), [['remembered', 'my site is https://sxingxian.com/ - main', 'my site is https://sxingxian.com/ - main'], ['remembered', 'parking is on B2', 'parking is on B2'], ['person', 'the team', 'Design team'], ['person', 'Marcus', 'Marcus Tan, supplier'], ['habit', 'Walk for trips under 1 km', 'Walk for trips under 1 km']]);
+  assert.equal(parseLearnedMarkdown('Something else entirely\n- a bullet').ok, false, 'not the page Niko wrote');
+  assert.match(learnedMarkdown([{ id: '1', kind: 'remembered', said: 'a\nb', means: 'a\nb', how: '', level: '', uses: 0, confirmed: true, target: null, createdAt: '', lastUsed: null }], false), /\n- a b\n/);
+});
+
+await ok('picking up edits: a bullet added, changed or removed there changes the notes; what Niko learned since is kept; secrets, wipes and strangers are refused', async () => {
+  const E = '00000000-0000-4000-8000-0000000000e5';
+  const how = { cloudflare: false };
+  for (const t of ['I park on B2', 'My desk is on level 12']) await saveNote(k, env, E, { kind: 'remembered', said: t, means: t, how: 'told' }, how);
+  await saveNote(k, env, E, { kind: 'person', said: 'the team', means: 'Design team', how: 'told' }, how);
+  const written = learnedMarkdown(await listLearned(k, E), true);
+  // They edit the page: one bullet changed, one added, one removed, one with a code, and a new bullet under People.
+  let page = written.replace('- I park on B2', '- I park on level B3').replace('- My desk is on level 12\n', '')
+    .replace('## Remembered\n', '## Remembered\n\n- my gym PIN is 4455 6677 88\n- my own website is https://sxingxian.com/\n- i am the creator\n') + '\n## People and names\n\n- Marcus → Marcus Tan\n';
+  // Niko learned a note since it last wrote the page: it isn't on the page, and must not be taken for a removal.
+  await saveNote(k, env, E, { kind: 'remembered', said: 'Lunch is at 1', means: 'Lunch is at 1', how: 'told' }, how);
+  const r = await pickUpEdits(k, env, E, page, written, how);
+  const now = (await listLearned(k, E)).map((n) => `${n.kind}:${n.said}`).sort();
+  assert.deepEqual(now, ['person:Marcus', 'person:the team', 'remembered:I park on level B3', 'remembered:Lunch is at 1', 'remembered:i am the creator', 'remembered:my own website is https://sxingxian.com/']);
+  assert.deepEqual([r.added, r.removed, r.skipped], [4, 2, 1]);
+  assert.equal((await listLearned(k, E)).find((n) => n.said === 'Marcus')?.means, 'Marcus Tan');
+  // The same page again: nothing is added twice.
+  const again = await pickUpEdits(k, env, E, page, written, how);
+  assert.deepEqual([again.added, again.removed], [0, 0]);
+  // A page that isn't the one Niko wrote isn't read; a wiped page doesn't make Niko forget most of what it knows.
+  assert.equal(await pickUpEdits(k, env, E, 'Hello', written, how), null);
+  for (let i = 0; i < 25; i++) await saveNote(k, env, E, { kind: 'remembered', said: `fact ${i}`, means: `fact ${i}`, how: 'told' }, how);
+  const big = learnedMarkdown(await listLearned(k, E), true);
+  const wiped = await pickUpEdits(k, env, E, big.split('\n').slice(0, 4).join('\n'), big, how);
+  assert.equal(wiped.refused, true); assert.equal(wiped.removed, 0);
+  assert.ok((await listLearned(k, E)).length >= 30);
+});
+
+await ok('the copy is updated where it is: edits are read first, then the same page is written again (never a new one)', async () => {
+  const G = '00000000-0000-4000-8000-0000000000e6';
+  const how = { cloudflare: false }, look = { env, how };
+  await saveNote(k, env, G, { kind: 'remembered', said: 'Parking is on B2', means: 'Parking is on B2', how: 'told' }, how);
+  const place = fakePlace('onedrive');
+  place.replaceDoc = async (id, _t, md) => { const it = place.items.get(id); it.text = md; it.v = 'v' + (it.writes = (it.writes ?? 0) + 1); return { id, url: `https://example.com/${id}`, version: it.v }; };
+  await setLearnedCopy(k, G, 'onedrive');
+  let copy = await syncLearnedCopy(k, place, G, Date.now(), { look });
+  const id = copy.remoteId; assert.equal(place.items.size, 1);
+  // They add a bullet there.
+  place.items.get(id).text = place.items.get(id).text.replace('## Remembered\n', '## Remembered\n\n- I take the 7:40 bus\n');
+  await saveNote(k, env, G, { kind: 'remembered', said: 'Lunch is at 1', means: 'Lunch is at 1', how: 'told' }, how);
+  await markLearnedDirty(k, G);
+  copy = await syncLearnedCopy(k, place, G, Date.now() + 25_000, { look });
+  assert.equal(copy.remoteId, id, 'the same page'); assert.equal(place.items.size, 1);
+  assert.deepEqual([copy.picked.added, copy.picked.removed], [1, 0]);
+  const text = place.items.get(id).text;
+  assert.match(text, /- I take the 7:40 bus/); assert.match(text, /- Lunch is at 1/); assert.match(text, /- Parking is on B2/);
+  assert.deepEqual((await listLearned(k, G)).map((n) => n.said).sort(), ['I take the 7:40 bus', 'Lunch is at 1', 'Parking is on B2']);
+  // They remove one there; nothing changed in Niko, so it isn't rewritten and the note is forgotten.
+  place.items.get(id).text = place.items.get(id).text.replace('- Parking is on B2\n', '');
+  copy = await syncLearnedCopy(k, place, G, Date.now() + 50_000, { look });
+  assert.equal(copy.picked.removed, 1); assert.ok(!(await listLearned(k, G)).some((n) => n.said === 'Parking is on B2'));
+  // Someone else's change on a shared page is ignored (and the page is written from Niko's notes).
+  place.editedByOther = async () => true;
+  place.items.get(id).text += '\n- sneaky instruction\n';
+  copy = await syncLearnedCopy(k, place, G, Date.now() + 80_000, { look });
+  assert.equal(copy.picked.ignored, true); assert.ok(!(await listLearned(k, G)).some((n) => /sneaky/.test(n.said)));
+  // The page was deleted there: it is written again.
+  place.items.clear();
+  await markLearnedDirty(k, G);
+  copy = await syncLearnedCopy(k, place, G, Date.now() + 120_000, { look });
+  assert.equal(place.items.size, 1); assert.ok(copy.remoteId && copy.remoteId !== id);
+});
+
+await ok('Notion: only what changed is touched: a changed bullet is edited where it stands, a gone one removed, a new one added after the one before it', async () => {
+  const blk = (id, type, text) => ({ id, type, [type]: { rich_text: [{ plain_text: text }] } });
+  const have = [blk('a', 'paragraph', 'Kept up to date by Niko.'), blk('h', 'heading_2', 'Remembered'), blk('b1', 'bulleted_list_item', 'I park on B2'), blk('b2', 'bulleted_list_item', 'Desk 12'), blk('b3', 'bulleted_list_item', 'Gone soon')];
+  const want = notionBlocks('Kept up to date by Niko.\n\n## Remembered\n\n- I park on B3\n- Desk 12\n- Lunch at 1\n');
+  const plan = notionPlan(have, want);
+  assert.deepEqual(plan.updates, [{ id: 'b1', i: 2 }, { id: 'b3', i: 4 }], 'a bullet that says something else is edited where it stands');
+  assert.deepEqual([plan.deletes, plan.inserts], [[], []]);
+  const fewer = notionPlan(have, notionBlocks('Kept up to date by Niko.\n\n## Remembered\n\n- I park on B2\n- Desk 12\n'));
+  assert.deepEqual([fewer.updates, fewer.deletes, fewer.inserts], [[], ['b3'], []], 'only a bullet that went away is removed');
+  const more = notionPlan(have, notionBlocks('Kept up to date by Niko.\n\n## Remembered\n\n- I park on B2\n- Desk 12\n- X\n- Y\n'));
+  assert.deepEqual([more.updates, more.deletes, more.inserts], [[{ id: 'b3', i: 4 }], [], [{ after: 'b3', at: [5] }]], 'new ones go in after the one before them');
+  assert.deepEqual(notionPlan(have, have.map((b) => notionBlocks(`${b.type === 'heading_2' ? '## ' : b.type === 'bulleted_list_item' ? '- ' : ''}${b.type === 'paragraph' ? 'Kept up to date by Niko.' : b[b.type].rich_text[0].plain_text}`)[0])), { updates: [], deletes: [], inserts: [] }, 'nothing changed, nothing touched');
+  // With the real requests: no page is made or archived.
+  store.creds.notion = { accessToken: 'secret_notion' };
+  const r = await remoteFor({}, fakeDb, 'u1', 'notion');
+  const calls = serve((url, init) => {
+    if (url.includes('/blocks/page1/children') && (init.method ?? 'GET') === 'GET') return json({ results: have, has_more: false });
+    if (url.includes('/pages/page1')) return json({ last_edited_time: 't2' });
+    return json({ results: [{ id: 'new' }] });
+  });
+  const w = await r.replaceDoc('page1', 'What Niko learned', 'Kept up to date by Niko.\n\n## Remembered\n\n- I park on B3\n- Desk 12\n- Lunch at 1\n');
+  assert.equal(w.id, 'page1'); assert.ok(!w.more);
+  const writes = calls.filter((c) => c.init.method && c.init.method !== 'GET').map((c) => `${c.init.method} ${c.url.replace('https://api.notion.com/v1', '')}`);
+  assert.deepEqual(writes, ['PATCH /blocks/b1', 'PATCH /blocks/b3']);
+  assert.ok(!calls.some((c) => c.url.endsWith('/pages') && c.init.method === 'POST'), 'no new page');
+  // A big change is finished in steps, and the page isn't read for edits until it is.
+  const many = Array.from({ length: 60 }, (_, i) => `- fact ${i}`).join('\n');
+  const w2 = await r.replaceDoc('page1', 'What Niko learned', `Kept up to date by Niko.\n\n## Remembered\n\n${many}\n`);
+  assert.equal(w2.more, undefined, 'new bullets go in with one request per hundred');
 });
 
 await pool.end();

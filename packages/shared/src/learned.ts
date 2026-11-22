@@ -56,6 +56,12 @@ export function cleanTarget(v: unknown): KnTarget | null {
 
 // ---------------------------------------------------------------- never kept
 /** Passwords, codes, card and account numbers are never kept, even when the person asks. */
+/** One thing to remember on a line: a message that lists several facts (on separate lines, or as bullets) is several
+ *  notes, so each gets its own bullet wherever Niko keeps a copy. */
+export function splitFacts(text: string): string[] {
+  const parts = text.split(/\r?\n+/).map((x) => x.replace(/^\s*(?:[-*•·]|\d+[.)])\s+/, '').trim()).filter(Boolean);
+  return parts.length ? parts : [text.trim()].filter(Boolean);
+}
 export function looksSecret(text: string): boolean {
   return /\b(password|passcode|pass code|pin( code)?|otp|one[- ]time (code|password)|cvv|cvc|security code|verification code|login code|2fa)\b/i.test(text)
     || /\b(?:\d[ -]?){9,}\b/.test(text) // long runs of digits: card, account and ID numbers

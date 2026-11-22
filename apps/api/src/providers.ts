@@ -221,6 +221,7 @@ async function notionMe(userId: string, token: string): Promise<{ owner: string;
   return r;
 }
 /** Niko's own Notion connection, for leaving out what Knowledge made (see knNotes.ts). Empty if Notion couldn't say. */
+export const notionPeople = (userId: string, token: string) => notionMe(userId, token);
 export const notionBot = async (userId: string, token: string) => (await notionMe(userId, token)).bot;
 const notionMadeBy = new Map<string, string>();
 /** Who created a Notion page or database, remembered (it never changes). Null if it can't be read. */

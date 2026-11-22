@@ -30,7 +30,8 @@ type StorageShown = { endpoint: string; bucket: string; region: string; access: 
 type PlaceInfo = { connected: boolean; label: string | null; root: string | null; picked?: boolean; storage?: StorageShown; obsidian?: ObsidianShown };
 type StorageForm = { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string; accessId: string; accessSecret: string };
 const EMPTY_STORAGE: StorageForm = { endpoint: '', bucket: '', accessKeyId: '', secretAccessKey: '', accessId: '', accessSecret: '' };
-type LearnedCopy = { place: KnRemotePlace; url: string | null; dirty: boolean; syncedAt: string | null; error: string | null };
+type PickedUp = { added: number; removed: number; skipped: number; ignored?: boolean; refused?: boolean; at: string };
+type LearnedCopy = { place: KnRemotePlace; url: string | null; dirty: boolean; syncedAt: string | null; error: string | null; picked?: PickedUp | null };
 type State = { available: boolean; access: KnowledgeAccess; prefs: KnowledgePrefs; limits: KnowledgeLimits; usage: { files: number; bytes: number }; ownSearch?: OwnSource[]; places?: Partial<Record<KnRemotePlace, PlaceInfo>>; split?: 'browser' | 'server';
   /** Where what Niko learns can be kept besides Niko and this device, and the copy kept there now. */
   learnPlaces?: Partial<Record<KnRemotePlace, PlaceInfo>>; learnedCopy?: LearnedCopy | null };
@@ -415,9 +416,37 @@ export function Knowledge() {
   const lShown: KnPlace = lPicked ?? learnNow;
   const notesPlace: Place = learnNow === 'device' ? 'device' : 'niko';
   const lCopy = st.learnedCopy && st.learnedCopy.place === learnNow ? st.learnedCopy : null;
+  // The copy is looked at once when this page opens (a bullet added, changed or removed there becomes a note), and a copy
+  // that was never written, with no problem recorded (a write that was cut off), is written now instead of saying
+  // "Writing the copy…" for ever. If that fails the problem shows, with a button to try again.
+  const [lWriting, setLWriting] = useState(false);
+  const lLooked = useRef('');
+  const lTries = useRef(0);
+  const [notesKey, setNotesKey] = useState(0);
+  const writeCopy = useCallback(async () => {
+    setLWriting(true);
+    try {
+      const r = await api<{ copy?: { picked?: PickedUp | null } }>('/knowledge/learned/copy', { method: 'POST' });
+      const pk = r.copy?.picked;
+      if (pk && (pk.added || pk.removed) && Date.now() - Date.parse(pk.at) < 60_000) setNotesKey((n) => n + 1);
+    } catch (e) { setNote({ ok: false, text: (e as Error).message }); }
+    finally { setLWriting(false); await load(); }
+  }, [load]);
+  useEffect(() => {
+    if (!lCopy || lWriting || lMoving) return;
+    const open = lLooked.current !== lCopy.place;
+    const stuck = !lCopy.syncedAt && !lCopy.error && lTries.current < 4;
+    if (!open && !stuck) return;
+    if (open) { lLooked.current = lCopy.place; lTries.current = 0; } else lTries.current++;
+    void writeCopy();
+  }, [lCopy, lWriting, lMoving, writeCopy]);
   const lStatus = (p: KnPlace) => p === learnNow ? 'In use' : p === 'niko' ? 'All your devices' : p === 'device' ? 'Stays on this computer'
     : lInfo(p)?.connected ? `${p === 's3' || p === 'obsidian' ? 'Set up' : 'Connected'}${lInfo(p)?.label ? ` · ${lInfo(p)!.label}` : ''}` : p === 's3' || p === 'obsidian' ? 'Set it up on the Files tab' : 'Not connected yet';
   const lCanMove = !isRemotePlace(lShown) || !!lInfo(lShown)?.connected;
+  const pickedLine = (p: PickedUp, where: string) => p.ignored ? 'A change someone else made there was ignored.'
+    : [p.added || p.removed ? `Picked up ${[p.added ? `${p.added} new` : '', p.removed ? `${p.removed} removed` : ''].filter(Boolean).join(' and ')} from ${where} (${ago(p.at)}).` : '',
+      p.skipped ? `${p.skipped} line${p.skipped === 1 ? '' : 's'} couldn’t be used: a bullet Niko couldn’t read, or something that looks like a password or code.` : '',
+      p.refused ? 'Most notes were missing from the page at once, so Niko kept them. Forget notes in Niko if you meant to.' : ''].filter(Boolean).join(' ');
   const ago = (iso: string) => { const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return m < 1 ? 'just now' : m === 1 ? '1 minute ago' : m < 60 ? `${m} minutes ago` : m < 120 ? 'an hour ago' : `${Math.round(m / 60)} hours ago`; };
   const moveLearned = async (to: KnPlace) => {
     setNote(null);
@@ -456,11 +485,11 @@ export function Knowledge() {
             <span className="srow-hint">Never kept on Niko’s server. Locked to your account on this computer. Only the notes that fit a question go with it to the AI.</span>
           </> : <>
             <span className="kn-lead">{lShown === 'notion' ? 'A “What Niko learned” page on your Niko Knowledge page in Notion, kept up to date.' : lShown === 'gdrive' ? 'A “What Niko learned” Google Doc in your Niko Knowledge folder, kept up to date.' : lShown === 'onedrive' ? 'A “What Niko learned.md” file in Niko’s own folder in your OneDrive, kept up to date.' : lShown === 'obsidian' ? 'A “What Niko learned” note in the Niko Knowledge folder of your vault, kept up to date.' : 'A “What Niko learned.md” file in the niko-knowledge folder of your storage, kept up to date.'}</span>
-            <span className="srow-hint">Niko keeps the notes too, so it can look them up on every question. The copy is for you to read: changes made there aren’t read back, so nobody else can add to what Niko learned. Edit or forget notes here.</span>
+            <span className="srow-hint">Niko keeps the notes too, so it can look them up on every question. Each note is one bullet: add, change or remove a bullet there and Niko picks it up the next time it looks (when you open this page, and when it learns something). It never asks for passwords or codes, and a change someone else makes on a shared page is ignored.</span>
             {lShown === learnNow && isRemotePlace(lShown) && lInfo(lShown)?.connected && <PlaceWhere place={lShown} folder={prefs.folders?.[lShown]} root={lInfo(lShown)!.root} picked={lInfo(lShown)!.picked} workspace={lInfo(lShown)!.label} busy={!!lMoving} onRelocated={(r, text) => relocated(lShown as KnRemotePlace, r, text)} />}
             {lShown === learnNow && lCopy && <div className="kn-move">
-              <span className={'srow-hint' + (lCopy.error ? ' bad' : ' ready')}>{lCopy.error ?? (lCopy.syncedAt ? `Copy updated ${ago(lCopy.syncedAt)}` : 'Writing the copy…')}</span>
-              {lCopy.error ? <button type="button" className="bt md" onClick={() => void api('/knowledge/learned/copy', { method: 'POST' }).then(load).catch((e) => setNote({ ok: false, text: (e as Error).message }))}>Try again</button>
+              <span className={'srow-hint' + (lCopy.error ? ' bad' : lWriting || lCopy.syncedAt ? ' ready' : ' wait')}>{lWriting ? 'Looking at the copy…' : lCopy.error ?? (lCopy.syncedAt ? `Copy updated ${ago(lCopy.syncedAt)}` : 'Not written yet.')}{!lWriting && !lCopy.error && lCopy.picked ? ` ${pickedLine(lCopy.picked, PLACE_NAME[learnNow])}` : ''}</span>
+              {lCopy.error || (!lCopy.syncedAt && !lWriting) ? <button type="button" className="bt md" disabled={lWriting} onClick={() => void writeCopy()}>{lCopy.error ? 'Try again' : 'Write it now'}</button>
                 : copyLink(lCopy.url) && <a className="bt md" {...copyLink(lCopy.url)!}>Open in {PLACE_NAME[learnNow]}</a>}
             </div>}
             {lShown !== learnNow && isRemotePlace(lShown) && !lInfo(lShown)?.connected && (lShown === 's3' || lShown === 'obsidian'
@@ -492,7 +521,7 @@ export function Knowledge() {
       <div className="kn-page">
         <div className="kn-main">
           {tabs}
-          <LearnedTab account={account} place={notesPlace} filesPlace={access.learnPlaces.niko ? place : notesPlace} where={learnWhere} copied={isRemotePlace(learnNow)} files={access.files} learn={prefs.learn} onLearn={(v) => void savePrefs({ learn: v }).then(() => refreshMe())} situations={prefs.situations} onSituations={(v) => void savePrefs({ situations: v }).then(() => refreshMe())} />
+          <LearnedTab key={notesKey} account={account} place={notesPlace} filesPlace={access.learnPlaces.niko ? place : notesPlace} where={learnWhere} copied={isRemotePlace(learnNow)} files={access.files} learn={prefs.learn} onLearn={(v) => void savePrefs({ learn: v }).then(() => refreshMe())} situations={prefs.situations} onSituations={(v) => void savePrefs({ situations: v }).then(() => refreshMe())} />
         </div>
         <LearnedAside files={access.files} />
       </div>

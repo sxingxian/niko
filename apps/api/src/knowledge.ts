@@ -96,10 +96,13 @@ export async function readWithCloudflare(env: Pick<Env, 'AI'>, name: string, byt
   if (bytes.byteLength === 0) throw new KnError('That file is empty.');
   if (bytes.byteLength > Math.min(maxBytes, KN_READ_MAX_BYTES)) throw new KnError(`That file is over ${Math.round(Math.min(maxBytes, KN_READ_MAX_BYTES) / MB)} MB.`, 413);
   let r: { format: string; data?: string; error?: string };
+  const file = () => ({ name: name.slice(0, 200), blob: new Blob([bytes]) });
+  // Settings go only where they are known to apply (PDF). If Cloudflare turns the settings down, the file is read
+  // again with none: a Word file read with the plain defaults still comes out as text (pictures are left out either way).
+  const attempt = (opts?: unknown) => env.AI.toMarkdown(file(), opts as never) as Promise<typeof r>;
   try {
-    r = (await env.AI.toMarkdown({ name: name.slice(0, 200), blob: new Blob([bytes]) }, {
-      conversionOptions: { pdf: { images: { convert: false }, metadata: false }, docx: { images: { convert: false } } },
-    })) as typeof r;
+    try { r = await (kind === 'pdf' ? attempt({ conversionOptions: { pdf: { images: { convert: false }, metadata: false } } }) : attempt()); }
+    catch (e) { if (kind !== 'pdf' || !/too small|expected|invalid|option/i.test(String((e as Error)?.message ?? e))) throw e; r = await attempt(); }
   } catch (e) { throw new KnError(`Cloudflare couldn’t read that file just now (${String((e as Error)?.message ?? e).slice(0, 120)}).`, 502); }
   if (r.format === 'error' || typeof r.data !== 'string') throw new KnError(`Cloudflare couldn’t read that file${r.error ? `: ${String(r.error).slice(0, 160)}` : '.'}`, 502);
   const text = r.data.replace(/\u0000/g, '').trim();

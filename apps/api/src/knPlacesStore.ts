@@ -41,9 +41,14 @@ export async function relocate(k: Kdb, account: string, place: KnRemotePlace): P
      where account_id = $1 and place = $2 returning id`, [account, place]);
   if (files.length) await k.q(`update kn_sheets s set remote_id = null, remote_url = null, remote_version = null, remote_rows = 0 from kn_documents d
      where d.id = s.document_id and s.account_id = $1 and d.place = $2`, [account, place]);
-  const learned = await k.q(`update kn_learned_copy set remote_id = null, remote_url = null, dirty = true, synced_at = null, error = null
+  const learned = await k.q(`update kn_learned_copy set remote_id = null, remote_url = null, written = null, picked = null, dirty = true, synced_at = null, error = null
      where account_id = $1 and place = $2 returning account_id`, [account, place]);
   return { files: files.length, learned: learned.length > 0 };
+}
+/** A copy of what Niko learned in this place that was never written, or failed last time: choosing the same page or
+ *  folder again writes it, instead of doing nothing. */
+export async function learnedPending(k: Kdb, account: string, place: KnRemotePlace): Promise<boolean> {
+  return (await k.q(`select 1 from kn_learned_copy where account_id = $1 and place = $2 and (remote_id is null or dirty or error is not null)`, [account, place])).length > 0;
 }
 export async function roots(k: Kdb, account: string): Promise<Partial<Record<KnRemotePlace, string>>> {
   return Object.fromEntries(Object.entries(await rootsMade(k, account)).map(([p, r]) => [p, r!.name]));
