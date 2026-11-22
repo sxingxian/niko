@@ -97,6 +97,13 @@ Niko's built-in browser runs on Cloudflare Browser Run. It is connected in the *
 
 The Workers free plan includes 10 minutes of browser time a day and 3 browsers at once, for the whole Cloudflare account.
 
+**More browser services (optional).** Admin portal › Browser › Browser services lists them in the order Niko tries them. People's own services (when you allow it) come first, then the services below. A service that is out of time, full or can't be reached is skipped.
+
+- **Your own browser server** (2): any server that speaks the Chrome DevTools protocol over a WebSocket, for example [Browserless](https://github.com/browserless/browserless) in Docker on a NAS (`ghcr.io/browserless/chromium`, with `TOKEN=` set). Make it reachable over HTTPS through a Cloudflare Tunnel (for example `browser.yourdomain.com` → `http://localhost:3000`), then **Set up** with `wss://browser.yourdomain.com` and the token. It has no daily limit. **Browsers at once** (2 by default) protects the server; when it's full, Niko uses the next service.
+- **Browser service with a key** (3): a hosted service such as Browserless (`wss://production-sfo.browserless.io`) or Steel (`wss://connect.steel.dev`), billed by that service. **Hosted service time a day** limits it per person (no limit by default).
+
+Keys and tokens are sealed with `ENCRYPTION_KEY` and never sent to devices. For these services, each person's BrowserKeeper connects to the service and relays the live picture, so that traffic runs through the Worker. Each browser gets its own browser context (its own cookies), which is thrown away when it closes.
+
 ## 2. Secrets
 
 Make the two random values once, on your own computer (nothing is written to disk):

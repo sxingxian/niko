@@ -1480,3 +1480,6 @@ a.bt { text-decoration: none; display: inline-flex; align-items: center; justify
   .bs-keep .segs-b { flex: 1; }
   .bs-steps li { grid-template-columns: 1fr; gap: 0; }
 }
+.bs-svc-b { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.bs-num.add { border-style: dashed; border-color: rgba(255,255,255,.4); font-size: 16px; }
+@media (max-width: 700px) { .bs-svc:has(.bs-svc-b) { flex-wrap: wrap; } .bs-svc-b { width: 100%; justify-content: flex-start; } }

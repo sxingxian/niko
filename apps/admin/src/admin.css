@@ -535,3 +535,4 @@ body { background: #07090d; }
 .br-foot { margin: 14px 0 0; }
 .br-col { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
 .ai-options .ai-txt > span.sub { white-space: normal; }
+.ai-row.dim { opacity: .5; }

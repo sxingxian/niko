@@ -3,11 +3,12 @@
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { browserActivity, browserSessions, browserSignins, connections, users } from '@niko/db';
-import { cleanBrowserPrefs, cleanOutline, hostBlocked, judgeAction, lastRefill, openableHost, outlineText, pageGivesOrders, parseStep, siteOf, toAddress, type StepAnswer } from '@niko/shared';
+import { BROWSER_SERVICE_ORDER, cleanBrowserPrefs, keyParamFor, type BrowserServiceKind, cleanOutline, hostBlocked, judgeAction, lastRefill, openableHost, outlineText, pageGivesOrders, parseStep, siteOf, toAddress, type StepAnswer } from '@niko/shared';
 import type { AppEnv } from '../env';
-import { browserState, checkOk, codeIn, scrub, keeper, logActivity, minutesFor, openSessionOf, signOk, type BrowserState } from '../browser';
+import { browserState, checkOk, checkRelayPass, codeIn, scrub, keeper, KeeperError, keeperRelay, logActivity, relayPass, minutesFor, openSessionOf, signOk, type BrowserState } from '../browser';
 import { CfError, cfCloseTab, cfConnection, cfOpen, cfPass, cfTab } from '../browserCf';
-import { audit } from '../lib/session';
+import { accountConn, cleanServiceInput, personConn, personService, removeService, saveService, ServiceError, testService, type ServiceConn } from '../browserServices';
+import { audit, tooMany } from '../lib/session';
 import { BrainFail, think } from '../brains';
 import { listMail } from '../providers';
 import { mailDetail } from '../details';
@@ -49,12 +50,25 @@ browser.get('/', async (c) => {
   const s = await browserState(db, u);
   const [info, minutes, open] = await Promise.all([cfConnection(c.env, db), minutesFor(db, u.id, s), openSessionOf(db, u.id)]);
   return c.json({
-    offered: s.allowance.on, allowed: s.allowance.on && s.prefs.on, ready: !!info,
+    offered: s.allowance.on, allowed: s.allowance.on && s.prefs.on, ready: !!info || !!(await accountConn(c.env, db, 'server')) || !!(await accountConn(c.env, db, 'hosted')),
     prefs: s.prefs, minutes, blocked: s.defaults.blocked, staySignedIn: s.defaults.staySignedIn, maxHistoryDays: s.defaults.historyDays,
     open: open ? { id: open.id, site: open.site } : null,
+    ownService: s.allowance.ownService, own: s.allowance.ownService ? await personService(db, u.id) : null, ownMinutes: s.allowance.ownMins,
   });
 });
 
+/** The address the device connects to for a relayed tab (Niko's own server, with a one-minute pass). */
+async function relayWs(c: Ctx, sessionId: string, targetId: string): Promise<string> {
+  const u = new URL(`/api/browser/${sessionId}/relay`, c.req.url);
+  u.protocol = u.protocol === 'http:' ? 'ws:' : 'wss:';
+  u.searchParams.set('target', targetId);
+  u.searchParams.set('pass', await relayPass(c.env.ENCRYPTION_KEY, sessionId, targetId));
+  return u.toString();
+}
+
+// Opens a browser on the first service that works, in order: the person's own (when allowed), the built-in browser,
+// the account's own server (while it has room), the hosted service. One that is out of time, full or can't be reached
+// is skipped.
 browser.post('/open', async (c) => {
   const u = c.get('user'), db = c.get('db');
   const b = await c.req.json<{ url?: string }>().catch(() => ({} as { url?: string }));
@@ -63,25 +77,53 @@ browser.post('/open', async (c) => {
   if (!s.prefs.on) return c.json({ error: 'Browsing is switched off in Settings › Browser.', code: 'off' }, 403);
   const to = addressFor(b.url, s);
   if (to && 'error' in to) return c.json({ error: to.error, code: 'blocked' }, 403);
-  const minutes = await minutesFor(db, u.id, s);
-  if (minutes.left !== null && minutes.left < 15) return c.json({ error: 'Today’s browser time is used up.', code: 'minutes', refillAt: minutes.refillAt }, 429);
-  const conn = await cfConnection(c.env, db);
-  if (!conn) return c.json({ error: UNAVAILABLE, code: 'unavailable' }, 503);
-  try {
-    // Keep-alive: how long Cloudflare keeps it open if nothing is connected (Niko's keeper closes it sooner).
-    const { sessionId: remoteId } = await cfOpen(conn, 120_000);
-    const tab = await cfTab(conn, remoteId, to?.url ?? 'about:blank');
-    const row = (await db.insert(browserSessions).values({ userId: u.id, service: 'cloudflare', remoteId, site: to?.host ?? '' }).returning({ id: browserSessions.id, startedAt: browserSessions.startedAt }))[0]!;
+  const [own, cfConn, server, hosted] = await Promise.all([
+    s.allowance.ownService ? personConn(c.env, db, u.id) : null, cfConnection(c.env, db), accountConn(c.env, db, 'server'), accountConn(c.env, db, 'hosted'),
+  ]);
+  const have: Partial<Record<BrowserServiceKind, ServiceConn | true>> = { ...(own ? { own } : {}), ...(cfConn ? { cloudflare: true } : {}), ...(server ? { server } : {}), ...(hosted ? { hosted } : {}) };
+  let outOfTime: string | null = null, busy = false;
+  for (const kind of BROWSER_SERVICE_ORDER) {
+    const svc = have[kind];
+    if (!svc) continue;
+    const minutes = await minutesFor(db, u.id, s, kind);
+    if (minutes.left !== null && minutes.left < 15) { outOfTime ??= minutes.refillAt; continue; }
+    if (kind === 'server') {
+      const n = (await db.select({ n: sql<number>`count(*)::int` }).from(browserSessions).where(and(eq(browserSessions.service, 'server'), isNull(browserSessions.endedAt))))[0]?.n ?? 0;
+      if (n >= s.defaults.atOnce) { busy = true; continue; }
+    }
     const now = Date.now();
-    await keeper(c.env, u.id, '/start', {
-      sessionId: row.id, userId: u.id, service: 'cloudflare', remoteId, startedAt: now,
-      capAt: minutes.left === null ? null : now + minutes.left * 1000, refillAt: lastRefill(new Date(now), s.defaults.refillHourUtc).getTime(), idleMs: DEVICE_GONE_MS,
-    });
-    const pass = await cfPass(conn, remoteId, tab.id, false);
-    await audit(c, 'browser.opened', { site: to?.host ?? '' }, u.id);
-    await logActivity(db, u.id, row.id, to?.host ?? '', 'opened', to ? `Opened ${siteOf(to.host)}` : 'Opened the browser');
-    return c.json({ id: row.id, targetId: tab.id, ws: pass.ws, minutes });
-  } catch (e) { return cfProblem(c, e); }
+    const start = { userId: u.id, service: kind, startedAt: now, capAt: minutes.left === null ? null : now + minutes.left * 1000, refillAt: lastRefill(new Date(now), s.defaults.refillHourUtc).getTime(), idleMs: DEVICE_GONE_MS };
+    let rowId: string | null = null;
+    try {
+      let targetId: string, ws: string;
+      if (kind === 'cloudflare') {
+        // Keep-alive: how long Cloudflare keeps it open if nothing is connected (Niko's keeper closes it sooner).
+        const { sessionId: remoteId } = await cfOpen(cfConn!, 120_000);
+        const tab = await cfTab(cfConn!, remoteId, to?.url ?? 'about:blank');
+        rowId = (await db.insert(browserSessions).values({ userId: u.id, service: kind, remoteId, site: to?.host ?? '' }).returning({ id: browserSessions.id }))[0]!.id;
+        await keeper(c.env, u.id, '/start', { ...start, sessionId: rowId, remoteId });
+        targetId = tab.id;
+        ws = (await cfPass(cfConn!, remoteId, tab.id, false)).ws;
+      } else {
+        const conn = svc as ServiceConn;
+        rowId = (await db.insert(browserSessions).values({ userId: u.id, service: kind, serviceId: conn.id, remoteId: 'relay', site: to?.host ?? '' }).returning({ id: browserSessions.id }))[0]!.id;
+        const r = await keeper<{ targetId: string }>(c.env, u.id, '/start', { ...start, sessionId: rowId, remoteId: 'relay', relay: { wsUrl: conn.wsUrl, url: to?.url ?? 'about:blank' } });
+        targetId = r.targetId;
+        ws = await relayWs(c, rowId, targetId);
+      }
+      await audit(c, 'browser.opened', { site: to?.host ?? '', service: kind }, u.id);
+      await logActivity(db, u.id, rowId, to?.host ?? '', 'opened', to ? `Opened ${siteOf(to.host)}` : 'Opened the browser');
+      return c.json({ id: rowId, targetId, ws, minutes });
+    } catch (e) {
+      if (rowId) await db.delete(browserSessions).where(eq(browserSessions.id, rowId)).catch(() => undefined);
+      if (e instanceof CfError) { if (e.code === 'busy') busy = true; if (e.code === 'limit') outOfTime ??= minutes.refillAt; console.warn(`browser service cloudflare: ${e.code} ${e.status}`); continue; }
+      if (e instanceof KeeperError || e instanceof ServiceError) { if (e instanceof KeeperError && e.data.code === 'busy') busy = true; console.warn(`browser service ${kind}: ${e.message.slice(0, 120)}`); continue; }
+      throw e;
+    }
+  }
+  if (busy) return c.json({ error: BUSY, code: 'busy' }, 503);
+  if (outOfTime) return c.json({ error: 'Today’s browser time is used up.', code: 'minutes', refillAt: outOfTime }, 429);
+  return c.json({ error: UNAVAILABLE, code: 'unavailable' }, 503);
 });
 
 /** The person's open browser with this id, or an answer saying it's gone. */
@@ -91,12 +133,28 @@ async function mine(c: Ctx) {
   return (await c.get('db').select().from(browserSessions).where(and(eq(browserSessions.id, id), eq(browserSessions.userId, c.get('user').id), isNull(browserSessions.endedAt))).limit(1))[0] ?? null;
 }
 const GONE = { error: 'This browser has closed.', code: 'ended' };
+const TARGET = /^[A-Za-z0-9]{6,64}$/;
+
+// A device connecting to one tab of a relayed browser: checked here (the person, their open browser, a fresh pass),
+// then passed to their keeper, which holds the connection to the service.
+browser.get('/:id/relay', async (c) => {
+  if (c.req.header('Upgrade') !== 'websocket') return c.json({ error: 'Expected a WebSocket.' }, 426);
+  const row = await mine(c);
+  if (!row || row.service === 'cloudflare') return c.json(GONE, 410);
+  const target = c.req.query('target') ?? '', pass = c.req.query('pass') ?? '';
+  if (!TARGET.test(target) || !(await checkRelayPass(c.env.ENCRYPTION_KEY, row.id, target, pass))) return c.json({ error: 'That pass has run out.' }, 403);
+  return keeperRelay(c.env, c.get('user').id, row.id, target, c.req.raw);
+});
 
 // A fresh pass to one tab (passes are good for starting a connection for a minute; reconnecting needs a new one).
 browser.post('/:id/pass', async (c) => {
   const row = await mine(c);
   if (!row) return c.json(GONE, 410);
   const b = await c.req.json<{ targetId?: string; readonly?: boolean }>().catch(() => ({} as { targetId?: string; readonly?: boolean }));
+  if (row.service !== 'cloudflare') {
+    if (typeof b.targetId !== 'string' || !TARGET.test(b.targetId)) return c.json({ error: 'Which tab?' }, 400);
+    return c.json({ ws: await relayWs(c, row.id, b.targetId), readonly: false });
+  }
   const conn = await cfConnection(c.env, c.get('db'));
   if (!conn) return c.json({ error: UNAVAILABLE, code: 'unavailable' }, 503);
   const target = typeof b.targetId === 'string' && /^[A-Za-z0-9]{6,64}$/.test(b.targetId) ? b.targetId : undefined;
@@ -111,6 +169,10 @@ browser.post('/:id/tab', async (c) => {
   const b = await c.req.json<{ url?: string }>().catch(() => ({} as { url?: string }));
   const to = addressFor(b.url, s);
   if (to && 'error' in to) return c.json({ error: to.error, code: 'blocked' }, 403);
+  if (row.service !== 'cloudflare') {
+    try { const r = await keeper<{ targetId: string }>(c.env, c.get('user').id, '/tab', { sessionId: row.id, url: to?.url ?? 'about:blank' }); return c.json({ targetId: r.targetId, ws: await relayWs(c, row.id, r.targetId) }); }
+    catch { return c.json({ error: UNAVAILABLE, code: 'unavailable' }, 503); }
+  }
   const conn = await cfConnection(c.env, c.get('db'));
   if (!conn) return c.json({ error: UNAVAILABLE, code: 'unavailable' }, 503);
   try {
@@ -124,6 +186,7 @@ browser.delete('/:id/tab/:target', async (c) => {
   const row = await mine(c);
   if (!row) return c.json(GONE, 410);
   const target = c.req.param('target');
+  if (row.service !== 'cloudflare') { if (TARGET.test(target)) await keeper(c.env, c.get('user').id, '/close-tab', { sessionId: row.id, targetId: target }).catch(() => undefined); return c.json({ ok: true }); }
   const conn = await cfConnection(c.env, c.get('db'));
   if (conn && /^[A-Za-z0-9]{6,64}$/.test(target)) await cfCloseTab(conn, row.remoteId, target).catch(() => undefined);
   return c.json({ ok: true });
@@ -137,7 +200,7 @@ browser.post('/:id/beat', async (c) => {
   const s = await browserState(db, u);
   // The browser was switched off for this person (by them, or for their plan) while it was open: close it.
   if (!s.allowance.on || !s.prefs.on) { await keeper(c.env, u.id, '/end', { sessionId: row.id, why: 'removed' }); return c.json({ ended: true, why: 'removed' }); }
-  const m = await minutesFor(db, u.id, s, row.service as 'cloudflare');
+  const m = await minutesFor(db, u.id, s, row.service as BrowserServiceKind);
   const r = await keeper<{ ended?: boolean; why?: string }>(c.env, u.id, '/beat', { sessionId: row.id, capAt: m.left === null ? null : Date.now() + m.left * 1000 });
   return c.json(r.ended ? { ended: true, why: r.why } : { ok: true, minutes: m });
 });
@@ -363,4 +426,37 @@ browser.post('/:id/code', async (c) => {
     }
   }
   return c.json({ code: null });
+});
+
+// ---------------------------------------------------------------- the person's own browser service (stage 5)
+// Allowed per person by the admin (off by default). Tested before it is saved; the key is sealed and never shown again.
+browser.put('/service', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  const s = await browserState(db, u);
+  if (!s.allowance.on || !s.allowance.ownService) return c.json({ error: 'Adding your own browser service isn’t included in your plan.', code: 'not_included' }, 403);
+  if (await tooMany(c, 'browser-service:' + u.id, 10, 15)) return c.json({ error: 'Too many tries. Wait 15 minutes and try again.' }, 429);
+  const b = await c.req.json<{ kind?: string; name?: string; url?: string; key?: string }>().catch(() => ({} as Record<string, string>));
+  const v = cleanServiceInput(b, false);
+  if ('error' in v) return c.json(v, 400);
+  const probe = new URL(v.url);
+  if (v.key) probe.searchParams.set(keyParamFor(v.url), v.key);
+  if (probe.protocol === 'https:') probe.protocol = 'wss:';
+  try { await testService(probe.toString()); }
+  catch (e) { return c.json({ error: e instanceof ServiceError ? `${e.message} Check the address${v.key ? ' and key' : ''}.` : 'The browser service couldn’t be tested.', field: e instanceof ServiceError && e.code === 'refused' ? 'key' : 'url' }, 400); }
+  const own = await saveService(c.env, db, u.id, v);
+  await audit(c, 'browser.service.added', { kind: v.kind, host: own.host }, u.id);
+  return c.json({ own });
+});
+browser.post('/service/test', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  const conn = await personConn(c.env, db, u.id);
+  if (!conn) return c.json({ error: 'There’s no browser service to test.' }, 404);
+  try { const product = await testService(conn.wsUrl); return c.json({ ok: true, product }); }
+  catch (e) { return c.json({ error: e instanceof ServiceError ? e.message : 'The browser service couldn’t be tested.' }, 400); }
+});
+browser.delete('/service', async (c) => {
+  const u = c.get('user'), db = c.get('db');
+  await removeService(db, u.id);
+  await audit(c, 'browser.service.removed', {}, u.id);
+  return c.json({ ok: true });
 });
