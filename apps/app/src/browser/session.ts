@@ -10,7 +10,7 @@ export interface BrowserTab { targetId: string; title: string; url: string }
 export interface BrowserMinutes { used: number; cap: number; left: number | null; refillAt: string }
 /** When Niko needs the person: a hand-off (their part), an OK before an action, or a question. */
 export type BrowserNeed =
-  | { kind: 'handoff'; handoff: HandoffKind; ref?: number; say: string }
+  | { kind: 'handoff'; handoff: HandoffKind; ref?: number; say: string; site: string; rect?: { x: number; y: number; w: number; h: number } }
   | { kind: 'gate'; gate: Gate; action: BrowserAction; say: string }
   | { kind: 'ask'; say: string };
 export interface BrowserView {
@@ -166,7 +166,8 @@ export class BrowserSession {
     cdp.on((e) => this.event(cdp, e.method, e.params));
     await cdp.send('Page.enable');
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: SAME_TAB }).catch(() => undefined);
-    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Request' }] }).catch(() => undefined);
+    // Page loads are checked before they are sent, and files the page sends back as downloads come to this device.
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Request' }, { urlPattern: '*', resourceType: 'Document', requestStage: 'Response' }] }).catch(() => undefined);
     await this.applySize(cdp);
     this.reconnects = 0;
     this.set({ phase: 'live', active: targetId });
@@ -205,12 +206,41 @@ export class BrowserSession {
 
   /** Every page load is checked before it is sent: public http(s) sites only, never one the admin blocked. */
   private async guard(cdp: Cdp, p: any) {
+    if (p.responseStatusCode !== undefined || p.responseErrorReason !== undefined) { await this.maybeDownload(cdp, p); return; }
     const url = String(p.request?.url ?? '');
     const host = url === 'about:blank' ? 'about' : openableHost(url);
     const ok = url === 'about:blank' || (!!host && !hostBlocked(host, this.blocked));
     if (ok) { await cdp.send('Fetch.continueRequest', { requestId: p.requestId }).catch(() => undefined); return; }
     await cdp.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' }).catch(() => undefined);
     this.say(host ? 'Niko can’t open this site.' : 'That isn’t a website Niko can open.');
+  }
+
+  /** A page's answer that is a file (a download): it comes straight to this device, never through Niko's server. */
+  private async maybeDownload(cdp: Cdp, p: any) {
+    const headers: { name: string; value: string }[] = p.responseHeaders ?? [];
+    const h = (n: string) => headers.find((x) => x.name.toLowerCase() === n)?.value ?? '';
+    const disp = h('content-disposition'), type = h('content-type').toLowerCase();
+    const isFile = /attachment/i.test(disp) || /^application\/(octet-stream|zip|x-zip|pdf|vnd\.|msword|x-msdownload)/.test(type) && !/html/.test(type);
+    if (!isFile || p.responseStatusCode >= 300) { await cdp.send('Fetch.continueResponse', { requestId: p.requestId }).catch(() => cdp.send('Fetch.continueRequest', { requestId: p.requestId }).catch(() => undefined)); return; }
+    const size = Number(h('content-length')) || 0;
+    const url = String(p.request?.url ?? '');
+    const name = (/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disp)?.[1] ?? decodeURIComponent(url.split('?')[0]!.split('/').pop() || 'download')).replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'download';
+    if (size > 25 * 1024 * 1024) { await cdp.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'Aborted' }).catch(() => undefined); this.say('That file is too big to download here.'); return; }
+    try {
+      const r = await cdp.send<{ body: string; base64Encoded: boolean }>('Fetch.getResponseBody', { requestId: p.requestId }, undefined, 60_000);
+      await cdp.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'Aborted' }).catch(() => undefined);
+      const bytes = r.base64Encoded ? Uint8Array.from(atob(r.body), (ch) => ch.charCodeAt(0)) : new TextEncoder().encode(r.body);
+      const href = URL.createObjectURL(new Blob([bytes], { type: type || 'application/octet-stream' }));
+      const a = document.createElement('a');
+      a.href = href; a.download = name; a.rel = 'noopener';
+      document.body.appendChild(a); a.click(); a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(href), 60_000);
+      this.say(`Downloaded ${name} to this device.`);
+      if (this.v.id) void api(`/browser/${this.v.id}/download`, { body: { name, site: openableHost(url) ?? '' } }).catch(() => undefined);
+    } catch {
+      await cdp.send('Fetch.continueResponse', { requestId: p.requestId }).catch(() => undefined);
+      this.say('That file couldn’t be downloaded here.');
+    }
   }
 
   private async refreshPlace(cdp: Cdp) {

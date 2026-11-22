@@ -230,3 +230,26 @@ await ok('the AI’s answer is read even when wrapped in words or a code block; 
 await ok('the page scripts parse', () => {
   for (const src of [OUTLINE_JS, pointOf(3), focusOf(3), chooseIn(3, 'Monthly "plan"')]) new Function(`return ${src};`);
 });
+
+// ---- Stage 3: the person's OK, once; filled password fields
+const { signOk, checkOk } = await import('../apps/api/src/browser.ts');
+await ok('an OK covers exactly one action on one browser, for two minutes', async () => {
+  const secret = 'k'.repeat(44), sid = '11111111-2222-3333-4444-555555555555', action = { do: 'click', ref: 4 };
+  const t = await signOk(secret, sid, action, 'account');
+  const good = await checkOk(secret, sid, t, action, 'account');
+  assert.ok(good && good.nonce.length >= 8);
+  assert.equal(await checkOk(secret, sid, t, { do: 'click', ref: 5 }, 'account'), null, 'another action');
+  assert.equal(await checkOk(secret, sid, t, action, 'terms'), null, 'another kind');
+  assert.equal(await checkOk(secret, '11111111-2222-3333-4444-555555555556', t, action, 'account'), null, 'another browser');
+  assert.equal(await checkOk('x'.repeat(44), sid, t, action, 'account'), null, 'another key');
+  assert.equal(await checkOk(secret, sid, t, action, 'account', Date.now() + 121_000), null, 'run out');
+  assert.equal(await checkOk(secret, sid, 'nonsense', action, 'account'), null);
+  const [exp, nonce, mac] = t.split('.');
+  assert.equal(await checkOk(secret, sid, `${Number(exp) + 60000}.${nonce}.${mac}`, action, 'account'), null, 'stretched');
+});
+await ok('a password field the person filled in is done: clicking past it is fine, typing into it is still theirs', () => {
+  const p = cleanOutline({ url: 'https://pebbleandpeak.com/join', title: '', elements: [{ ref: 2, kind: 'input', type: 'password', name: 'Password', password: true, filled: true }], text: '', frames: {} });
+  assert.match(outlineText(p), /filled in by the user/);
+  assert.equal(judgeAction(p, { do: 'click', ref: 2 }, ctx).handoff, null);
+  assert.equal(judgeAction(p, { do: 'type', ref: 2, text: 'x' }, ctx).handoff.kind, 'password');
+});

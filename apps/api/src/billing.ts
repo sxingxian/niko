@@ -11,6 +11,7 @@ import { esc, sendEmail } from './lib/email';
 import { applyDesignSession, applyPro } from './designs';
 import { applyBackgroundSession } from './backgrounds';
 import { idOf, invoiceSubscription, isMode, keysFor, periodEnd, planOf, stripe, StripeError, stripeReady, type StripeEnv, type StripeMode, type StripeSecrets } from './stripe';
+import { trimActivity } from './browser';
 
 export const PAYMENTS_KEY = 'payments';
 let cache: { at: number; v: PaymentSettings } | null = null;
@@ -291,6 +292,8 @@ export async function daily(env: Env, db: Db): Promise<void> {
     await db.delete(users).where(and(inArray(users.id, stale.map((x) => x.id)), eq(users.status, 'off')));
     await logAudit(db, null, 'signup.removed_unpaid', { count: stale.length });
   }
+  // "What Niko did" in the browser, kept only as long as each person chose.
+  await trimActivity(db).catch((e) => console.warn(`browser activity trim failed: ${String((e as Error)?.message ?? e).slice(0, 120)}`));
   const s = await paymentSettings(db, true);
   if (!s.remind) return;
   const soon = await db.select().from(users).where(and(
